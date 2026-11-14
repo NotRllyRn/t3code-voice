@@ -41,6 +41,7 @@ export function createLazyVoiceRecorder<TStatus, TRecorderState>(input: {
   ) => NativeVoiceRecorder<TStatus, TRecorderState>;
   readonly onStatus: (status: TStatus) => void;
   readonly selectInput?: (inputs: ReadonlyArray<VoiceRecordingInput>) => VoiceRecordingInput | null;
+  readonly prepareOwned?: (prepare: () => Promise<void>) => Promise<void>;
 }): LazyVoiceRecorder<TRecorderState> {
   let recorder: NativeVoiceRecorder<TStatus, TRecorderState> | null = null;
   let destination: RecordingDestination | null = null;
@@ -87,7 +88,10 @@ export function createLazyVoiceRecorder<TStatus, TRecorderState>(input: {
       }
       const prepared = recorder;
       return track(
-        prepared.prepareToRecordAsync().then(async () => {
+        (input.prepareOwned
+          ? input.prepareOwned(() => prepared.prepareToRecordAsync())
+          : prepared.prepareToRecordAsync()
+        ).then(async () => {
           if (signal) throwIfVoiceTranscriptionAborted(signal);
           if (!input.selectInput) return;
           let selected: VoiceRecordingInput | null;

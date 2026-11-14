@@ -19,6 +19,8 @@ interface NativeEvents {
 
 export interface NativeModule {
   connect(url: string, protocols: ReadonlyArray<string>): number;
+  connectVoice?(url: string): number;
+  pendingBytes?(id: number): number;
   sendText(id: number, text: string): void;
   sendBinary(id: number, bytes: Uint8Array): void;
   close(id: number, code: number, reason: string): void;
@@ -47,14 +49,28 @@ export class Connection implements Socket.WebSocketLike {
   readonly #sockets: Sockets;
   readonly #listeners = new Map<EventType, Array<Listener>>();
 
-  constructor(sockets: Sockets, url: string, protocols?: string | ReadonlyArray<string>) {
+  constructor(
+    sockets: Sockets,
+    url: string,
+    protocols?: string | ReadonlyArray<string>,
+    voice = false,
+  ) {
     this.url = url;
     this.#sockets = sockets;
-    this.#id = sockets.native.connect(
-      url,
-      protocols === undefined ? [] : typeof protocols === "string" ? [protocols] : protocols,
-    );
+    if (voice && (!sockets.native.connectVoice || !sockets.native.pendingBytes)) {
+      throw new Error("Rebuild the iOS client to use voice");
+    }
+    this.#id = voice
+      ? sockets.native.connectVoice!(url)
+      : sockets.native.connect(
+          url,
+          protocols === undefined ? [] : typeof protocols === "string" ? [protocols] : protocols,
+        );
     sockets.register(this.#id, this);
+  }
+
+  get bufferedAmount(): number {
+    return this.#sockets.native.pendingBytes?.(this.#id) ?? 0;
   }
 
   addEventListener(
@@ -187,6 +203,14 @@ function layerFromModule(native: NativeModule): Layer.Layer<Socket.WebSocketCons
 }
 
 const native = requireOptionalNativeModule<NativeModule>("T3WebSocket");
+
+let voiceSockets: Sockets | undefined;
+export const voiceSocketAvailable = !!native?.connectVoice && !!native.pendingBytes;
+export function createVoiceSocket(url: string): Connection {
+  if (!native || !voiceSocketAvailable) throw new Error("Rebuild the iOS client to use voice");
+  voiceSockets ??= new Sockets(native);
+  return new Connection(voiceSockets, url, undefined, true);
+}
 
 // A dev client built before this module shipped still has SocketRocket.
 export const layer: Layer.Layer<Socket.WebSocketConstructor> =

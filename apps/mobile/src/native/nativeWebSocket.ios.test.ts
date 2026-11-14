@@ -32,6 +32,33 @@ function setup() {
 }
 
 describe("NativeWebSocket", () => {
+  it("opts voice into native limits and reads current pending bytes instead of caching them", () => {
+    const { native, sockets } = setup();
+    let pending = 0;
+    const voiceNative = Object.assign(native, {
+      connectVoice: vi.fn(() => 42),
+      pendingBytes: vi.fn(() => pending),
+    });
+    const voice = new NativeWebSocket.Connection(sockets, "ws://host/voice", undefined, true);
+    expect(voiceNative.connectVoice).toHaveBeenCalledWith("ws://host/voice");
+    expect(native.connect).toHaveBeenCalledTimes(1); // Only the RPC setup connection.
+    pending = 64 * 1024;
+    expect(voice.bufferedAmount).toBe(64 * 1024);
+    pending = 0; // URLSession send completion, not an optimistic JS decrement.
+    expect(voice.bufferedAmount).toBe(0);
+    sockets.dispose();
+  });
+
+  it("does not fall back to an unaccounted socket in an older dev client", () => {
+    const { sockets } = setup();
+    expect(
+      () => new NativeWebSocket.Connection(sockets, "ws://host/voice", undefined, true),
+    ).toThrow(/Rebuild/);
+    expect(NativeWebSocket.voiceSocketAvailable).toBe(false);
+    expect(() => NativeWebSocket.createVoiceSocket("ws://host/voice")).toThrow(/Rebuild/);
+    sockets.dispose();
+  });
+
   it("opens, then delivers text and binary frames as string and ArrayBuffer", () => {
     const { native, emit, socket, events, id } = setup();
     expect(native.connect).toHaveBeenCalledWith("ws://host/ws", ["t3"]);

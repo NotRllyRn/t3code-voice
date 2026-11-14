@@ -1,5 +1,6 @@
 import ExpoModulesCore
 import Foundation
+import UIKit
 
 private final class Connection {
   let id: Int
@@ -7,9 +8,12 @@ private final class Connection {
   var finished = false
   var requestedCloseCode: Int?
   var failure: String?
+  var pendingBytes = 0
+  let voice: Bool
 
-  init(id: Int) {
+  init(id: Int, voice: Bool) {
     self.id = id
+    self.voice = voice
   }
 }
 
@@ -21,6 +25,7 @@ public final class T3WebSocketModule: Module {
   private var nextId = 1
   private let lock = NSLock()
   private var session: URLSession?
+  private var backgroundObserver: NSObjectProtocol?
   private let delegateQueue: OperationQueue = {
     let queue = OperationQueue()
     queue.maxConcurrentOperationCount = 1
@@ -32,39 +37,21 @@ public final class T3WebSocketModule: Module {
     Events("open", "message", "close", "error")
 
     Function("connect") { (url: URL, protocols: [String]) -> Int in
-      let connection = self.withLock { () -> Connection in
-        let connection = Connection(id: self.nextId)
-        self.nextId += 1
-        self.connections[connection.id] = connection
-        return connection
-      }
-      let session = self.session ?? self.makeSession()
-      self.session = session
-      let task = protocols.isEmpty
-        ? session.webSocketTask(with: url)
-        : session.webSocketTask(with: url, protocols: protocols)
-      // The app splits frames at 48 KiB, but older servers and the outdated-host probe send whole
-      // messages, so stay well above URLSession's 1 MiB default.
-      task.maximumMessageSize = 128 * 1024 * 1024
-      self.withLock { connection.task = task }
-      task.resume()
-      self.receive(on: connection, task: task)
-      return connection.id
+      self.connect(url: url, protocols: protocols, voice: false)
     }
 
-    Function("sendText") { (id: Int, text: String) in
-      guard let connection = self.connection(id), let task = connection.task else { return }
-      task.send(.string(text)) { [weak self] error in
-        if let error { self?.fail(connection, task: task, error: error) }
-      }
+    Function("connectVoice") { (url: URL) -> Int in
+      self.connect(url: url, protocols: [], voice: true)
     }
-
-    Function("sendBinary") { (id: Int, bytes: Uint8Array) in
-      guard let connection = self.connection(id), let task = connection.task else { return }
+    Function("pendingBytes") { (id: Int) -> Int in
+      self.withLock { self.connections[id]?.pendingBytes ?? 0 }
+    }
+    Function("sendText") { (id: Int, text: String) throws in
+      try self.send(id: id, message: .string(text), bytes: text.utf8.count)
+    }
+    Function("sendBinary") { (id: Int, bytes: Uint8Array) throws in
       let data = Data(bytes: bytes.rawPointer, count: bytes.byteLength)
-      task.send(.data(data)) { [weak self] error in
-        if let error { self?.fail(connection, task: task, error: error) }
-      }
+      try self.send(id: id, message: .data(data), bytes: data.count)
     }
 
     Function("close") { (id: Int, code: Int, reason: String) in
@@ -78,8 +65,53 @@ public final class T3WebSocketModule: Module {
       task?.cancel(with: closeCode, reason: reason.isEmpty ? nil : reason.data(using: .utf8))
     }
 
+    OnCreate {
+      self.backgroundObserver = NotificationCenter.default.addObserver(
+        forName: UIApplication.willResignActiveNotification, object: nil, queue: nil
+      ) { [weak self] _ in
+        guard let self else { return }
+        let tasks = self.withLock { self.connections.values.filter { $0.voice }.compactMap { $0.task } }
+        for task in tasks { task.cancel(with: .goingAway, reason: nil) }
+      }
+    }
     OnDestroy {
+      if let observer = self.backgroundObserver { NotificationCenter.default.removeObserver(observer) }
       self.session?.invalidateAndCancel()
+    }
+  }
+
+  private func connect(url: URL, protocols: [String], voice: Bool) -> Int {
+    let connection = withLock { () -> Connection in
+      let connection = Connection(id: nextId, voice: voice)
+      nextId += 1
+      connections[connection.id] = connection
+      return connection
+    }
+    let session = self.session ?? makeSession()
+    self.session = session
+    let task = protocols.isEmpty ? session.webSocketTask(with: url) : session.webSocketTask(with: url, protocols: protocols)
+    // Voice opts into a small receive bound. RPC snapshots keep their existing 128 MiB limit.
+    task.maximumMessageSize = voice ? 128 * 1024 : 128 * 1024 * 1024
+    withLock { connection.task = task }
+    task.resume()
+    receive(on: connection, task: task)
+    return connection.id
+  }
+
+  private func send(id: Int, message: URLSessionWebSocketTask.Message, bytes: Int) throws {
+    let reserved = try withLock { () throws -> (Connection, URLSessionWebSocketTask)? in
+      guard let connection = connections[id], !connection.finished, let task = connection.task else { return nil }
+      guard !connection.voice || bytes <= 64 * 1024 - connection.pendingBytes else {
+        throw NSError(domain: "T3WebSocket", code: 1, userInfo: [NSLocalizedDescriptionKey: "Voice connection is stalled"])
+      }
+      connection.pendingBytes += bytes
+      return (connection, task)
+    }
+    guard let (connection, task) = reserved else { return }
+    task.send(message) { [weak self] error in
+      guard let self else { return }
+      self.withLock { connection.pendingBytes = max(0, connection.pendingBytes - bytes) }
+      if let error { self.fail(connection, task: task, error: error) }
     }
   }
 
@@ -98,10 +130,10 @@ public final class T3WebSocketModule: Module {
     withLock { connections.values.first { $0.task === task } }
   }
 
-  private func withLock<T>(_ body: () -> T) -> T {
+  private func withLock<T>(_ body: () throws -> T) rethrows -> T {
     lock.lock()
     defer { lock.unlock() }
-    return body()
+    return try body()
   }
 
   private func receive(on connection: Connection, task: URLSessionWebSocketTask) {
