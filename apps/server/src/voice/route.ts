@@ -6,10 +6,13 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Config from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
@@ -33,6 +36,43 @@ export const RealtimeVoiceCredentialProvider = Context.Reference<ConfigProvider.
   { defaultValue: () => ConfigProvider.fromEnv({ preserveEmptyStrings: true }) },
 );
 
+const readKeyFile = Effect.fn("voice.readKeyFile")(
+  function* (filePath: string) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const platform = yield* HostProcess.Platform;
+    const userId = yield* HostProcess.UserId;
+    if (!path.isAbsolute(filePath) || /[\x00-\x1f\x7f]/.test(filePath))
+      return yield* new VoiceRelayError();
+    const suitable = (info: FileSystem.File.Info) =>
+      info.type === "File" &&
+      info.size > 0n &&
+      info.size <= 4096n &&
+      (platform === "win32" ||
+        (((info.mode & 0o7777) === 0o400 || (info.mode & 0o7777) === 0o600) &&
+          Option.getOrUndefined(info.uid) === userId));
+    // Check before open to reject devices/FIFOs, then check the opened regular file too.
+    if (!suitable(yield* fs.stat(filePath))) return yield* new VoiceRelayError();
+    const file = yield* fs.open(filePath, { flag: "r" });
+    if (!suitable(yield* file.stat)) return yield* new VoiceRelayError();
+    const bytes = new Uint8Array(4097);
+    let length = 0;
+    while (length < bytes.length) {
+      const count = yield* file.read(bytes.subarray(length));
+      if (count === 0) break;
+      length += count;
+    }
+    if (length === 0 || length > 4096) return yield* new VoiceRelayError();
+    return Redacted.make(
+      new TextDecoder("utf-8", { ignoreBOM: true })
+        .decode(bytes.subarray(0, length))
+        .replace(/\r?\n$/, ""),
+    );
+  },
+  Effect.scoped,
+  Effect.mapError(() => new VoiceRelayError()),
+);
+
 // Config and secret references are server-owned. The browser cannot choose an upstream URL or key.
 export const readRealtimeVoiceConfig = Effect.gen(function* () {
   const rawUrl = yield* Config.String("T3CODE_REALTIME_URL");
@@ -41,24 +81,26 @@ export const readRealtimeVoiceConfig = Effect.gen(function* () {
     catch: () => new VoiceRelayError(),
   });
   const credentialProvider = yield* RealtimeVoiceCredentialProvider;
-  const environmentKey = yield* Config.Redacted("T3CODE_REALTIME_API_KEY")
+  const obsoleteKey = yield* Config.Redacted("T3CODE_REALTIME_API_KEY")
+    .pipe(Config.option)
+    .parse(credentialProvider);
+  if (Option.isSome(obsoleteKey)) return yield* new VoiceRelayError();
+  const keyFile = yield* Config.String("T3CODE_REALTIME_API_KEY_FILE")
     .pipe(Config.option)
     .parse(credentialProvider);
   const reference = yield* Config.String("T3CODE_REALTIME_SECRET_REF")
     .pipe(Config.option)
     .parse(credentialProvider);
-  if (Option.isSome(environmentKey) === Option.isSome(reference))
-    return yield* new VoiceRelayError();
-  const key = Option.isSome(environmentKey)
-    ? environmentKey.value
+  if (Option.isSome(keyFile) === Option.isSome(reference)) return yield* new VoiceRelayError();
+  const key = Option.isSome(keyFile)
+    ? yield* readKeyFile(keyFile.value)
     : Redacted.make(
         yield* requireSettingsSecret(
           yield* SecretResolver.SecretResolver,
           yield* decodeReference(Option.getOrThrow(reference)),
         ),
       );
-  if (!Redacted.value(key).trim() || /[\r\n]/.test(Redacted.value(key)))
-    return yield* new VoiceRelayError();
+  if (!/^[\x21-\x7e]+$/.test(Redacted.value(key))) return yield* new VoiceRelayError();
   const voice = yield* Config.String("T3CODE_REALTIME_VOICE").pipe(Config.withDefault("alloy"));
   const transcription = yield* Config.String("T3CODE_REALTIME_TRANSCRIPTION_MODEL").pipe(
     Config.withDefault("whisper-1"),

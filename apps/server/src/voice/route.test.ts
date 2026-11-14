@@ -1,3 +1,4 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it as test } from "@effect/vitest";
 import {
   AuthOrchestrationOperateScope,
@@ -9,6 +10,9 @@ import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import { HttpRouter } from "effect/http";
@@ -24,6 +28,7 @@ import {
 
 const configuration = (env: Record<string, string>) =>
   Layer.mergeAll(
+    NodeServices.layer,
     ConfigProvider.layer(ConfigProvider.fromEnv({ env })),
     Layer.succeed(
       RealtimeVoiceCredentialProvider,
@@ -60,34 +65,96 @@ test.effect("executes actual Effect 4 configuration, secret-reference decoding a
   }),
 );
 
-test.effect(
-  "reads a dedicated redacted server environment credential without a secret provider",
-  () =>
-    Effect.gen(function* () {
-      const value = yield* readRealtimeVoiceConfig.pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            secrets,
-            configuration({
-              T3CODE_REALTIME_URL: config.T3CODE_REALTIME_URL,
-              T3CODE_REALTIME_API_KEY: "fictional-env-only-key",
-              T3CODE_REALTIME_VOICE: "",
-              T3CODE_REALTIME_TRANSCRIPTION_MODEL: "",
-            }),
-          ),
+test.effect("reads a bounded redacted server key file without a secret provider", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const directory = yield* fs.makeTempDirectoryScoped();
+    const file = path.join(directory, "voice-key");
+    yield* fs.writeFileString(file, "fictional-file-only-key\r\n", { mode: 0o600 });
+    const value = yield* readRealtimeVoiceConfig.pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          secrets,
+          configuration({
+            T3CODE_REALTIME_URL: config.T3CODE_REALTIME_URL,
+            T3CODE_REALTIME_API_KEY_FILE: file,
+            T3CODE_REALTIME_VOICE: "",
+            T3CODE_REALTIME_TRANSCRIPTION_MODEL: "",
+          }),
         ),
+      ),
+    );
+    expect(Redacted.value(value.key)).toBe("fictional-file-only-key");
+    expect(JSON.stringify(value)).not.toContain("fictional-file-only-key");
+    expect(value.voice).toBe("alloy");
+    expect(value.transcription).toBe("whisper-1");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+test.effect.each(["stat", "open", "read"])(
+  "sanitizes file %s failures without retaining a cause",
+  (stage) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped();
+      const file = path.join(directory, "fictional-private-path");
+      yield* fs.writeFileString(file, "fictional-key", { mode: 0o600 });
+      const failure = Effect.fail(
+        PlatformError.systemError({
+          _tag: "PermissionDenied",
+          module: "FileSystem",
+          method: stage,
+          pathOrDescriptor: file,
+          description: "fictional-key must not appear in errors",
+        }),
       );
-      expect(Redacted.value(value.key)).toBe("fictional-env-only-key");
-      expect(JSON.stringify(value)).not.toContain("fictional-env-only-key");
-      expect(value.voice).toBe("alloy");
-      expect(value.transcription).toBe("whisper-1");
-    }),
+      const error = yield* readRealtimeVoiceConfig.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          stat: stage === "stat" ? () => failure : fs.stat,
+          open: (name, options) =>
+            stage === "open"
+              ? failure
+              : fs
+                  .open(name, options)
+                  .pipe(
+                    Effect.map((handle) =>
+                      stage === "read"
+                        ? { ...handle, stat: handle.stat, read: () => failure }
+                        : handle,
+                    ),
+                  ),
+        }),
+        Effect.provide(
+          configuration({
+            T3CODE_REALTIME_URL: config.T3CODE_REALTIME_URL,
+            T3CODE_REALTIME_API_KEY_FILE: file,
+          }),
+        ),
+        Effect.flip,
+      );
+      expect(JSON.stringify(error)).toBe('{"_tag":"VoiceRelayError"}');
+      expect(String(error)).not.toContain("fictional");
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, secrets))),
 );
 
 const invalidConfigs = [
   {},
   { T3CODE_REALTIME_URL: config.T3CODE_REALTIME_URL },
+  {
+    T3CODE_REALTIME_URL: config.T3CODE_REALTIME_URL,
+    T3CODE_REALTIME_API_KEY: "fictional-obsolete-key",
+  },
   { ...config, T3CODE_REALTIME_URL: "https://invalid.example" },
+  ...["", "/fictional/key"].flatMap((file) =>
+    [config.T3CODE_REALTIME_SECRET_REF, ""].map((ref) => ({
+      ...config,
+      T3CODE_REALTIME_API_KEY_FILE: file,
+      T3CODE_REALTIME_SECRET_REF: ref,
+    })),
+  ),
   { ...config, T3CODE_REALTIME_API_KEY: "fictional-ambiguous-key" },
   { ...config, T3CODE_REALTIME_API_KEY: " " },
   { ...config, T3CODE_REALTIME_API_KEY: "" },
@@ -124,13 +191,20 @@ test.effect.each(invalidConfigs)("sanitizes configuration failures %#", (variabl
           configuration(variables),
         ),
       ),
+      Effect.provideService(
+        FileSystem.FileSystem,
+        FileSystem.FileSystem.of({
+          ...(yield* FileSystem.FileSystem),
+          stat: () => Effect.die("Invalid source selection must not access a file"),
+        }),
+      ),
       Effect.flip,
     );
     expect(secretReads).toBe(0);
     expect(error._tag).toBe("VoiceRelayError");
     expect(JSON.stringify(error)).toBe('{"_tag":"VoiceRelayError"}');
     expect(String(error)).not.toContain("fictional");
-  }),
+  }).pipe(Effect.provide(NodeServices.layer)),
 );
 
 test.live.each(invalidConfigs)(
@@ -163,7 +237,7 @@ test.live.each(invalidConfigs)(
             }),
           ),
           Layer.provideMerge(secrets),
-          Layer.provide(configuration(variables)),
+          Layer.provideMerge(configuration(variables)),
         ),
         { disableLogger: true },
       );
