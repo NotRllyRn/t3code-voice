@@ -54,6 +54,8 @@ import {
   environmentSessionGenerationAtom,
   scheduleAtomCommandEffect,
   executeAtomQuery,
+  isAtomCommandInterrupted,
+  runAtomCommand,
   type QueryAnswerHandler,
 } from "./runtime.ts";
 
@@ -1276,6 +1278,44 @@ describe("runtime command runner", () => {
     expect(events).toEqual(["first:start", "first:end", "second:start"]);
     registry.dispose();
   });
+
+  it.effect(
+    "cancels local command preparation before dispatch without blocking the next command",
+    () => {
+      const controller = new AbortController();
+      return Effect.gen(function* () {
+        const preparing = Latch.makeUnsafe();
+        const release = Latch.makeUnsafe();
+        const events: string[] = [];
+        const scheduler = createAtomCommandScheduler();
+        const runtime = Atom.runtime(Layer.empty);
+        const command = createRuntimeCommand(runtime, {
+          label: "test.cancel-preparation",
+          scheduler,
+          concurrency: { mode: "serial", key: () => "shared" },
+          execute: (input: string) =>
+            Effect.gen(function* () {
+              if (input === "cancelled") {
+                preparing.openUnsafe();
+                yield* release.await;
+              }
+              events.push(input);
+            }),
+        });
+        const registry = AtomRegistry.make();
+        using _registry = { [Symbol.dispose]: () => registry.dispose() };
+        const cancelled = runAtomCommand(registry, command, "cancelled", {
+          signal: controller.signal,
+        });
+        yield* preparing.await;
+        controller.abort();
+        expect(isAtomCommandInterrupted(yield* Effect.promise(() => cancelled))).toBe(true);
+        release.openUnsafe();
+        yield* Effect.promise(() => command.run(registry, "live"));
+        expect(events).toEqual(["live"]);
+      });
+    },
+  );
 
   it.effect("releases a shared scheduler lane before the outer command finishes", () =>
     Effect.gen(function* () {

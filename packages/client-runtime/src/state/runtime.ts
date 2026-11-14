@@ -145,9 +145,18 @@ export interface AtomCommandReporter {
   readonly error: (message: string, cause: Cause.Cause<unknown>) => void;
 }
 
+export interface AtomCommandExecutionOptions {
+  /** Revokes local execution; it does not retract work already accepted by a server. */
+  readonly signal?: AbortSignal;
+}
+
 export interface AtomCommand<W, A, E> {
   readonly label: string;
-  readonly run: (registry: AtomRegistry.AtomRegistry, input: W) => Promise<AtomCommandResult<A, E>>;
+  readonly run: (
+    registry: AtomRegistry.AtomRegistry,
+    input: W,
+    options?: AtomCommandExecutionOptions,
+  ) => Promise<AtomCommandResult<A, E>>;
 }
 
 export type AtomCommandConcurrency<W> =
@@ -339,10 +348,14 @@ export async function runAtomCommand<W, A, E>(
   registry: AtomRegistry.AtomRegistry,
   command: AtomCommand<W, A, E>,
   input: W,
-  options: AtomCommandOptions = {},
+  options: AtomCommandOptions & AtomCommandExecutionOptions = {},
   reporter: AtomCommandReporter = console,
 ): Promise<AtomCommandResult<A, E>> {
-  const result = await settleAtomCommandResult(() => command.run(registry, input));
+  const result = await settleAtomCommandResult(() =>
+    options.signal === undefined
+      ? command.run(registry, input)
+      : command.run(registry, input, { signal: options.signal }),
+  );
   reportAtomCommandResult(result, { ...options, label: options.label ?? command.label }, reporter);
   return result;
 }
@@ -438,13 +451,32 @@ export function createRuntimeCommand<R, ER, W, A, E>(
   const concurrency = options.concurrency ?? { mode: "parallel" as const };
   return {
     label: options.label,
-    run: (registry, input) =>
+    run: (registry, input, execution) =>
       settleAtomCommandResult(() =>
         scheduler.schedule(registry, concurrency, input, () => {
+          // A command can lose its owner while waiting behind another command in the lane.
+          if (execution?.signal?.aborted) {
+            return Promise.resolve(AsyncResult.failure(Cause.interrupt()));
+          }
+          const signal = execution?.signal;
+          const effect = options.execute(input, registry);
+          // Cancelling only the query waiter leaves the atom's preparation effect alive on its idle TTL.
+          const cancelled =
+            signal === undefined
+              ? Effect.never
+              : Effect.callback<never>((resume) => {
+                  const abort = () => resume(Effect.interrupt);
+                  if (signal.aborted) return abort();
+                  signal.addEventListener("abort", abort, { once: true });
+                  return Effect.sync(() => signal.removeEventListener("abort", abort));
+                });
           const atom = runtime
-            .atom(options.execute(input, registry))
+            .atom(signal === undefined ? effect : Effect.raceFirst(cancelled, effect))
             .pipe(Atom.withLabel(options.label));
-          return executeAtomQuery(registry, atom, { reportDefect: false, reportFailure: false });
+          return executeAtomQuery(registry, atom, {
+            reportDefect: false,
+            reportFailure: false,
+          });
         }),
       ),
   };
