@@ -6,6 +6,8 @@ private final class Connection {
   let id: Int
   var task: URLSessionWebSocketTask?
   var finished = false
+  let audioStopLock = NSRecursiveLock()
+  var audioStopped = false
   var requestedCloseCode: Int?
   var failure: String?
   var pendingBytes = 0
@@ -66,6 +68,7 @@ public final class T3WebSocketModule: Module {
         connection.requestedCloseCode = closeCode.rawValue
         return connection.task
       }
+      self.stopVoiceAudio(connection)
       task?.cancel(with: closeCode, reason: reason.isEmpty ? nil : reason.data(using: .utf8))
     }
 
@@ -74,12 +77,17 @@ public final class T3WebSocketModule: Module {
         forName: UIApplication.willResignActiveNotification, object: nil, queue: nil
       ) { [weak self] _ in
         guard let self else { return }
-        let tasks = self.withLock { self.connections.values.filter { $0.voice }.compactMap { $0.task } }
-        for task in tasks { task.cancel(with: .goingAway, reason: nil) }
+        let voices = self.withLock { self.connections.values.filter { $0.voice } }
+        for connection in voices {
+          self.stopVoiceAudio(connection)
+          connection.task?.cancel(with: .goingAway, reason: nil)
+        }
       }
     }
     OnDestroy {
       if let observer = self.backgroundObserver { NotificationCenter.default.removeObserver(observer) }
+      let voices = self.withLock { self.connections.values.filter { $0.voice } }
+      for connection in voices { self.stopVoiceAudio(connection) }
       self.session?.invalidateAndCancel()
     }
   }
@@ -109,16 +117,19 @@ public final class T3WebSocketModule: Module {
   }
 
   private func send(id: Int, message: URLSessionWebSocketTask.Message, bytes: Int) throws {
-    let reserved = try withLock { () throws -> (Connection, URLSessionWebSocketTask)? in
+    let reserved = withLock { () -> (Connection, URLSessionWebSocketTask, Bool)? in
       guard let connection = connections[id], !connection.finished, connection.requestedCloseCode == nil,
             connection.failure == nil, let task = connection.task else { return nil }
-      guard !connection.voice || bytes <= 64 * 1024 - connection.pendingBytes else {
-        throw NSError(domain: "T3WebSocket", code: 1, userInfo: [NSLocalizedDescriptionKey: "Voice connection is stalled"])
-      }
-      connection.pendingBytes += bytes
-      return (connection, task)
+      let stalled = connection.voice && bytes > 64 * 1024 - connection.pendingBytes
+      if !stalled { connection.pendingBytes += bytes }
+      return (connection, task, stalled)
     }
-    guard let (connection, task) = reserved else { return }
+    guard let (connection, task, stalled) = reserved else { return }
+    if stalled {
+      let error = NSError(domain: "T3WebSocket", code: 1, userInfo: [NSLocalizedDescriptionKey: "Voice connection is stalled"])
+      fail(connection, task: task, error: error)
+      throw error
+    }
     task.send(message) { [weak self] error in
       guard let self else { return }
       self.withLock { connection.pendingBytes = max(0, connection.pendingBytes - bytes) }
@@ -190,10 +201,7 @@ public final class T3WebSocketModule: Module {
       return true
     }
     guard live else { return }
-    if connection.voice {
-      // Stop hardware even when JS cannot yet receive the error/close events.
-      NotificationCenter.default.post(name: Notification.Name("T3VoiceConnectionFailed"), object: nil, userInfo: ["id": connection.id])
-    }
+    stopVoiceAudio(connection)
     if task.state == .running { task.cancel() }
   }
 
@@ -210,6 +218,7 @@ public final class T3WebSocketModule: Module {
   fileprivate func didComplete(task: URLSessionTask, error: Error?) {
     guard let connection = connection(for: task) else { return }
     let (requested, failure) = withLock { (connection.requestedCloseCode, connection.failure) }
+    stopVoiceAudio(connection)
     if requested == nil, let message = failure ?? error?.localizedDescription {
       sendEvent("error", ["id": connection.id, "message": message])
     }
@@ -218,7 +227,18 @@ public final class T3WebSocketModule: Module {
     finish(connection, code: requested ?? (error == nil && failure == nil ? 1005 : 1006), reason: "", clean: requested != nil)
   }
 
+  private func stopVoiceAudio(_ connection: Connection) {
+    guard connection.voice else { return }
+    connection.audioStopLock.lock()
+    defer { connection.audioStopLock.unlock() }
+    guard !connection.audioStopped else { return }
+    connection.audioStopped = true
+    // Serialize native shutdown too, not just its flag. Never call observers under the socket lock.
+    NotificationCenter.default.post(name: Notification.Name("T3VoiceConnectionFailed"), object: nil, userInfo: ["id": connection.id])
+  }
+
   private func finish(_ connection: Connection, code: Int, reason: String, clean: Bool) {
+    stopVoiceAudio(connection)
     let first = withLock { () -> Bool in
       if connection.finished { return false }
       connection.finished = true
