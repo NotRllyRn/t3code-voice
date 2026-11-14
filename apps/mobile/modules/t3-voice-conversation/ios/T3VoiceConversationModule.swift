@@ -128,7 +128,7 @@ private final class VoiceAudioSession {
     let center = NotificationCenter.default
     for name in [UIApplication.didEnterBackgroundNotification, UIApplication.willResignActiveNotification,
                  AVAudioSession.interruptionNotification, AVAudioSession.routeChangeNotification,
-                 AVAudioSession.mediaServicesWereResetNotification, AVAudioEngine.configurationChangeNotification] {
+                 AVAudioSession.mediaServicesWereResetNotification, Notification.Name.AVAudioEngineConfigurationChange] {
       observers.append(center.addObserver(forName: name, object: nil, queue: nil) { [weak self] _ in
         self?.lostAudio()
       })
