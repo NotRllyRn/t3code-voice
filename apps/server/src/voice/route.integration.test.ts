@@ -1,5 +1,9 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- starts the real Node upgrade boundary with the production ws subclass.
 import * as NodeHttp from "node:http";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- probes actual inherited Node environments without launching a provider.
+import * as NodeChildProcess from "node:child_process";
+import * as NodeUtil from "node:util";
+import * as NodeOS from "node:os";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -16,6 +20,8 @@ import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretReso
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Redacted from "effect/Redacted";
@@ -33,7 +39,15 @@ import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.
 import { realtimeVoiceRouteLayer, RealtimeVoiceCredentialProvider } from "./route.ts";
 import { VoiceWebSocket } from "./transport.ts";
 
-const key = "fictional-server-env-credential";
+const key = "fictional-server-file-credential";
+const keyFile = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const directory = yield* fs.makeTempDirectoryScoped();
+  const file = path.join(directory, "credential");
+  yield* fs.writeFileString(file, `${key}\n`, { mode: 0o600 });
+  return { fs, path, directory, file };
+});
 const threadId = ThreadId.make("voice-integration");
 const authLayer = EnvironmentAuth.layer.pipe(
   Layer.provide(ManagedPolicy.layerTest()),
@@ -92,6 +106,7 @@ const startRoute = Effect.fn("voice.test.startRoute")(function* (
           Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
         ),
       ),
+      Layer.provide(NodeServices.layer),
       Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: variables }))),
       Layer.provide(
         Layer.succeed(
@@ -146,13 +161,14 @@ const upstreamFixture = Effect.acquireRelease(
 );
 
 test.live(
-  "starts the real authenticated route and keeps the env key only in the upstream header",
+  "starts the real authenticated route and keeps the file key only in the upstream header",
   () =>
     Effect.gen(function* () {
       const upstream = yield* upstreamFixture;
+      const { file } = yield* keyFile;
       const route = yield* startRoute({
         T3CODE_REALTIME_URL: upstream.url,
-        T3CODE_REALTIME_API_KEY: key,
+        T3CODE_REALTIME_API_KEY_FILE: file,
         UNRELATED_ENV_KEY: "fictional-unrelated-key",
       });
       const client = yield* HttpClient.HttpClient.pipe(Effect.provide(FetchHttpClient.layer));
@@ -212,12 +228,21 @@ test.live(
       downstream.close();
       yield* Effect.promise(() => closed);
       expect(JSON.stringify(route.logs)).not.toContain(key);
-    }),
+    }).pipe(Effect.provide(NodeServices.layer)),
 );
 
 test.live.each([
   {},
   { T3CODE_REALTIME_API_KEY: " " },
+  { T3CODE_REALTIME_API_KEY: key },
+  { T3CODE_REALTIME_API_KEY: "" },
+  { T3CODE_REALTIME_API_KEY: "", T3CODE_REALTIME_API_KEY_FILE: "/fictional/key" },
+  { T3CODE_REALTIME_API_KEY_FILE: "", T3CODE_REALTIME_SECRET_REF: "" },
+  {
+    T3CODE_REALTIME_API_KEY_FILE: "",
+    T3CODE_REALTIME_SECRET_REF: '{"provider":"absent","reference":"fixture/key"}',
+  },
+  { T3CODE_REALTIME_API_KEY_FILE: "/fictional/key", T3CODE_REALTIME_SECRET_REF: "" },
   {
     T3CODE_REALTIME_API_KEY: "",
     T3CODE_REALTIME_SECRET_REF: '{"provider":"absent","reference":"fixture/key"}',
@@ -245,4 +270,111 @@ test.live.each([
       if ("T3CODE_REALTIME_API_KEY" in variables) expect(route.secretReads()).toBe(0);
       expect(JSON.stringify(route.logs)).not.toContain("fictional");
     }),
+);
+
+const invalidFiles = [
+  "empty path",
+  "relative path",
+  "control path",
+  "missing",
+  "directory",
+  "empty",
+  "blank",
+  "oversized",
+  "interior LF",
+  "interior CR",
+  "NUL",
+  "tab",
+  "non-ASCII",
+  "BOM",
+  "extra newline",
+  "ambiguous empty reference",
+  "obsolete empty raw key",
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- Collection selects real-host POSIX cases before Effect tests run.
+  ...(NodeOS.platform() === "win32" ? [] : ["public permissions", "unreadable permissions"]),
+];
+
+test.live.each(invalidFiles)("denies unsafe key file over actual authenticated HTTP: %s", (kind) =>
+  Effect.gen(function* () {
+    const upstream = yield* upstreamFixture;
+    const { fs, path, directory, file } = yield* keyFile;
+    const contents: Record<string, string> = {
+      empty: "",
+      blank: "  \n",
+      oversized: key.repeat(4096),
+      "interior LF": `${key}\nInjected: header`,
+      "interior CR": `${key}\rInjected: header`,
+      NUL: `${key}\0`,
+      tab: `${key}\t`,
+      "non-ASCII": `${key}\u00ff`,
+      BOM: `\ufeff${key}`,
+      "extra newline": `${key}\n\n`,
+    };
+    if (kind in contents) yield* fs.writeFileString(file, contents[kind]!);
+    if (kind === "public permissions") yield* fs.chmod(file, 0o644);
+    if (kind === "unreadable permissions") yield* fs.chmod(file, 0o000);
+    const paths: Record<string, string> = {
+      "empty path": "",
+      "relative path": "fictional-relative-key",
+      "control path": `${file}\0`,
+      missing: path.join(directory, "missing-fictional-key"),
+      directory,
+    };
+    const route = yield* startRoute({
+      T3CODE_REALTIME_URL: upstream.url,
+      T3CODE_REALTIME_API_KEY_FILE: paths[kind] ?? file,
+      ...(kind === "ambiguous empty reference" ? { T3CODE_REALTIME_SECRET_REF: "" } : {}),
+      ...(kind === "obsolete empty raw key" ? { T3CODE_REALTIME_API_KEY: "" } : {}),
+    });
+    const client = yield* HttpClient.HttpClient.pipe(Effect.provide(FetchHttpClient.layer));
+    const response = yield* client.get(route.url, {
+      headers: { authorization: `Bearer ${route.session.token}` },
+    });
+    expect(response.status).toBe(503);
+    expect(yield* response.text).toBe("");
+    expect(upstream.requests).toEqual([]);
+    expect(route.secretReads()).toBe(0);
+    expect(JSON.stringify(route.logs)).not.toContain(key);
+    expect(JSON.stringify(route.logs)).not.toContain(file);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+test.live("file-only server startup does not propagate the resolved value to a Node child", () =>
+  Effect.gen(function* () {
+    const { file } = yield* keyFile;
+    // The outer Node process starts with file-only config; its child inherits env without a filter.
+    const script = `
+      import * as Effect from 'effect/Effect';
+      import * as NodeServices from '@effect/platform-node/NodeServices';
+      import { execFileSync } from 'node:child_process';
+      import { readRealtimeVoiceConfig } from ${JSON.stringify(new URL("./route.ts", import.meta.url).href)};
+      const config = await Effect.runPromise(readRealtimeVoiceConfig.pipe(Effect.provide(NodeServices.layer)));
+      const child = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', ${JSON.stringify(`
+        console.log(JSON.stringify({
+          hasPath: Boolean(process.env.T3CODE_REALTIME_API_KEY_FILE),
+          hasRawSetting: Object.hasOwn(process.env, 'T3CODE_REALTIME_API_KEY'),
+          hasRawValue: Object.values(process.env).some(value => value.includes(${JSON.stringify(key)}))
+        }));
+      `)}], { encoding: 'utf8' }));
+      console.log(JSON.stringify({ child, redacted: !JSON.stringify(config).includes(${JSON.stringify(key)}) }));
+    `;
+    const result = yield* Effect.promise(() =>
+      NodeUtil.promisify(NodeChildProcess.execFile)(
+        process.execPath,
+        ["--input-type=module", "-e", script],
+        {
+          env: {
+            ...process.env,
+            T3CODE_REALTIME_URL: "wss://voice.example.invalid/realtime?model=fixture",
+            T3CODE_REALTIME_API_KEY_FILE: file,
+          },
+        },
+      ),
+    );
+    expect(JSON.parse(result.stdout)).toEqual({
+      child: { hasPath: true, hasRawSetting: false, hasRawValue: false },
+      redacted: true,
+    });
+    expect(result.stderr).not.toContain(key);
+  }).pipe(Effect.provide(NodeServices.layer)),
 );

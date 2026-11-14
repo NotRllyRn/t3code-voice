@@ -19,45 +19,56 @@ Configure the environment's server, not the browser:
   its model query parameter. For example,
   `wss://realtime.example/v1/realtime?model=example-realtime`.
 - Configure exactly one server-side credential source:
-  - `T3CODE_REALTIME_API_KEY`: the upstream API key, supplied directly in the server
-    process environment. No external secret manager or `op` CLI is required.
+  - `T3CODE_REALTIME_API_KEY_FILE`: absolute path to a small UTF-8 file containing
+    only the upstream API key, optionally followed by one LF or CRLF newline.
+    No external secret manager or `op` CLI is required.
   - `T3CODE_REALTIME_SECRET_REF`: JSON secret reference resolved by the existing
     configured secret-provider service. For example,
     `{"provider":"team-secrets","reference":"op://Example/Realtime/key"}`.
     Replace both fields with an existing configured provider/reference.
 - `T3CODE_REALTIME_VOICE`: optional voice name; defaults to `alloy`.
-- `T3CODE_REALTIME_TRANSCRIPTION_MODEL`: defaults to `whisper-1`; set to an empty
-  string to disable input transcription if unsupported. Manual reviewed text can
-  still be queued.
+- `T3CODE_REALTIME_TRANSCRIPTION_MODEL`: defaults to `whisper-1`. An unset or
+  empty environment value uses that default; empty does not disable transcription.
+  Use an endpoint that supports the configured transcription model.
 
-For an interactive Bash launch, enter the key without putting it in shell history
-or command-line arguments, then start the server normally from that shell:
+Create the key file outside the repository in a private directory. On Linux and
+macOS it must be a regular file owned by the server's OS user with mode `0600`
+(or read-only `0400`). The server checks the resolved target, so a symlink to a
+suitable file is allowed. Keep its parent directories trusted and do not replace
+the file while it is being read. On Windows the server checks regular-file type
+and size but not POSIX ownership/mode bits: restrict access with Windows ACLs to
+the server user and administrators before launching. Do not use a shared folder.
+Files larger than 4096 bytes, empty keys, spaces, non-ASCII bytes, and control
+characters inside the key are rejected.
+
+Set the path, not the key, in the launch environment, then start the server
+normally. These fictional paths assume you have already provisioned the file:
 
 ```bash
 export T3CODE_REALTIME_URL='wss://realtime.example/v1/realtime?model=example-realtime'
-unset T3CODE_REALTIME_SECRET_REF
-read -r -s -p 'Realtime API key: ' T3CODE_REALTIME_API_KEY
-printf '\n'
-export T3CODE_REALTIME_API_KEY
+unset T3CODE_REALTIME_API_KEY T3CODE_REALTIME_SECRET_REF
+export T3CODE_REALTIME_API_KEY_FILE='/private/server-secrets/realtime-key'
 ```
 
-For a managed server, set the same variables in its protected service environment
-and restart the server. Keep credentials out of tracked files, browser settings,
-URLs, CLI arguments, and chat. **The raw environment-key option is blocked on
-credential-isolation review: unrelated providers, tools, and child processes can
-inherit it.** Do not use it for a live test. Use the existing secret-reference
-option until that boundary is fixed and independently reviewed. Environment
-variables also remain accessible to the server process owner and administrators.
-The browser cannot choose another environment variable to read.
+For a managed server, set the same variables in its service environment and
+restart it. Remove the obsolete `T3CODE_REALTIME_API_KEY` from every launch source;
+its presence, **even empty**, disables voice with a sanitized failure. This does
+not remove an existing raw key from the process environment or prevent its
+inheritance by unrelated children. Never launch with it set.
 
-There is no precedence or fallback between sources: if both variables are set
+There is no precedence or fallback: if both file and reference variables are set
 (even if one is empty), or neither is set, voice Start fails with an empty `503`
-response. Empty, whitespace-only, or newline-bearing keys also fail closed.
-Secret-reference resolution failures do not fall back to environment credentials.
-Credentials are redacted in server configuration values and never returned to the
-browser; the voice relay sends the resolved key only in the upstream Bearer
-header. This does not isolate the raw environment-key option from other server
-code or child processes.
+response before either source is read. File errors and secret-reference resolution
+failures also fail closed. Restart after changing launch configuration.
+
+Keep credentials out of tracked files, browser settings, URLs, CLI arguments, and
+chat. The server reads and redacts file contents only for voice, never exports
+those contents into the environment, and sends the key only in the upstream Bearer
+header, not to the browser or logs. The path can be inherited by providers and
+other child processes; a process with the same OS user's access can deliberately
+read the file. This prevents automatic raw-value propagation through environments;
+it is not a provider sandbox or protection from the server owner/administrators.
+The browser cannot select a file path, environment name, or credential source.
 
 The endpoint must use `wss:`; plain `ws:` is allowed only on loopback. The relay
 adds a server-side Bearer header. There is no account-token extraction, direct
