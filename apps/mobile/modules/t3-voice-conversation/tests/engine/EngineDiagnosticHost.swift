@@ -17,6 +17,21 @@ private struct ProbeBlock {
   var tone1320: Double = 0
 }
 
+// Both the paired player clock and request must be within one measured quantum + IO buffer
+// of the latest tone interval. More than 200 ms of freshness uncertainty is not resolvable.
+private func toneFreshness(signal: Double, begin: Double, end: Double, playerTime: Double?,
+                           requestTime: Double, quantum: Double, ioDuration: Double,
+                           rate: Double, continuous: Bool) -> String {
+  guard signal.isFinite, signal > 0.015 else { return "FAIL" }
+  guard continuous, let playerTime,
+        [begin, end, playerTime, requestTime, quantum, ioDuration, rate].allSatisfy({ $0.isFinite }),
+        rate > 0, quantum > 0, ioDuration >= 0, end > begin else { return "UNVERIFIED" }
+  let tolerance = quantum + ioDuration + 2 / rate
+  guard tolerance <= 0.2, end - begin <= quantum + 2 / rate else { return "UNVERIFIED" }
+  return [playerTime, requestTime].allSatisfy { $0 >= begin - tolerance && $0 <= end + tolerance }
+    ? "PASS" : "UNVERIFIED"
+}
+
 private final class OutputProbe {
   static let capacity = 2048
   let rate: Double
@@ -143,7 +158,8 @@ private extension VoiceAudioSession {
 
   func removeOutputProbe() { engine.mainMixerNode.removeTap(onBus: 0) }
 
-  func diagnosticInterrupt(quantum: Double) throws -> (EngineSnapshot, EngineSnapshot, [String: Any], UInt64, UInt64, Int64) {
+  func diagnosticInterrupt(quantum: Double, validateTone: (EngineSnapshot, UInt64) throws -> Void) throws
+    -> (EngineSnapshot, EngineSnapshot, [String: Any], UInt64, UInt64, Int64) {
     lock.lock()
     defer { lock.unlock() }
     let before = diagnosticSnapshot()
@@ -151,6 +167,7 @@ private extension VoiceAudioSession {
       throw voiceError("Missing actual player clock bracket")
     }
     let request = mach_absolute_time()
+    try validateTone(before, request)
     let position = silence()
     let returned = mach_absolute_time()
     let after = diagnosticSnapshot()
@@ -180,8 +197,6 @@ private final class EngineScenario: NSObject {
   private var failures: [[String: Any]] = []
   private var previousFrame: Int64?
   private var advances = 0
-  private var firstTone = false
-  private var secondTone = false
   private var interruptBefore: UInt64 = 0
   private var interruptAfter: UInt64 = 0
   private var latencySeconds = 0.0
@@ -197,6 +212,7 @@ private final class EngineScenario: NSObject {
       self?.finish(error: "Watchdog: missing audio/render milestone")
     }
     do {
+      try checkToneFreshnessRegression()
       try open(id: "first")
       guard let owner else { throw voiceError("Missing owner") }
       owner.allow(epoch: 1)
@@ -253,13 +269,53 @@ private final class EngineScenario: NSObject {
 
   private func seconds(_ host: UInt64) -> Double { AVAudioTime.seconds(forHostTime: host) }
 
+  private func checkToneFreshnessRegression() throws {
+    func status(_ signal: Double = 0.04, begin: Double = 9.98, end: Double = 9.99,
+                player: Double? = 9.99, request: Double = 10, quantum: Double = 0.01,
+                continuous: Bool = true) -> String {
+      toneFreshness(signal: signal, begin: begin, end: end, playerTime: player,
+        requestTime: request, quantum: quantum, ioDuration: 0.01, rate: 24000, continuous: continuous)
+    }
+    try require(status() == "PASS"
+      && status(begin: 9.49, end: 9.50) == "UNVERIFIED" // Historical tone, live player clock.
+      && status(0) == "FAIL" // Earlier positive block cannot replace the latest silent block.
+      && status(player: 9.5) == "UNVERIFIED"
+      && status(player: nil) == "UNVERIFIED"
+      && status(request: 10.5) == "UNVERIFIED"
+      && status(begin: 10.5, end: 10.51) == "UNVERIFIED"
+      && status(quantum: 0.25) == "UNVERIFIED"
+      && status(continuous: false) == "UNVERIFIED", "tone_freshness_regression")
+  }
+
+  private func requireFreshTone(_ snapshot: EngineSnapshot, request: UInt64, frequency: Int, gate: String) throws {
+    guard let block = previousBlock, let probe else {
+      gates[gate] = "FAIL"
+      throw voiceError("Missing actual tone interval: \(gate)")
+    }
+    let begin = seconds(block.host), end = begin + Double(block.frames) / probe.rate
+    let signal = frequency == 440 ? block.tone440 : block.tone880
+    let ioDuration = snapshot.json["ioBufferDuration"] as? Double ?? .nan
+    let status = toneFreshness(signal: signal, begin: begin, end: end,
+      playerTime: snapshot.playerHost.map { seconds($0) }, requestTime: seconds(request),
+      quantum: maxQuantum, ioDuration: ioDuration, rate: probe.rate, continuous: timingResolvable && block.valid)
+    let tolerance = maxQuantum + ioDuration + 2 / probe.rate
+    gates[gate] = status
+    evidence[gate] = ["frequencyHz": frequency, "amplitude": signal, "threshold": 0.015,
+      "blockHost": block.host, "sampleStart": block.sample, "sampleEnd": block.sample + Int64(block.frames),
+      "beginSeconds": begin, "endSeconds": end, "rate": probe.rate,
+      "playerHost": snapshot.playerHost.map { $0 as Any } ?? NSNull(), "requestHost": request,
+      "maxQuantumSeconds": maxQuantum, "ioBufferDuration": ioDuration.isFinite ? ioDuration as Any : NSNull(),
+      "freshnessToleranceSeconds": tolerance.isFinite ? tolerance as Any : NSNull(),
+      "continuousTime": timingResolvable, "status": status]
+    guard status == "PASS" else { throw voiceError("\(gate): \(status)") }
+  }
+
   @objc private func drain() {
     guard !terminal, let probe, let owner else { return }
     do {
       try require(!probe.overflow.load(ordering: .acquiring), "bounded_probe")
       let count = probe.published.load(ordering: .acquiring)
       guard count > cursor else { return } // Display cadence alone never advances a scenario.
-      var tone440 = false, tone880 = false, tone1320 = false
       while cursor < count {
         let b = probe.blocks[cursor]; cursor += 1
         try require(b.valid, "valid_probe_time_and_format")
@@ -276,9 +332,6 @@ private final class EngineScenario: NSObject {
         }
         previousBlock = b
         if (stage == "first" || stage == "flush"), b.tone440 > 0.005 { lastOldEnd = max(lastOldEnd, end) }
-        tone440 = tone440 || b.tone440 > 0.015
-        tone880 = tone880 || b.tone880 > 0.015
-        tone1320 = tone1320 || b.tone1320 > 0.015
         if stage == "flush" {
           if b.tone440 > 0.005 { lastOldEnd = max(lastOldEnd, end) }
           // Exclude blocks straddling the synchronous stop/reset call.
@@ -303,11 +356,9 @@ private final class EngineScenario: NSObject {
       }
       switch stage {
       case "first":
-        firstTone = firstTone || tone440
-        if firstTone, advances >= 2, let frame = s.rendered,
-           frame - s.latency > 28000, frame < 44000 {
-          try require(true, "actual_first_tone_and_advancing_player")
+        if advances >= 2, let frame = s.rendered, frame - s.latency > 28000, frame < 44000 {
           try interrupt(owner, first: true)
+          try require(true, "actual_first_tone_and_advancing_player")
         }
       case "flush":
         if let silentStart, silentEnd - silentStart >= 0.2 {
@@ -328,16 +379,16 @@ private final class EngineScenario: NSObject {
           try require(next.ledger.segments.count == 1 && next.ledger.segments[0].item == "second", "new_epoch_only")
         }
       case "second":
-        secondTone = secondTone || tone880
-        if secondTone, advances >= 2, let frame = s.rendered, frame - s.latency > 6000, frame < 30000 {
-          try require(true, "actual_second_tone_and_advancing_player")
+        if advances >= 2, let frame = s.rendered, frame - s.latency > 6000, frame < 30000 {
           try interrupt(owner, first: false)
+          try require(true, "actual_second_tone_and_advancing_player")
           owner.allow(epoch: 5)
           try owner.enqueue(epoch: 5, item: "stop", index: 0, pcm: tone(880, frames: 24000))
           stage = "stop"; previousFrame = nil; advances = 0
         }
       case "stop":
-        if tone880, advances >= 1, let frame = s.rendered, frame > s.latency + 2400 {
+        if advances >= 1, let frame = s.rendered, frame > s.latency + 2400 {
+          try requireFreshTone(s, request: mach_absolute_time(), frequency: 880, gate: "fresh_stop_tone")
           try require(s.json["playerPlaying"] as? Bool == true, "stop_during_actual_playback")
           owner.close(deactivate: false)
           try require(owner.diagnosticSnapshot().clean, "native_stop_resources")
@@ -352,7 +403,8 @@ private final class EngineScenario: NSObject {
           DispatchQueue.main.async { [weak self] in self?.afterRelease() }
         }
       case "background":
-        if tone440, advances >= 1, let frame = s.rendered, frame > s.latency + 2400 {
+        if advances >= 1, let frame = s.rendered, frame > s.latency + 2400 {
+          try requireFreshTone(s, request: mach_absolute_time(), frequency: 440, gate: "fresh_background_tone")
           stage = "background-delivery"
           NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
           try require(owner.diagnosticSnapshot().clean, "notification_deactivate_true_resources")
@@ -364,7 +416,10 @@ private final class EngineScenario: NSObject {
   }
 
   private func interrupt(_ owner: VoiceAudioSession, first: Bool) throws {
-    let (before, after, position, request, returned, upperFrame) = try owner.diagnosticInterrupt(quantum: maxQuantum)
+    let (before, after, position, request, returned, upperFrame) = try owner.diagnosticInterrupt(quantum: maxQuantum) { before, request in
+      try self.requireFreshTone(before, request: request, frequency: first ? 440 : 880,
+        gate: first ? "fresh_first_interrupt_tone" : "fresh_second_interrupt_tone")
+    }
     interruptBefore = request; interruptAfter = returned
     guard let lowerFrame = before.rendered else { throw voiceError("Missing production rendered position") }
     let low = before.ledger.position(rendered: lowerFrame, latencyFrames: max(before.latency, after.latency))
@@ -382,6 +437,7 @@ private final class EngineScenario: NSObject {
     evidence[first ? "firstInterrupt" : "secondInterrupt"] = ["before": before.json, "after": after.json,
       "position": position, "lowerMs": lo, "upperMs": hi, "upperFrame": upperFrame,
       "upperFrameModel": "paired real player host/sample clock through return plus measured mixer quantum",
+      "toneEvidenceGate": first ? "fresh_first_interrupt_tone" : "fresh_second_interrupt_tone",
       "requestHost": interruptBefore, "returnHost": interruptAfter]
     if first {
       latencySeconds = Double(max(before.latency, after.latency)) / 24000
@@ -435,7 +491,9 @@ private final class EngineScenario: NSObject {
     if let error { gates["terminal"] = "FAIL"; evidence["error"] = error }
     else { gates["terminal"] = "PASS" }
     gates["no_capture_events"] = captureEvents == 0 ? "PASS" : "FAIL"
-    let required = ["contiguous_chunks", "output_only_first", "output_only_background", "bounded_probe",
+    let required = ["tone_freshness_regression", "fresh_first_interrupt_tone", "fresh_second_interrupt_tone",
+      "fresh_stop_tone", "fresh_background_tone",
+      "contiguous_chunks", "output_only_first", "output_only_background", "bounded_probe",
       "valid_probe_time_and_format", "no_capture", "actual_first_tone_and_advancing_player", "cumulative_chunk_position",
       "silence_call_200ms", "silence_reset", "late_epoch_and_without_allow_rejected", "rejected_marker_absent",
       "flush_engine_bound_200ms", "continuing_silent_output_200ms", "new_epoch_only", "no_old_marker_second_turn",
