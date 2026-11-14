@@ -9,16 +9,19 @@ public typealias ModuleDefinition = [AnyDefinition]
 @resultBuilder public enum ModuleDefinitionBuilder {
   public static func buildBlock(_ values: AnyDefinition...) -> ModuleDefinition { values }
 }
-open class Module {
+public protocol AnyModule: AnyObject {
+  @ModuleDefinitionBuilder func definition() -> ModuleDefinition
+}
+open class BaseModule {
   public var events: [(String, [String: Any])] = []
   public var beforeEvent: ((String) -> Void)?
   public init() {}
-  @ModuleDefinitionBuilder open func definition() -> ModuleDefinition { Name("stub") }
   public func sendEvent(_ name: String, _ body: [String: Any]) {
     beforeEvent?(name)
     events.append((name, body))
   }
 }
+public typealias Module = AnyModule & BaseModule
 public func Name(_ name: String) -> AnyDefinition { AnyDefinition("name", name) }
 public func Events(_ names: String...) -> AnyDefinition { AnyDefinition("events", names) }
 public func Function<T>(_ name: String, _ body: T) -> AnyDefinition { AnyDefinition(name, body) }
