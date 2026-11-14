@@ -107,7 +107,10 @@ r, root = map(pathlib.Path, sys.argv[1:3]); bundle, runtime, device, sdk, arch =
 plist = {'CFBundleIdentifier': bundle, 'CFBundleName': 'T3VoiceEngineDiagnostic',
  'CFBundleExecutable': 'T3VoiceEngineDiagnostic', 'CFBundlePackageType': 'APPL',
  'CFBundleVersion': '1', 'CFBundleShortVersionString': '1.0', 'MinimumOSVersion': '18.0',
- 'LSRequiresIPhoneOS': True, 'UIDeviceFamily': [1], 'UILaunchScreen': {}}
+ 'LSRequiresIPhoneOS': True, 'UIDeviceFamily': [1], 'UILaunchScreen': {},
+ 'UIApplicationSceneManifest': {'UIApplicationSupportsMultipleScenes': False,
+  'UISceneConfigurations': {'UIWindowSceneSessionRoleApplication': [
+   {'UISceneConfigurationName': 'EngineDiagnostic', 'UISceneDelegateClassName': 'EngineDiagnosticScene'}]}}}
 app = r/'build/T3VoiceEngineDiagnostic.app'
 (app/'Info.plist').write_bytes(plistlib.dumps(plist))
 changed = subprocess.check_output(['git', '-C', str(root), 'diff', '--name-only', 'HEAD', '-z']).split(b'\0')

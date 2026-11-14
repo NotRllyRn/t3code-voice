@@ -530,17 +530,30 @@ private final class EngineScenario: NSObject {
 
 @main
 private final class EngineDiagnosticApp: UIResponder, UIApplicationDelegate {
-  var window: UIWindow?
   private var scenario: EngineScenario?
-  func application(_ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-    let window = UIWindow(frame: UIScreen.main.bounds)
-    window.rootViewController = UIViewController()
-    window.makeKeyAndVisible()
-    self.window = window
-    return true
-  }
-  func applicationDidBecomeActive(_ application: UIApplication) {
+
+  func startScenario() {
     guard scenario == nil else { return }
     let run = EngineScenario(); scenario = run; run.start()
+  }
+}
+
+// Stable runtime name for the runner-generated scene manifest (no Swift module prefix).
+@objc(EngineDiagnosticScene)
+private final class EngineDiagnosticScene: UIResponder, UIWindowSceneDelegate {
+  var window: UIWindow?
+
+  func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
+    guard let windowScene = scene as? UIWindowScene else { return }
+    let window = UIWindow(windowScene: windowScene)
+    window.rootViewController = UIViewController()
+    self.window = window
+    window.makeKeyAndVisible()
+  }
+
+  func sceneDidBecomeActive(_ scene: UIScene) {
+    guard scene.activationState == .foregroundActive, window?.windowScene === scene,
+          let app = UIApplication.shared.delegate as? EngineDiagnosticApp else { return }
+    app.startScenario()
   }
 }
