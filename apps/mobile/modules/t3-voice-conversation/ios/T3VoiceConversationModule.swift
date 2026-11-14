@@ -1,7 +1,14 @@
 import AVFoundation
+#if !T3_VOICE_ENGINE_DIAGNOSTIC
 import ExpoModulesCore
+#endif
 import UIKit
 
+#if T3_VOICE_ENGINE_DIAGNOSTIC && !targetEnvironment(simulator)
+#error("T3_VOICE_ENGINE_DIAGNOSTIC is Simulator-only")
+#endif
+
+#if !T3_VOICE_ENGINE_DIAGNOSTIC
 public final class T3VoiceConversationModule: Module {
   private let stateLock = NSRecursiveLock()
   private var current: VoiceAudioSession?
@@ -69,6 +76,7 @@ public final class T3VoiceConversationModule: Module {
     return try body(current)
   }
 }
+#endif
 
 private final class VoiceAudioSession {
   let id: String
@@ -105,11 +113,16 @@ private final class VoiceAudioSession {
     defer { lock.unlock() }
     guard UIApplication.shared.applicationState == .active else { throw voiceError("Voice requires foreground") }
     let session = AVAudioSession.sharedInstance()
+#if T3_VOICE_ENGINE_DIAGNOSTIC
+    try session.setCategory(.playback, mode: .default, options: [])
+#else
     try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
+#endif
     try session.setPreferredSampleRate(24_000)
     try session.setPreferredIOBufferDuration(0.01)
     try session.setActive(true)
     engine.attach(player)
+#if !T3_VOICE_ENGINE_DIAGNOSTIC
     try engine.inputNode.setVoiceProcessingEnabled(true)
     let hardware = engine.inputNode.outputFormat(forBus: 0)
     guard hardware.sampleRate > 0, hardware.channelCount > 0,
@@ -118,11 +131,14 @@ private final class VoiceAudioSession {
     }
     inputFormat = hardware
     self.converter = converter
+#endif
     engine.connect(player, to: engine.mainMixerNode, format: playback)
+#if !T3_VOICE_ENGINE_DIAGNOSTIC
     engine.inputNode.installTap(onBus: 0, bufferSize: 2048, format: hardware) { [weak self] buffer, _ in
       self?.receive(buffer)
     }
     tapped = true
+#endif
     engine.prepare()
     try engine.start()
     let center = NotificationCenter.default
@@ -351,7 +367,9 @@ private final class VoiceAudioSession {
     _ = silence()
     for observer in observers { NotificationCenter.default.removeObserver(observer) }
     observers = []
+#if !T3_VOICE_ENGINE_DIAGNOSTIC
     if tapped { engine.inputNode.removeTap(onBus: 0); tapped = false }
+#endif
     engine.stop()
     conversion.sync { converter = nil }
     inputLock.lock()
