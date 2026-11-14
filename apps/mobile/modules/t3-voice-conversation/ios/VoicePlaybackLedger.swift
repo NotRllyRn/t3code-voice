@@ -10,7 +10,8 @@ struct VoicePlaybackLedger {
   }
 
   static let rate: Double = 24_000
-  static let limit: Int64 = 192_000
+  // 3 s scheduled + (128 KiB bridge + 128 KiB receive) * 3/4 / 2 = 170,304 < 192,000 samples.
+  static let limit: Int64 = 72_000
   private(set) var segments: [Segment] = []
   private(set) var end: Int64 = 0
   private var offsets: [String: Int64] = [:]

@@ -20,10 +20,10 @@ try ledger.append(item: "b", index: 1, frames: 24_000, start: 48_000, audible: 2
 assert(ledger.position(rendered: 60_000, latencyFrames: 2400)?["itemId"] as? String == "b")
 assert(milliseconds(ledger.position(rendered: 60_000, latencyFrames: 2400)) == 400)
 var bounded = VoicePlaybackLedger()
-try bounded.append(item: "full", index: 0, frames: 192_000, start: 0, audible: 0)
+try bounded.append(item: "full", index: 0, frames: 72_000, start: 0, audible: 0)
 do {
-  try bounded.append(item: "overflow", index: 0, frames: 1, start: 192_000, audible: 0)
-  assertionFailure("Unrendered output exceeded eight seconds")
+  try bounded.append(item: "overflow", index: 0, frames: 1, start: 72_000, audible: 0)
+  assertionFailure("Scheduled audio consumed the reserved ingress budget")
 } catch {}
 ledger = VoicePlaybackLedger()
 assert(ledger.position(rendered: nil, latencyFrames: 0) == nil)

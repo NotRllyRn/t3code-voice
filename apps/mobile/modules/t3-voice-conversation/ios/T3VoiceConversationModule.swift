@@ -84,6 +84,7 @@ private final class VoiceAudioSession {
   private var inputFormat: AVAudioFormat?
   private var tapped = false
   private var closed = false
+  private var connectionId: Int?
   private var observers: [NSObjectProtocol] = []
   private var captureEpoch = 0
   private var accepting = false
@@ -132,8 +133,24 @@ private final class VoiceAudioSession {
         self?.lostAudio()
       })
     }
+    for name in ["T3VoiceConnectionOpened", "T3VoiceConnectionFailed"] {
+      observers.append(center.addObserver(forName: Notification.Name(name), object: nil, queue: nil) { [weak self] event in
+        self?.connectionChanged(event)
+      })
+    }
     guard UIApplication.shared.applicationState == .active, engine.isRunning, !closed else {
       throw voiceError("Audio changed during activation")
+    }
+  }
+
+  private func connectionChanged(_ event: Notification) {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !closed, let id = event.userInfo?["id"] as? Int else { return }
+    if event.name == Notification.Name("T3VoiceConnectionOpened") {
+      if connectionId == nil { connectionId = id }
+    } else if connectionId == id {
+      lostAudio()
     }
   }
 
