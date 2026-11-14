@@ -7,6 +7,8 @@ import {
 } from "@t3tools/contracts";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as Config from "effect/Config";
+import * as ConfigProvider from "effect/ConfigProvider";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -25,6 +27,12 @@ import { encodeVoiceFrame, relayVoiceSockets, VoiceRelayError } from "./relay.ts
 const decodeReference = Schema.decodeUnknownEffect(Schema.fromJsonString(SecretReference));
 const decodeThreadId = Schema.decodeUnknownEffect(ThreadId);
 
+// Only credential selection preserves empty values; other server config keeps its normal semantics.
+export const RealtimeVoiceCredentialProvider = Context.Reference<ConfigProvider.ConfigProvider>(
+  "t3/voice/RealtimeVoiceCredentialProvider",
+  { defaultValue: () => ConfigProvider.fromEnv({ preserveEmptyStrings: true }) },
+);
+
 // Config and secret references are server-owned. The browser cannot choose an upstream URL or key.
 export const readRealtimeVoiceConfig = Effect.gen(function* () {
   const rawUrl = yield* Config.String("T3CODE_REALTIME_URL");
@@ -32,8 +40,13 @@ export const readRealtimeVoiceConfig = Effect.gen(function* () {
     try: () => upstreamUrl(rawUrl),
     catch: () => new VoiceRelayError(),
   });
-  const environmentKey = yield* Config.Redacted("T3CODE_REALTIME_API_KEY").pipe(Config.option);
-  const reference = yield* Config.String("T3CODE_REALTIME_SECRET_REF").pipe(Config.option);
+  const credentialProvider = yield* RealtimeVoiceCredentialProvider;
+  const environmentKey = yield* Config.Redacted("T3CODE_REALTIME_API_KEY")
+    .pipe(Config.option)
+    .parse(credentialProvider);
+  const reference = yield* Config.String("T3CODE_REALTIME_SECRET_REF")
+    .pipe(Config.option)
+    .parse(credentialProvider);
   if (Option.isSome(environmentKey) === Option.isSome(reference))
     return yield* new VoiceRelayError();
   const key = Option.isSome(environmentKey)

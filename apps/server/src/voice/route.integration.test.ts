@@ -30,7 +30,7 @@ import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.t
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
-import { realtimeVoiceRouteLayer } from "./route.ts";
+import { realtimeVoiceRouteLayer, RealtimeVoiceCredentialProvider } from "./route.ts";
 import { VoiceWebSocket } from "./transport.ts";
 
 const key = "fictional-server-env-credential";
@@ -48,6 +48,7 @@ const startRoute = Effect.fn("voice.test.startRoute")(function* (
   variables: Record<string, string>,
 ) {
   const logs: unknown[] = [];
+  let secretReads = 0;
   const services = yield* Layer.build(
     HttpRouter.serve(
       realtimeVoiceRouteLayer.pipe(
@@ -74,11 +75,30 @@ const startRoute = Effect.fn("voice.test.startRoute")(function* (
       ),
       Layer.provideMerge(authLayer),
       Layer.provide(
-        SecretResolver.layer({ drivers: [], secretProviders: Effect.succeed({}) }).pipe(
+        Layer.effect(
+          SecretResolver.SecretResolver,
+          Effect.gen(function* () {
+            const resolver = yield* SecretResolver.SecretResolver;
+            return SecretResolver.SecretResolver.of({
+              ...resolver,
+              read: (...args) => {
+                secretReads++;
+                return resolver.read(...args);
+              },
+            });
+          }),
+        ).pipe(
+          Layer.provide(SecretResolver.layer({ drivers: [], secretProviders: Effect.succeed({}) })),
           Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
         ),
       ),
       Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: variables }))),
+      Layer.provide(
+        Layer.succeed(
+          RealtimeVoiceCredentialProvider,
+          ConfigProvider.fromEnv({ env: variables, preserveEmptyStrings: true }),
+        ),
+      ),
       Layer.provide(
         Logger.layer([Logger.make(({ message, cause }) => logs.push({ message, cause }))], {
           mergeWithExisting: false,
@@ -92,7 +112,7 @@ const startRoute = Effect.fn("voice.test.startRoute")(function* (
   const server = Context.get(services, HttpServer.HttpServer);
   const origin = HttpServer.formatAddress(server.address);
   const url = `${origin}${REALTIME_VOICE_PATH}?threadId=${threadId}`;
-  return { auth, sessions, session, url, logs };
+  return { auth, sessions, session, url, logs, secretReads: () => secretReads };
 });
 
 const upstreamFixture = Effect.acquireRelease(
@@ -198,6 +218,11 @@ test.live(
 test.live.each([
   {},
   { T3CODE_REALTIME_API_KEY: " " },
+  {
+    T3CODE_REALTIME_API_KEY: "",
+    T3CODE_REALTIME_SECRET_REF: '{"provider":"absent","reference":"fixture/key"}',
+  },
+  { T3CODE_REALTIME_API_KEY: key, T3CODE_REALTIME_SECRET_REF: "" },
   { T3CODE_REALTIME_API_KEY: "fictional\r\nInjected: header" },
   { T3CODE_REALTIME_API_KEY: key, T3CODE_REALTIME_SECRET_REF: "fictional-invalid-reference" },
   { T3CODE_REALTIME_SECRET_REF: '{"provider":"absent","reference":"op://Example/Voice/key"}' },
@@ -217,6 +242,7 @@ test.live.each([
       expect(response.status).toBe(503);
       expect(yield* response.text).toBe("");
       expect(upstream.requests).toEqual([]);
+      if ("T3CODE_REALTIME_API_KEY" in variables) expect(route.secretReads()).toBe(0);
       expect(JSON.stringify(route.logs)).not.toContain("fictional");
     }),
 );
