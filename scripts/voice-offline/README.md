@@ -74,7 +74,8 @@ SIGKILL of the owner or host loss cannot guarantee cleanup.
 For a bounded negative cleanup check, set `VOICE_OFFLINE_TIMEOUT_PROBE=1` with the
 same command. It deliberately aborts the local browser wait once a real disposable
 Chromium context is open. Expect nonzero exit and `ownedCleanup: true` in `run.log`.
-Focused accounting regressions: `node --test scripts/voice-offline/accounting.test.mjs`.
+Focused accounting and gated owner-lifecycle regressions (no browser required):
+`node --experimental-vm-modules --test scripts/voice-offline/*.test.mjs`.
 
 This does **not** validate a live provider, physical microphone/speakers,
 subjective audio quality, native app permissions, or the unknown live-provider

@@ -76,10 +76,12 @@ if (process.argv[2] === "--stop") {
   );
   let driver, server, launching, stopping;
   let driverExit;
+  const initialized = Promise.withResolvers();
   const owner = { token, pid: process.pid };
   const stop = (reason) =>
     (stopping ??= (async () => {
-      clearTimeout(watchdog);
+      // Startup must either register its launch promise or rule out creating children.
+      await initialized.promise;
       if (driver && driver.exitCode === null && driver.signalCode === null) driver.kill("SIGTERM");
       // launchServer retains the actual Chromium child handle and kills its owned process group.
       const launched = await launching?.catch(() => null);
@@ -97,6 +99,7 @@ if (process.argv[2] === "--stop") {
       await fs.writeFile(donePath, JSON.stringify({ ...owner, reason, childrenExited: true }), {
         mode: 0o600,
       });
+      clearTimeout(watchdog);
       control.close();
       if (reason !== "completed") process.exitCode = 1;
     })());
@@ -120,16 +123,21 @@ if (process.argv[2] === "--stop") {
   for (const signal of ["SIGHUP", "SIGTERM", "SIGINT"])
     process.once(signal, () => void stop(signal));
   try {
-    control.listen(socketPath);
-    await once(control, "listening");
-    await fs.writeFile(ownerPath, JSON.stringify(owner), { mode: 0o600 });
-    const { chromium } = createRequire(import.meta.url)(config.playwrightPath);
-    launching = chromium.launchServer({
-      host: "127.0.0.1",
-      headless: true,
-      chromiumSandbox: true,
-      args: ["--autoplay-policy=no-user-gesture-required"],
-    });
+    try {
+      control.listen(socketPath);
+      await once(control, "listening");
+      await fs.writeFile(ownerPath, JSON.stringify(owner), { mode: 0o600 });
+      if (stopping) throw Error("Owned browser stopped before launch");
+      const { chromium } = createRequire(import.meta.url)(config.playwrightPath);
+      launching = chromium.launchServer({
+        host: "127.0.0.1",
+        headless: true,
+        chromiumSandbox: true,
+        args: ["--autoplay-policy=no-user-gesture-required"],
+      });
+    } finally {
+      initialized.resolve();
+    }
     server = await launching;
     if (stopping) throw Error("Owned browser stopped during launch");
     owner.browserPid = server.process().pid;
