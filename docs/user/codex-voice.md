@@ -115,8 +115,11 @@ macOS uses the shared Electron/web UI. Existing packaging already declares audio
 input entitlement and microphone usage text; an actual signed macOS build and TCC
 permission/device test are still required. No packaging changes were made.
 
-Native iOS has separate Expo audio/dictation and playback interfaces; this browser
-AudioWorklet implementation is not an iOS adapter. A later slice must implement
-native duplex PCM capture/playback, audio focus/interruption and route handling,
-and a native voice panel, using the same authenticated relay and confirmed queue
-handoff. iOS browser use is explicitly disabled here.
+Native iPhone source now includes a local AVFoundation PCM module, the shared
+conversation controller, and an explicit confirmed queue handoff. It requires a
+rebuilt iOS development client; missing modules remain unavailable, not dictation
+fallbacks. Backgrounding, audio interruption/route changes, or owner changes stop
+voice without automatic resume. Android conversation voice remains hidden.
+Swift/Xcode compilation, native engine/timing tests, simulator checks, and a
+physical iPhone microphone/speaker run are still required. This is not a release
+or an installable signed iPhone build. iOS browser use remains disabled.
