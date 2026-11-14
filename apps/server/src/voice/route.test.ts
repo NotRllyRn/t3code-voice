@@ -16,7 +16,20 @@ import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import { liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
-import { readRealtimeVoiceConfig, realtimeVoiceRouteLayer } from "./route.ts";
+import {
+  readRealtimeVoiceConfig,
+  realtimeVoiceRouteLayer,
+  RealtimeVoiceCredentialProvider,
+} from "./route.ts";
+
+const configuration = (env: Record<string, string>) =>
+  Layer.mergeAll(
+    ConfigProvider.layer(ConfigProvider.fromEnv({ env })),
+    Layer.succeed(
+      RealtimeVoiceCredentialProvider,
+      ConfigProvider.fromEnv({ env, preserveEmptyStrings: true }),
+    ),
+  );
 
 const reference = { provider: "fixture", reference: "fixture/key" };
 const config = {
@@ -34,8 +47,7 @@ const secrets = Layer.mock(SecretResolver.SecretResolver)({
 test.effect("executes actual Effect 4 configuration, secret-reference decoding and defaults", () =>
   Effect.gen(function* () {
     const value = yield* readRealtimeVoiceConfig.pipe(
-      Effect.provide(secrets),
-      Effect.provideService(ConfigProvider.ConfigProvider, ConfigProvider.fromUnknown(config)),
+      Effect.provide(Layer.mergeAll(secrets, configuration(config))),
     );
     expect(Redacted.value(value.key)).toBe("fixture-only-secret");
     expect(JSON.stringify(value)).not.toContain("fixture-only-secret");
@@ -53,19 +65,22 @@ test.effect(
   () =>
     Effect.gen(function* () {
       const value = yield* readRealtimeVoiceConfig.pipe(
-        Effect.provide(secrets),
-        Effect.provideService(
-          ConfigProvider.ConfigProvider,
-          ConfigProvider.fromEnv({
-            env: {
+        Effect.provide(
+          Layer.mergeAll(
+            secrets,
+            configuration({
               T3CODE_REALTIME_URL: config.T3CODE_REALTIME_URL,
               T3CODE_REALTIME_API_KEY: "fictional-env-only-key",
-            },
-          }),
+              T3CODE_REALTIME_VOICE: "",
+              T3CODE_REALTIME_TRANSCRIPTION_MODEL: "",
+            }),
+          ),
         ),
       );
       expect(Redacted.value(value.key)).toBe("fictional-env-only-key");
       expect(JSON.stringify(value)).not.toContain("fictional-env-only-key");
+      expect(value.voice).toBe("alloy");
+      expect(value.transcription).toBe("whisper-1");
     }),
 );
 
@@ -75,6 +90,12 @@ const invalidConfigs = [
   { ...config, T3CODE_REALTIME_URL: "https://invalid.example" },
   { ...config, T3CODE_REALTIME_API_KEY: "fictional-ambiguous-key" },
   { ...config, T3CODE_REALTIME_API_KEY: " " },
+  { ...config, T3CODE_REALTIME_API_KEY: "" },
+  {
+    ...config,
+    T3CODE_REALTIME_API_KEY: "fictional-env-only-key",
+    T3CODE_REALTIME_SECRET_REF: "",
+  },
   { ...config, T3CODE_REALTIME_SECRET_REF: "invalid-fictional-reference" },
   ...["", "  ", "fictional\r\nInjected: header"].map((key) => ({
     T3CODE_REALTIME_URL: config.T3CODE_REALTIME_URL,
@@ -89,14 +110,23 @@ const invalidConfigs = [
 
 test.effect.each(invalidConfigs)("sanitizes configuration failures %#", (variables) =>
   Effect.gen(function* () {
+    let secretReads = 0;
     const error = yield* readRealtimeVoiceConfig.pipe(
-      Effect.provide(secrets),
-      Effect.provideService(
-        ConfigProvider.ConfigProvider,
-        ConfigProvider.fromEnv({ env: variables }),
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.mock(SecretResolver.SecretResolver)({
+            read: () =>
+              Effect.sync(() => {
+                secretReads++;
+                return ["fixture-only-secret"];
+              }),
+          }),
+          configuration(variables),
+        ),
       ),
       Effect.flip,
     );
+    expect(secretReads).toBe(0);
     expect(error._tag).toBe("VoiceRelayError");
     expect(JSON.stringify(error)).toBe('{"_tag":"VoiceRelayError"}');
     expect(String(error)).not.toContain("fictional");
@@ -133,7 +163,7 @@ test.live.each(invalidConfigs)(
             }),
           ),
           Layer.provideMerge(secrets),
-          Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(variables))),
+          Layer.provide(configuration(variables)),
         ),
         { disableLogger: true },
       );

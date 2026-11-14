@@ -43,16 +43,21 @@ export T3CODE_REALTIME_API_KEY
 
 For a managed server, set the same variables in its protected service environment
 and restart the server. Keep credentials out of tracked files, browser settings,
-URLs, CLI arguments, and chat. Environment variables remain accessible to the
-server process owner and administrators; use the secret-reference option if that
-is not suitable. The browser cannot choose another environment variable to read.
+URLs, CLI arguments, and chat. **The raw environment-key option is blocked on
+credential-isolation review: unrelated providers, tools, and child processes can
+inherit it.** Do not use it for a live test. Use the existing secret-reference
+option until that boundary is fixed and independently reviewed. Environment
+variables also remain accessible to the server process owner and administrators.
+The browser cannot choose another environment variable to read.
 
 There is no precedence or fallback between sources: if both variables are set
 (even if one is empty), or neither is set, voice Start fails with an empty `503`
 response. Empty, whitespace-only, or newline-bearing keys also fail closed.
 Secret-reference resolution failures do not fall back to environment credentials.
 Credentials are redacted in server configuration values and never returned to the
-browser; only the upstream Bearer header receives the resolved key.
+browser; the voice relay sends the resolved key only in the upstream Bearer
+header. This does not isolate the raw environment-key option from other server
+code or child processes.
 
 The endpoint must use `wss:`; plain `ws:` is allowed only on loopback. The relay
 adds a server-side Bearer header. There is no account-token extraction, direct
