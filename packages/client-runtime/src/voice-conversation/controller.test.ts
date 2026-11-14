@@ -1,15 +1,7 @@
 import * as NodeAssert from "node:assert/strict";
 import { test, vi } from "vite-plus/test";
-import { VoiceController, type VoiceDependencies, type VoiceState } from "./controller.ts";
-import type { VoiceMedia } from "./media.js";
-
-class Track extends EventTarget {
-  enabled = true;
-  stopped = false;
-  stop() {
-    this.stopped = true;
-  }
-}
+import { VoiceController, type VoiceState } from "./controller.ts";
+import type { VoiceMedia, VoiceSocket } from "./media.ts";
 class FakeSocket extends EventTarget {
   readyState = 1;
   bufferedAmount = 0;
@@ -35,20 +27,23 @@ class FakeSocket extends EventTarget {
     this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(data) }));
   }
 }
-function harness(microphone?: VoiceDependencies["microphone"]) {
-  const track = new Track(),
-    socket = new FakeSocket();
-  const stream = {
-    getTracks: () => [track],
-    getAudioTracks: () => [track],
-  } as unknown as MediaStream;
+function harness(acquire?: (media: VoiceMedia) => Promise<VoiceMedia>) {
+  const socket = new FakeSocket();
+  const track = { enabled: true, stopped: false };
   let capture: (audio: string, samples: number) => void = () => {};
+  let fail: (message: string) => void = () => {};
   let mediaClosed = 0,
     silenced = 0,
     played = 0;
-  const audio = Object.assign(new EventTarget(), { state: "running" });
-  const media = {
-    context: audio,
+  const media: VoiceMedia = {
+    mute: (muted) => {
+      track.enabled = !muted;
+    },
+    dispose: () => {
+      if (track.stopped) return;
+      track.stopped = true;
+      mediaClosed++;
+    },
     capture: () => {},
     finishCapture: async () => {},
     allow: () => {},
@@ -59,19 +54,16 @@ function harness(microphone?: VoiceDependencies["microphone"]) {
     enqueue: () => {
       played++;
     },
-  } as unknown as VoiceMedia;
+  };
   const states: VoiceState[] = [];
   const controller = new VoiceController(
     {
-      microphone: microphone ?? (async () => stream),
-      media: async (_stream, options) => {
+      media: async (options) => {
         capture = options.capture;
-        options.own(() => {
-          mediaClosed++;
-        });
-        return media;
+        fail = options.fail;
+        return acquire ? acquire(media) : media;
       },
-      socket: () => socket as unknown as WebSocket,
+      socket: () => socket as unknown as VoiceSocket,
       url: async () => "ws://local.invalid/voice?wsTicket=app-ticket",
     },
     (state) => states.push(state),
@@ -79,10 +71,10 @@ function harness(microphone?: VoiceDependencies["microphone"]) {
   return {
     controller,
     track,
-    stream,
+    media,
     socket,
     states,
-    audio,
+    fail: (message: string) => fail(message),
     capture: (samples = 2400) => capture("AAAAAA==", samples),
     counts: () => ({ mediaClosed, silenced, played }),
   };
@@ -143,18 +135,19 @@ test("mute discards a recording, stops upload and disables hardware tracks", asy
   await h.controller.stop();
 });
 
-test("late microphone grants after Stop release tracks and never start media", async () => {
-  let grant: (stream: MediaStream) => void = () => {};
-  const pending = new Promise<MediaStream>((resolve) => {
+test("late media grants after Stop are disposed and never open a socket", async () => {
+  let grant: (media: VoiceMedia) => void = () => {};
+  const pending = new Promise<VoiceMedia>((resolve) => {
     grant = resolve;
   });
   const h = harness(() => pending);
   const starting = h.controller.start();
   await h.controller.stop();
-  grant(h.stream);
+  grant(h.media);
   await starting;
   await vi.waitFor(() => NodeAssert.equal(h.track.stopped, true));
-  NodeAssert.equal(h.counts().mediaClosed, 0);
+  NodeAssert.equal(h.counts().mediaClosed, 1);
+  NodeAssert.equal(h.socket.sent.length, 0);
   NodeAssert.equal(h.controller.state.phase, "idle");
 });
 
@@ -256,8 +249,7 @@ test("Stop during readiness wait settles startup and releases every resource", a
 test("audio focus loss fails closed and releases the microphone", async () => {
   const h = harness();
   await active(h);
-  h.audio.state = "suspended";
-  h.audio.dispatchEvent(new Event("statechange"));
+  h.fail("Audio focus was lost; start a new voice conversation");
   await vi.waitFor(() => NodeAssert.equal(h.controller.state.phase, "error"));
   NodeAssert.equal(h.track.stopped, true);
 });

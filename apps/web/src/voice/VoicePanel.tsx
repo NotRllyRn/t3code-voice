@@ -1,5 +1,10 @@
 import { getEnvironmentRealtimeVoiceUrl } from "@t3tools/client-runtime/voice-input";
 import {
+  VoiceController,
+  INITIAL_VOICE_STATE,
+  type VoiceState,
+} from "@t3tools/client-runtime/voice-conversation";
+import {
   AuthOrchestrationOperateScope,
   type EnvironmentId,
   type ThreadId,
@@ -10,8 +15,7 @@ import { useEffect, useRef, useState } from "react";
 import { useEnvironmentScope, usePreparedConnection } from "../state/session";
 import { runEnvironmentSpeech } from "../speech/runEnvironmentSpeech";
 import { Button } from "../components/ui/button";
-import { VoiceController, INITIAL_VOICE_STATE, type VoiceState } from "./controller.ts";
-import { pcmMedia } from "./media.js";
+import { browserMedia } from "./media.js";
 
 export interface VoiceHandoff {
   text: string;
@@ -70,12 +74,7 @@ function VoicePanelSession({ environmentId, threadId, disabled, onQueue }: Props
     if (!prepared) return;
     const owner = new VoiceController(
       {
-        microphone: () =>
-          navigator.mediaDevices.getUserMedia({
-            audio: { echoCancellation: true, noiseSuppression: true },
-            video: false,
-          }),
-        media: pcmMedia,
+        media: browserMedia,
         socket: (url) => new WebSocket(url),
         url: async (signal) => {
           const url = new URL(

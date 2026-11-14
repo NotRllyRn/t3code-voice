@@ -1,7 +1,56 @@
 /* eslint-disable unicorn/require-post-message-target-origin -- AudioWorklet MessagePort, not Window.postMessage. */
-import { deadline } from "./lifecycle.js";
+import { deadline } from "@t3tools/client-runtime/voice-conversation";
 import workletUrl from "./pcm-worklet.js?worker&url";
 import { MAX_PLAYBACK, decodePCM, encodePCM, playedItem } from "./pcm.js";
+
+export async function browserMedia(options) {
+  const finalizers = [];
+  let cleanup;
+  const dispose = () =>
+    (cleanup ??= Promise.allSettled(finalizers.map(async (finalizer) => finalizer())));
+  const own = (finalizer) => {
+    if (cleanup)
+      void Promise.resolve()
+        .then(finalizer)
+        .catch(() => {});
+    else finalizers.push(finalizer);
+  };
+  options.own(dispose);
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true },
+    video: false,
+  });
+  own(() => stream.getTracks().forEach((track) => track.stop()));
+  if (!options.alive()) {
+    await dispose();
+    throw Error("Stopped");
+  }
+  for (const track of stream.getTracks()) {
+    const ended = () => options.fail("Microphone disconnected");
+    track.addEventListener("ended", ended);
+    own(() => track.removeEventListener("ended", ended));
+  }
+  const media = await pcmMedia(stream, { ...options, own });
+  if (!options.alive()) {
+    await dispose();
+    throw Error("Stopped");
+  }
+  const audioChanged = () => {
+    if (media.context.state !== "running")
+      options.fail("Audio focus was lost; start a new voice conversation");
+  };
+  media.context.addEventListener("statechange", audioChanged);
+  own(() => media.context.removeEventListener("statechange", audioChanged));
+  return {
+    ...media,
+    mute(muted) {
+      stream.getAudioTracks().forEach((track) => {
+        track.enabled = !muted;
+      });
+    },
+    dispose,
+  };
+}
 
 export async function pcmMedia(stream, { own, alive, fail, capture }) {
   const context = new AudioContext({ latencyHint: "interactive" });
