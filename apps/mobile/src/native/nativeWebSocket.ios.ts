@@ -7,7 +7,12 @@ type EventType = "open" | "message" | "error" | "close";
 
 interface NativeEvents {
   readonly open: { readonly id: number };
-  readonly message: { readonly id: number; readonly text?: string; readonly data?: Uint8Array };
+  readonly message: {
+    readonly id: number;
+    readonly text?: string;
+    readonly data?: Uint8Array;
+    readonly sequence?: number;
+  };
   readonly error: { readonly id: number; readonly message: string };
   readonly close: {
     readonly id: number;
@@ -21,6 +26,7 @@ export interface NativeModule {
   connect(url: string, protocols: ReadonlyArray<string>): number;
   connectVoice?(url: string): number;
   pendingBytes?(id: number): number;
+  ackVoiceMessage?(id: number, sequence: number): void;
   sendText(id: number, text: string): void;
   sendBinary(id: number, bytes: Uint8Array): void;
   close(id: number, code: number, reason: string): void;
@@ -49,15 +55,16 @@ export class Connection implements Socket.WebSocketLike {
   readonly #sockets: Sockets;
   readonly #listeners = new Map<EventType, Array<Listener>>();
 
-  constructor(
-    sockets: Sockets,
-    url: string,
-    protocols?: string | ReadonlyArray<string>,
-    voice = false,
-  ) {
+  constructor(sockets: Sockets, url: string, protocols?: string | ReadonlyArray<string>) {
     this.url = url;
     this.#sockets = sockets;
-    if (voice && (!sockets.native.connectVoice || !sockets.native.pendingBytes)) {
+    const voice = sockets.voice;
+    if (
+      voice &&
+      (!sockets.native.connectVoice ||
+        !sockets.native.pendingBytes ||
+        !sockets.native.ackVoiceMessage)
+    ) {
       throw new Error("Rebuild the iOS client to use voice");
     }
     this.#id = voice
@@ -120,6 +127,8 @@ export class Connection implements Socket.WebSocketLike {
 
   handleMessage(event: NativeEvents["message"]): void {
     if (this.readyState !== Connection.OPEN) return;
+    if (this.#sockets.voice && !this.#listeners.get("message")?.length)
+      throw new Error("Voice consumer unavailable");
     this.#dispatch("message", { type: "message", data: event.text ?? event.data });
   }
 
@@ -157,11 +166,33 @@ export class Sockets {
   readonly #open = new Map<number, Connection>();
   readonly #subscriptions: ReadonlyArray<{ remove(): void }>;
 
-  constructor(native: NativeModule) {
+  constructor(
+    native: NativeModule,
+    readonly voice = false,
+  ) {
     this.native = native;
     this.#subscriptions = [
       native.addListener("open", (event) => this.#open.get(event.id)?.handleOpen(event)),
-      native.addListener("message", (event) => this.#open.get(event.id)?.handleMessage(event)),
+      native.addListener("message", (event) => {
+        const socket = this.#open.get(event.id);
+        if (!this.voice) {
+          socket?.handleMessage(event);
+          return;
+        }
+        if (!socket && event.sequence === undefined) return;
+        try {
+          if (!Number.isSafeInteger(event.sequence) || event.sequence! <= 0)
+            throw new Error("Invalid voice delivery");
+          socket?.handleMessage(event);
+        } catch {
+          socket?.close(1002, "Invalid voice delivery");
+          socket?.handleError({ id: event.id, message: "Invalid voice delivery" });
+        } finally {
+          // The controller consumes/discards synchronously; native enqueue is a sync call.
+          // Also retire closed-owner events, without letting the RPC subscriber ack them early.
+          if (event.sequence !== undefined) native.ackVoiceMessage?.(event.id, event.sequence);
+        }
+      }),
       native.addListener("error", (event) => this.#open.get(event.id)?.handleError(event)),
       native.addListener("close", (event) => this.#open.get(event.id)?.handleClose(event)),
     ];
@@ -205,11 +236,12 @@ function layerFromModule(native: NativeModule): Layer.Layer<Socket.WebSocketCons
 const native = requireOptionalNativeModule<NativeModule>("T3WebSocket");
 
 let voiceSockets: Sockets | undefined;
-export const voiceSocketAvailable = !!native?.connectVoice && !!native.pendingBytes;
+export const voiceSocketAvailable =
+  !!native?.connectVoice && !!native.pendingBytes && !!native.ackVoiceMessage;
 export function createVoiceSocket(url: string): Connection {
   if (!native || !voiceSocketAvailable) throw new Error("Rebuild the iOS client to use voice");
-  voiceSockets ??= new Sockets(native);
-  return new Connection(voiceSockets, url, undefined, true);
+  voiceSockets ??= new Sockets(native, true);
+  return new Connection(voiceSockets, url);
 }
 
 // A dev client built before this module shipped still has SocketRocket.
