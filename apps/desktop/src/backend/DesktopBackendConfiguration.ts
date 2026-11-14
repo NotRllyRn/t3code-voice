@@ -71,6 +71,8 @@ const emptyBackendObservabilitySettings: BackendObservabilitySettings = {
 };
 
 const DESKTOP_BACKEND_ENV_NAMES = [
+  // The owned server must use bootstrap.t3Home, not an inherited standalone CLI override.
+  "T3CODE_HOME",
   "T3CODE_PORT",
   "T3CODE_MODE",
   "T3CODE_NO_BROWSER",

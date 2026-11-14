@@ -1,3 +1,8 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeChildProcess from "node:child_process";
+import * as NodeURL from "node:url";
+import * as NodeUtil from "node:util";
+
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
@@ -83,7 +88,7 @@ function layerEnvironment(
         NodeCrypto.layer,
         DesktopConfig.layerTest({
           T3CODE_VOICE_HOME: options?.useDefaultHome ? undefined : baseDir,
-          T3CODE_HOME: "/must-not-use-upstream-home",
+          T3CODE_HOME: `${baseDir}/upstream`,
           T3CODE_PORT: "9999",
           T3CODE_MODE: "desktop",
           T3CODE_DESKTOP_LAN_HOST: "192.168.1.50",
@@ -221,7 +226,7 @@ const withPackagedWslHarness = <A, E, R>(
   }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)));
 
 describe("DesktopBackendConfiguration", () => {
-  it.effect.each([false, true])(
+  it.live.each([false, true])(
     "passes isolated home and stable bootstrap token to the owned server (default=%s)",
     (useDefaultHome) =>
       withHarness(
@@ -258,6 +263,60 @@ describe("DesktopBackendConfiguration", () => {
               ? `${environment.homeDirectory}/.t3code-voice`
               : environment.homeDirectory,
           );
+          const fileSystem = yield* FileSystem.FileSystem;
+          const bootstrapPath = `${environment.homeDirectory}/bootstrap.ndjson`;
+          yield* fileSystem.writeFileString(bootstrapPath, `${JSON.stringify(first.bootstrap)}\n`);
+          assert.isTrue(first.extendEnv);
+          // Resolve real server config in a child without starting a listener or crossing TS project roots.
+          const { stdout } = yield* Effect.promise(() =>
+            NodeUtil.promisify(NodeChildProcess.execFile)(
+              process.execPath,
+              [
+                "--input-type=module",
+                "--eval",
+                `
+                  import { openSync } from "node:fs";
+                  import * as NodeServices from "@effect/platform-node/NodeServices";
+                  import * as NetService from "@t3tools/shared/Net";
+                  import * as ConfigProvider from "effect/ConfigProvider";
+                  import * as Effect from "effect/Effect";
+                  import * as Layer from "effect/Layer";
+                  import * as Option from "effect/Option";
+                  import { resolveServerConfig } from "./src/cli/config.ts";
+                  const resolved = await Effect.runPromise(resolveServerConfig({
+                    bootstrapFd: Option.some(openSync(process.argv[1], "r")),
+                    cwd: Option.some(process.argv[2]),
+                  }, Option.none()).pipe(Effect.provide(Layer.mergeAll(
+                    NodeServices.layer,
+                    NetService.layer,
+                    ConfigProvider.layer(ConfigProvider.fromEnv()),
+                  ))));
+                  console.log(JSON.stringify(resolved));
+                `,
+                bootstrapPath,
+                environment.homeDirectory,
+              ],
+              {
+                cwd: NodeURL.fileURLToPath(new URL("../../../server", import.meta.url)),
+                env: {
+                  T3CODE_HOME: `${environment.homeDirectory}/upstream`,
+                  T3CODE_VOICE_HOME: useDefaultHome ? undefined : environment.homeDirectory,
+                  ...first.env,
+                },
+              },
+            ),
+          );
+          const resolved = JSON.parse(stdout);
+          assert.equal(resolved.baseDir, environment.baseDir);
+          assert.equal(resolved.dbPath, `${environment.baseDir}/userdata/statev2.sqlite`);
+          assert.equal(resolved.settingsPath, `${environment.baseDir}/userdata/settings.json`);
+          assert.equal(
+            resolved.serverRuntimeStatePath,
+            `${environment.baseDir}/userdata/server-runtime.json`,
+          );
+          assert.equal(resolved.attachmentsDir, `${environment.baseDir}/userdata/attachments`);
+          assert.equal(resolved.logsDir, `${environment.baseDir}/userdata/logs`);
+          assert.isFalse(yield* fileSystem.exists(`${environment.homeDirectory}/upstream`));
           assert.equal(first.bootstrap.tailscaleServeEnabled, true);
           assert.equal(first.bootstrap.tailscaleServePort, 8443);
           assert.match(first.bootstrap.desktopBootstrapSecret ?? "", /^[0-9a-f]{64}$/i);
