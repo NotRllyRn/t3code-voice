@@ -3,7 +3,7 @@ import * as Option from "effect/Option";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
-import type { VoiceOwner } from "./voiceOwner";
+import { voiceOwner, type VoiceOwner } from "./voiceOwner";
 
 const state = vi.hoisted(() => ({
   focused: true,
@@ -120,7 +120,18 @@ vi.mock("@t3tools/client-runtime/voice-conversation", async (original) => {
 });
 import { NativeVoicePanel } from "./NativeVoicePanel";
 const prepared = Option.some({});
-const owner = { key: "owner", thread: { environmentId: "env", id: "thread" } } as VoiceOwner;
+const owner = {
+  key: "owner",
+  thread: {
+    environmentId: "env",
+    id: "thread",
+    providerInstanceId: "custom-codex",
+    modelSelection: { instanceId: "custom-codex", model: "codex-model" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    archivedAt: null,
+  },
+} as VoiceOwner;
 let unmount: (() => void) | undefined;
 afterEach(() => {
   unmount?.();
@@ -135,12 +146,21 @@ function render() {
   const container = document.createElement("div");
   const root = createRoot(container);
   const onQueue = vi.fn(async (_request: object) => {});
-  const update = (key = "owner", disabled = false) =>
-    act(() =>
+  const update = (key = "owner", disabled = false, providerEnabled = true) =>
+    act(() => {
+      const eligible = voiceOwner({
+        thread: owner.thread,
+        effectiveModel: owner.thread.modelSelection,
+        driver: "codex",
+        providerEnabled,
+        ready: true,
+      });
       root.render(
-        <NativeVoicePanel owner={{ ...owner, key }} disabled={disabled} onQueue={onQueue} />,
-      ),
-    );
+        eligible ? (
+          <NativeVoicePanel owner={{ ...eligible, key }} disabled={disabled} onQueue={onQueue} />
+        ) : null,
+      );
+    });
   update();
   unmount = () => act(() => root.unmount());
   const button = (text: string) =>
@@ -243,6 +263,32 @@ describe.skipIf(androidBuild)("native voice panel", () => {
     expect(view.onQueue).not.toHaveBeenCalled();
     expect(view.container.querySelector("textarea")!.value).toBe("");
   });
+  it("revokes recording and a pending retry confirmation when the same canonical Codex is disabled", async () => {
+    const view = render();
+    view.onQueue.mockRejectedValueOnce(new Error("lost ack"));
+    await view.click("Voice conversation");
+    await view.click("Start voice");
+    await view.click("Record turn");
+    const controller = state.controllers[0]!;
+    view.text("reviewed request");
+    await view.click("Review and queue request");
+    await act(async () => state.confirm?.());
+    expect(view.onQueue).toHaveBeenCalledTimes(1);
+    await view.click("Retry confirmed queue request");
+    const oldConfirm = state.confirm;
+    view.update("owner", false, false);
+    expect(controller.dispose).toHaveBeenCalledTimes(1);
+    expect(view.container.textContent).toBe("");
+    await act(async () => oldConfirm?.());
+    expect(view.onQueue).toHaveBeenCalledTimes(1);
+    expect(controller.record).toHaveBeenCalledTimes(1);
+    view.update();
+    await view.click("Voice conversation");
+    expect(state.controllers[1]!.start).not.toHaveBeenCalled();
+    expect(view.button("Start voice").disabled).toBe(false);
+    expect(view.container.querySelector("textarea")!.value).toBe("");
+  });
+
   it("disposes on navigation/background and never resumes automatically", async () => {
     const view = render();
     await view.click("Voice conversation");

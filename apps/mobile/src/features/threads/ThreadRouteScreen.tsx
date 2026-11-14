@@ -946,12 +946,14 @@ function ThreadRouteContent(
       serverOwned: false,
     };
   })();
+  const canonicalVoiceProvider = routeEnvironmentRuntime?.serverConfig?.providers.find(
+    (provider) => provider.instanceId === selectedThread?.modelSelection.instanceId,
+  );
   const nativeVoiceOwner = voiceOwner({
     thread: selectedThread,
     effectiveModel: composer.modelSelection ?? selectedThread?.modelSelection ?? null,
-    driver: routeEnvironmentRuntime?.serverConfig?.providers.find(
-      (provider) => provider.instanceId === selectedThread?.modelSelection.instanceId,
-    )?.driver,
+    driver: canonicalVoiceProvider?.driver,
+    providerEnabled: canonicalVoiceProvider?.enabled,
     ready:
       canOperateThread &&
       routeConnectionState === "connected" &&

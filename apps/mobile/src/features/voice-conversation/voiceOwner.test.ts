@@ -19,13 +19,21 @@ const thread = {
   interactionMode: "default",
   archivedAt: null,
 } as unknown as EnvironmentThreadShell;
-const input = { thread, effectiveModel: thread.modelSelection, driver: "codex", ready: true };
+const input = {
+  thread,
+  effectiveModel: thread.modelSelection,
+  driver: "codex",
+  providerEnabled: true,
+  ready: true,
+};
 
 describe("native voice saved owner gate", () => {
   it("uses the actual driver, not an instance name, and requires a saved connected operable thread", () => {
     expect(voiceOwner(input)?.thread).toBe(thread);
     expect(voiceOwner({ ...input, driver: "claude" })).toBeNull();
     expect(voiceOwner({ ...input, driver: undefined })).toBeNull();
+    expect(voiceOwner({ ...input, providerEnabled: false })).toBeNull();
+    expect(voiceOwner({ ...input, providerEnabled: undefined })).toBeNull();
     expect(voiceOwner({ ...input, thread: null })).toBeNull();
     expect(voiceOwner({ ...input, ready: false })).toBeNull();
     expect(voiceOwner({ ...input, thread: { ...thread, archivedAt: "2026-01-01" } })).toBeNull();

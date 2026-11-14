@@ -21,6 +21,7 @@ export function voiceOwner(input: {
   thread: EnvironmentThreadShell | null;
   effectiveModel: ModelSelection | null;
   driver: string | undefined;
+  providerEnabled: boolean | undefined;
   ready: boolean;
 }): VoiceOwner | null {
   const { thread, effectiveModel, driver, ready } = input;
@@ -29,6 +30,7 @@ export function voiceOwner(input: {
     !thread ||
     thread.archivedAt ||
     driver !== "codex" ||
+    !input.providerEnabled ||
     !effectiveModel ||
     thread.providerInstanceId !== thread.modelSelection.instanceId ||
     selectionKey(thread.modelSelection) !== selectionKey(effectiveModel)
