@@ -5,15 +5,20 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import { beforeEach, vi } from "vite-plus/test";
 
-const { handleMock, netFetchMock, unhandleMock } = vi.hoisted(() => ({
+const { handleMock, netFetchMock, unhandleMock, registerPrivilegesMock } = vi.hoisted(() => ({
   handleMock: vi.fn(),
   netFetchMock: vi.fn(),
   unhandleMock: vi.fn(),
+  registerPrivilegesMock: vi.fn(),
 }));
 
 vi.mock("electron", () => ({
   net: { fetch: netFetchMock },
-  protocol: { handle: handleMock, unhandle: unhandleMock },
+  protocol: {
+    handle: handleMock,
+    unhandle: unhandleMock,
+    registerSchemesAsPrivileged: registerPrivilegesMock,
+  },
 }));
 
 import * as ElectronProtocol from "./ElectronProtocol.ts";
@@ -21,7 +26,24 @@ import * as ElectronProtocol from "./ElectronProtocol.ts";
 const layerProtocol = ElectronProtocol.layer.pipe(Layer.provide(NodeServices.layer));
 
 describe("ElectronProtocol", () => {
+  it("keeps both renderer and Clerk registration schemes separate from upstream", () => {
+    assert.equal(ElectronProtocol.getDesktopScheme(false), "t3code-voice");
+    assert.equal(ElectronProtocol.getDesktopScheme(true), "t3code-voice-dev");
+    assert.equal(ElectronProtocol.getDesktopUrl(false), "t3code-voice://app/");
+    assert.equal(ElectronProtocol.getDesktopUrl(true), "t3code-voice-dev://app/");
+  });
+  it.effect("registers privileges only for fork renderer protocols", () =>
+    Effect.gen(function* () {
+      yield* Effect.void.pipe(Effect.provide(ElectronProtocol.layerSchemePrivileges));
+      assert.equal(registerPrivilegesMock.mock.calls.length, 1);
+      assert.deepEqual(
+        registerPrivilegesMock.mock.calls[0]?.[0].map((entry: { scheme: string }) => entry.scheme),
+        ["t3code-voice", "t3code-voice-dev"],
+      );
+    }),
+  );
   beforeEach(() => {
+    registerPrivilegesMock.mockReset();
     handleMock.mockReset();
     netFetchMock.mockReset();
     unhandleMock.mockReset();
@@ -39,12 +61,12 @@ describe("ElectronProtocol", () => {
       });
       const protocol = yield* ElectronProtocol.ElectronProtocol;
       yield* protocol.registerDesktopProtocol({
-        scheme: "t3code",
+        scheme: ElectronProtocol.getDesktopScheme(false),
         assetDirectory: directory,
         clerkFrontendApiHostname: undefined,
       });
       const request = (pathname: string, init?: RequestInit) =>
-        Effect.promise(() => handler!(new Request(`t3code://app${pathname}`, init)));
+        Effect.promise(() => handler!(new Request(`t3code-voice://app${pathname}`, init)));
 
       const page = yield* request("/settings/connections");
       assert.equal(yield* Effect.promise(() => page.text()), "<html>app</html>");

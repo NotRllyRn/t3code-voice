@@ -15,7 +15,6 @@ import { installDesktopIpcHandlers } from "../ipc/DesktopIpcHandlers.ts";
 import * as DesktopAppActivation from "./DesktopAppActivation.ts";
 import * as DesktopAppIdentity from "./DesktopAppIdentity.ts";
 import * as DesktopClerk from "./DesktopClerk.ts";
-import * as DesktopCliCommand from "./DesktopCliCommand.ts";
 import * as DesktopApplicationMenu from "../window/DesktopApplicationMenu.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as PreviewPasskeys from "../preview/Passkeys.ts";
@@ -23,7 +22,6 @@ import * as DesktopBackendManager from "../backend/DesktopBackendManager.ts";
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
 import * as DesktopHomeOwner from "../backend/DesktopHomeOwner.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
-import * as DesktopLegacyLocalStorage from "./DesktopLegacyLocalStorage.ts";
 import * as DesktopLifecycle from "./DesktopLifecycle.ts";
 import * as DesktopLinuxUrlHandler from "./DesktopLinuxUrlHandler.ts";
 import * as DesktopObservability from "./DesktopObservability.ts";
@@ -31,8 +29,8 @@ import * as DesktopPreReadyPlatform from "./DesktopPreReadyPlatform.ts";
 import * as DesktopShutdown from "./DesktopShutdown.ts";
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
-import * as DesktopShellEnvironment from "../shell/DesktopShellEnvironment.ts";
 import * as DesktopStartupRecovery from "./DesktopStartupRecovery.ts";
+import * as DesktopShellEnvironment from "../shell/DesktopShellEnvironment.ts";
 import * as DesktopState from "./DesktopState.ts";
 import * as DesktopRemoteUpdates from "../updates/DesktopRemoteUpdates.ts";
 import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
@@ -188,24 +186,8 @@ const bootstrap = Effect.gen(function* () {
   });
   yield* installDesktopIpcHandlers();
   yield* logBootstrapInfo("bootstrap ipc handlers registered");
-  // Before any window: the preload merges these items before the app reads storage.
-  yield* (yield* DesktopLegacyLocalStorage.DesktopLegacyLocalStorage).load(
-    yield* (yield* DesktopAppIdentity.DesktopAppIdentity).resolveUserDataPath,
-  );
-
+  // A side-by-side tester must not import upstream browser state or claim its t3 command.
   yield* snapShot.initialize;
-  // Only the user's own login shell PATH shows every t3 a new terminal runs; a fresh install has
-  // no cached one. Without it, the command is left to Settings.
-  const installCli = (yield* DesktopCliCommand.DesktopCliCommand).installOnFirstLaunch;
-  yield* Effect.forkScoped(
-    (yield* DesktopShellEnvironment.DesktopShellEnvironment).awaitUserShellDiscovery.pipe(
-      Effect.flatMap((found) =>
-        found || environment.platform === "win32"
-          ? installCli
-          : logBootstrapInfo("skipped installing the t3 command without the shell PATH"),
-      ),
-    ),
-  );
 
   if (!settings.localEnvironmentEnabled) {
     yield* logBootstrapInfo("bootstrap skipping local environment (disabled in settings)");

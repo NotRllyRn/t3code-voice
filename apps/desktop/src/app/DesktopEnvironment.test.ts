@@ -38,6 +38,26 @@ const makeEnvironment = (
 ) => DesktopEnvironment.DesktopEnvironment.pipe(Effect.provide(layerEnvironment(overrides, env)));
 
 describe("DesktopEnvironment", () => {
+  it.effect("ignores ambient upstream home and preserves explicit fork paths", () =>
+    Effect.gen(function* () {
+      const ambient = { T3CODE_HOME: "/must-not-read-upstream" };
+      assert.equal(
+        (yield* makeEnvironment({}, ambient)).stateDir,
+        "/Users/alice/.t3code-voice/userdata",
+      );
+      const explicit = { ...ambient, T3CODE_VOICE_HOME: " /owned/voice-test " };
+      assert.equal((yield* makeEnvironment({}, explicit)).stateDir, "/owned/voice-test/userdata");
+      assert.equal(
+        (yield* makeEnvironment({}, { ...explicit, VITE_DEV_SERVER_URL: "http://localhost:5173" }))
+          .stateDir,
+        "/owned/voice-test/userdata",
+      );
+      assert.equal(
+        (yield* makeEnvironment({}, { ...ambient, T3CODE_VOICE_HOME: " " })).baseDir,
+        "/Users/alice/.t3code-voice",
+      );
+    }),
+  );
   it.effect("uses the packaged Windows server sidecar as the backend root", () =>
     Effect.gen(function* () {
       const environment = yield* makeEnvironment({
@@ -68,8 +88,12 @@ describe("DesktopEnvironment", () => {
       );
       const production = yield* makeEnvironment();
 
-      assert.equal(development.stateDir, "/Users/alice/.t3/dev");
-      assert.equal(production.stateDir, "/Users/alice/.t3/userdata");
+      assert.equal(development.stateDir, "/Users/alice/.t3code-voice/dev");
+      assert.equal(production.baseDir, "/Users/alice/.t3code-voice");
+      assert.equal(production.stateDir, "/Users/alice/.t3code-voice/userdata");
+      assert.equal(production.branding.baseName, "T3 Code Voice");
+      assert.equal(production.appUserModelId, "io.github.notrllyrn.t3codevoice");
+      assert.equal(development.appUserModelId, "io.github.notrllyrn.t3codevoice.dev");
     }),
   );
 });

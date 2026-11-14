@@ -605,7 +605,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
           origin: "https://box.tail1234.ts.net",
           "x-forwarded-host": "box.tail1234.ts.net",
         });
-        yield* upgrade({ origin: "t3code://app" });
+        yield* upgrade({ origin: "t3code-voice://app" });
+        yield* upgrade({ origin: "t3code-voice-dev://app" });
+        for (const origin of ["t3code://app", "t3code-dev://app"]) {
+          const upstream = yield* Effect.flip(upgrade({ origin }));
+          expect(upstream._tag).toBe("ServerAuthInvalidCredentialError");
+        }
         yield* upgrade({ origin: "http://localhost:5733" });
         yield* upgrade({});
 

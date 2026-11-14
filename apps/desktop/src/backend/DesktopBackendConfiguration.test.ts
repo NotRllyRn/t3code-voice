@@ -57,6 +57,7 @@ function layerEnvironment(
   baseDir: string,
   options?: {
     readonly appPath?: string;
+    readonly useDefaultHome?: boolean;
     readonly dirname?: string;
     readonly isPackaged?: boolean;
     readonly devServerUrl?: string;
@@ -85,7 +86,8 @@ function layerEnvironment(
         NodeServices.layer,
         NodeCrypto.layer,
         DesktopConfig.layerTest({
-          T3CODE_HOME: baseDir,
+          T3CODE_VOICE_HOME: options?.useDefaultHome ? undefined : baseDir,
+          T3CODE_HOME: "/must-not-use-upstream-home",
           T3CODE_PORT: "9999",
           T3CODE_MODE: "desktop",
           T3CODE_DESKTOP_LAN_HOST: "192.168.1.50",
@@ -109,6 +111,7 @@ const withHarness = <A, E, R>(
     | DesktopBackendConfiguration.DesktopBackendConfiguration
   >,
   prepared = true,
+  useDefaultHome = false,
 ) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -123,7 +126,7 @@ const withHarness = <A, E, R>(
           Layer.provideMerge(DesktopAppSettings.layerTest()),
           Layer.provideMerge(DesktopWslEnvironment.layerTest()),
           Layer.provideMerge(DesktopWslServerTree.layerTest()),
-          Layer.provideMerge(layerEnvironment(baseDir)),
+          Layer.provideMerge(layerEnvironment(baseDir, { useDefaultHome })),
         ),
       ),
     );
@@ -222,55 +225,65 @@ const withPackagedWslHarness = <A, E, R>(
   }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)));
 
 describe("DesktopBackendConfiguration", () => {
-  it.effect("resolvePrimary produces a stable scoped bootstrap token", () =>
-    withHarness(
-      Effect.gen(function* () {
-        const environment = yield* DesktopEnvironment.DesktopEnvironment;
-        const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+  it.effect.each([false, true])(
+    "passes isolated home and stable bootstrap token to the owned server (default=%s)",
+    (useDefaultHome) =>
+      withHarness(
+        Effect.gen(function* () {
+          const environment = yield* DesktopEnvironment.DesktopEnvironment;
+          const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
 
-        const first = yield* configuration.resolvePrimary;
-        const second = yield* configuration.resolvePrimary;
+          const first = yield* configuration.resolvePrimary;
+          const second = yield* configuration.resolvePrimary;
 
-        assert.equal(first.executablePath, process.execPath);
-        assert.deepEqual(first.args.slice(0, 3), [
-          "--require",
-          environment.compileCachePath,
-          environment.backendEntryPath,
-        ]);
-        assert.equal(first.entryPath, environment.backendEntryPath);
-        assert.equal(first.cwd, environment.backendCwd);
-        assert.equal(first.captureOutput, true);
-        assert.equal(first.env.ELECTRON_RUN_AS_NODE, "1");
-        assert.equal(first.env.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING, "1");
-        assert.isUndefined(first.env.T3CODE_PORT);
-        assert.isUndefined(first.env.T3CODE_MODE);
-        assert.isUndefined(first.env.T3CODE_DESKTOP_LAN_HOST);
+          assert.equal(first.executablePath, process.execPath);
+          assert.deepEqual(first.args.slice(0, 3), [
+            "--require",
+            environment.compileCachePath,
+            environment.backendEntryPath,
+          ]);
+          assert.equal(first.entryPath, environment.backendEntryPath);
+          assert.equal(first.cwd, environment.backendCwd);
+          assert.equal(first.captureOutput, true);
+          assert.equal(first.env.ELECTRON_RUN_AS_NODE, "1");
+          assert.equal(first.env.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING, "1");
+          assert.isUndefined(first.env.T3CODE_PORT);
+          assert.isUndefined(first.env.T3CODE_MODE);
+          assert.isUndefined(first.env.T3CODE_DESKTOP_LAN_HOST);
 
-        assert.equal(first.bootstrap.mode, "desktop");
-        assert.equal(first.bootstrap.noBrowser, true);
-        assert.equal(first.bootstrap.port, 4888);
-        assert.equal(first.bootstrap.host, "0.0.0.0");
-        assert.equal(first.bootstrap.t3Home, environment.baseDir);
-        assert.equal(first.bootstrap.tailscaleServeEnabled, true);
-        assert.equal(first.bootstrap.tailscaleServePort, 8443);
-        assert.match(first.bootstrap.desktopBootstrapSecret ?? "", /^[0-9a-f]{64}$/i);
-        assert.equal(
-          second.bootstrap.desktopBootstrapSecret,
-          first.bootstrap.desktopBootstrapSecret,
-        );
-        assert.equal(
-          first.bootstrap.desktopBootstrapToken,
-          yield* currentDesktopBootstrapToken(
-            first.bootstrap.desktopBootstrapSecret ?? "",
-            yield* Clock.currentTimeMillis,
-          ).pipe(Effect.provide(NodeCrypto.layerMac)),
-        );
-        assert.equal(
-          yield* configuration.currentBootstrapToken,
-          first.bootstrap.desktopBootstrapToken,
-        );
-      }),
-    ),
+          assert.equal(first.bootstrap.mode, "desktop");
+          assert.equal(first.bootstrap.noBrowser, true);
+          assert.equal(first.bootstrap.port, 4888);
+          assert.equal(first.bootstrap.host, "0.0.0.0");
+          assert.equal(first.bootstrap.t3Home, environment.baseDir);
+          assert.equal(
+            environment.baseDir,
+            useDefaultHome
+              ? `${environment.homeDirectory}/.t3code-voice`
+              : environment.homeDirectory,
+          );
+          assert.equal(first.bootstrap.tailscaleServeEnabled, true);
+          assert.equal(first.bootstrap.tailscaleServePort, 8443);
+          assert.match(first.bootstrap.desktopBootstrapSecret ?? "", /^[0-9a-f]{64}$/i);
+          assert.equal(
+            second.bootstrap.desktopBootstrapSecret,
+            first.bootstrap.desktopBootstrapSecret,
+          );
+          assert.equal(
+            first.bootstrap.desktopBootstrapToken,
+            yield* currentDesktopBootstrapToken(
+              first.bootstrap.desktopBootstrapSecret ?? "",
+              yield* Clock.currentTimeMillis,
+            ).pipe(Effect.provide(NodeCrypto.layerMac)),
+          );
+          assert.equal(
+            yield* configuration.currentBootstrapToken,
+            first.bootstrap.desktopBootstrapToken,
+          );
+        }),
+        true,
+        useDefaultHome,
+      ),
   );
 
   it.effect("resolvePrimary starts from server.asar without materializing the WSL tree", () =>

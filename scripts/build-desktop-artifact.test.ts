@@ -29,6 +29,8 @@ import {
   parseWslRuntimeArchiveMembers,
   readWorkspaceConfig,
   createBuildConfig,
+  resolveDesktopBuildCommit,
+  DesktopBuildCommitError,
   DESKTOP_FILE_EXCLUSIONS,
   InvalidMacPasskeyRpDomainError,
   InvalidMacPasskeyPublishableKeyError,
@@ -503,54 +505,103 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }),
   );
 
-  it.effect("omits update feeds for pull request preview builds", () =>
+  it.effect("isolates macOS identity and refuses all inferred or mock update feeds", () =>
     Effect.gen(function* () {
-      const preview = yield* createBuildConfig(
-        "mac",
-        "dmg",
+      for (const version of [
         "0.0.33-pr.8182.1",
-        false,
-        false,
-        undefined,
-        undefined,
-      );
-      const release = yield* createBuildConfig(
-        "mac",
-        "dmg",
         "0.0.33",
-        false,
-        false,
-        undefined,
-        undefined,
-      );
-
-      const previewChannel = yield* createBuildConfig(
-        "mac",
-        "dmg",
         "0.0.41-preview.20260912.1589",
-        false,
-        false,
-        undefined,
-        undefined,
-      );
-
-      assert.isNull(preview.publish);
-      assert.isNull(previewChannel.publish);
-      assert.deepStrictEqual(release.publish, [
-        {
-          provider: "github",
-          owner: "pingdotgg",
-          repo: "t3code",
-          releaseType: "release",
-        },
-      ]);
+        "0.0.43-nightly.20260929.1",
+      ]) {
+        for (const mock of [false, true]) {
+          const config = yield* createBuildConfig(
+            "mac",
+            "dmg",
+            version,
+            false,
+            mock,
+            4141,
+            undefined,
+          );
+          assert.isNull(config.publish);
+          assert.equal(config.appId, "io.github.notrllyrn.t3codevoice");
+          assert.equal(
+            config.productName,
+            version.includes("nightly") ? "T3 Code Voice (Nightly)" : "T3 Code Voice",
+          );
+          assert.equal(config.artifactName, "T3-Code-Voice-${version}-${arch}.${ext}");
+          assert.deepEqual((config.mac as { protocols: unknown }).protocols, [
+            { name: "T3 Code Voice", schemes: ["t3code-voice", "t3code-voice-dev"] },
+          ]);
+          assert.notProperty(
+            (config.mac as { extendInfo: object }).extendInfo,
+            "CFBundleDocumentTypes",
+          );
+        }
+      }
     }).pipe(
       Effect.provide(
         ConfigProvider.layer(
-          ConfigProvider.fromEnv({ env: { GITHUB_REPOSITORY: "pingdotgg/t3code" } }),
+          ConfigProvider.fromEnv({
+            env: {
+              GITHUB_REPOSITORY: "pingdotgg/t3code",
+              T3CODE_DESKTOP_UPDATE_REPOSITORY: "pingdotgg/t3code",
+            },
+          }),
         ),
       ),
     ),
+  );
+
+  it.effect.each([
+    { label: "clean Git", git: true, explicit: undefined, dirty: false, accepted: true },
+    {
+      label: "matching explicit Git",
+      git: true,
+      explicit: "a".repeat(40),
+      dirty: false,
+      accepted: true,
+    },
+    { label: "mismatched Git", git: true, explicit: "b".repeat(40), dirty: false, accepted: false },
+    { label: "dirty Git", git: true, explicit: undefined, dirty: true, accepted: false },
+    {
+      label: "verified gitless input",
+      git: false,
+      explicit: "a".repeat(40),
+      dirty: false,
+      accepted: true,
+    },
+    { label: "unknown gitless", git: false, explicit: undefined, dirty: false, accepted: false },
+    { label: "invalid gitless", git: false, explicit: "unknown", dirty: false, accepted: false },
+    { label: "short gitless", git: false, explicit: "abcdef123456", dirty: false, accepted: false },
+  ])("requires full honest source metadata: $label", ({ git, explicit, dirty, accepted }) =>
+    Effect.gen(function* () {
+      const outputs = git ? ["/source", "a".repeat(40), dirty ? " M source.ts" : ""] : [];
+      const result = yield* Effect.result(
+        resolveDesktopBuildCommit("/source").pipe(
+          Effect.provideService(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() =>
+              Effect.succeed(mockProcess(git ? 0 : 1, outputs.shift() ?? "")),
+            ),
+          ),
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: explicit === undefined ? {} : { T3CODE_VOICE_BUILD_COMMIT: explicit },
+              }),
+            ),
+          ),
+        ),
+      );
+      if (accepted) {
+        assert.equal(result._tag, "Success");
+        if (result._tag === "Success") assert.equal(result.success, "a".repeat(40));
+      } else {
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure") assert.instanceOf(result.failure, DesktopBuildCommitError);
+      }
+    }),
   );
 
   it.effect("names the Electron window class in the Linux desktop entry", () =>
@@ -1490,7 +1541,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     });
 
     assert.deepStrictEqual(configuration, {
-      appId: "com.t3tools.t3code",
+      appId: "io.github.notrllyrn.t3codevoice",
       teamId: "ABC1234567",
       rpDomains: ["example.clerk.accounts.dev"],
       provisioningProfilePath: "/tmp/t3code.provisionprofile",
@@ -1513,7 +1564,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       "clerk.example.com",
       "example.clerk.accounts.dev",
     ]);
-    assert.include(entitlements, "<string>ABC1234567.com.t3tools.t3code</string>");
+    assert.include(entitlements, "<string>ABC1234567.io.github.notrllyrn.t3codevoice</string>");
     assert.include(entitlements, "<string>webcredentials:clerk.example.com</string>");
     assert.include(entitlements, "<string>webcredentials:example.clerk.accounts.dev</string>");
     assert.include(entitlements, "<key>com.apple.security.cs.allow-jit</key>");

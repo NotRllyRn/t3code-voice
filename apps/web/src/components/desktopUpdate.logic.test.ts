@@ -65,17 +65,14 @@ describe("desktop update button state", () => {
 });
 
 describe("desktop update UI helpers", () => {
-  it.each(["owner/repo/extra", "owner#notes/repo", "owner/repo?tab=notes"])(
-    "falls back to upstream for an invalid configured repository: %s",
-    (repository) => {
-      expect(getDesktopUpdateReleaseHistoryUrl(repository)).toBe(
-        "https://github.com/pingdotgg/t3code/releases",
-      );
-      expect(getDesktopUpdateReleaseUrl("1.2.3", repository)).toBe(
-        "https://github.com/pingdotgg/t3code/releases/tag/v1.2.3",
-      );
-    },
-  );
+  it("points manual download actions only at the fork", () => {
+    expect(getDesktopUpdateReleaseHistoryUrl()).toBe(
+      "https://github.com/NotRllyRn/t3code-voice/releases",
+    );
+    expect(getDesktopUpdateReleaseUrl("1.2.3")).toBe(
+      "https://github.com/NotRllyRn/t3code-voice/releases/tag/v1.2.3",
+    );
+  });
 });
 
 describe("canCheckForUpdate", () => {

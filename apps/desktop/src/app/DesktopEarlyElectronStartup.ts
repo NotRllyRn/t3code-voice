@@ -1,3 +1,4 @@
+import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -53,7 +54,7 @@ function resolveEarlyDesktopSettingsPath(input: {
   readonly homeDirectory: string;
   readonly joinPath: JoinPath;
 }): string {
-  const t3Home = Option.fromUndefinedOr(input.env.T3CODE_HOME);
+  const t3Home = Option.fromUndefinedOr(input.env[FORK_DESKTOP.homeEnvironmentVariable]);
   const baseDir = resolveDesktopBaseDir({
     homeDirectory: input.homeDirectory,
     joinPath: input.joinPath,

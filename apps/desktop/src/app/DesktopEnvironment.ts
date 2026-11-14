@@ -1,3 +1,4 @@
+import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
 import type {
   DesktopAppBranding,
   DesktopAppStageLabel,
@@ -85,7 +86,7 @@ export class DesktopEnvironment extends Context.Service<
   }
 >()("@t3tools/desktop/app/DesktopEnvironment") {}
 
-const APP_BASE_NAME = "T3 Code";
+const APP_BASE_NAME = FORK_DESKTOP.productName;
 
 function resolveDesktopAppStageLabel(input: {
   readonly isDevelopment: boolean;
@@ -228,7 +229,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
     branding,
     displayName,
     appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
-      isDevelopment ? "com.t3tools.t3code.dev" : "com.t3tools.t3code",
+      isDevelopment ? FORK_DESKTOP.developmentAppId : FORK_DESKTOP.appId,
     ),
     linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment),
     linuxApplicationsDir,

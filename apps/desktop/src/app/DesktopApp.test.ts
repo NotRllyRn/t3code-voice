@@ -161,7 +161,7 @@ it.effect.each([false, true])(
             registerDesktopProtocol: () => Effect.void,
           } as unknown as ElectronProtocol.ElectronProtocol["Service"]),
           Effect.provideService(DesktopLegacyLocalStorage.DesktopLegacyLocalStorage, {
-            load: () => Effect.void,
+            load: () => Effect.die("fork startup must not import upstream browser state"),
           } as unknown as DesktopLegacyLocalStorage.DesktopLegacyLocalStorage["Service"]),
           Effect.provideService(DesktopSnapShot.DesktopSnapShot, {
             initialize: Effect.void,
