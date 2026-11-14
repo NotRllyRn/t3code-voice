@@ -1,5 +1,9 @@
 import { useSidebarWorkspaceTabs } from "../layout/workspace/useSystemWorkspaceTabBar";
 import { Button } from "../../components/ui/Button";
+import {
+  NativeVoicePanel,
+  type NativeVoicePanelProps,
+} from "../voice-conversation/NativeVoicePanel";
 import * as Dialog from "../../components/ui/Dialog";
 import type { ComposerTextPaste } from "../../native/T3ComposerEditor.types";
 import { useDeviceType } from "../../native/native-layout-metrics";
@@ -250,6 +254,7 @@ export interface ThreadComposerProps {
     followUp?: ActiveTurnComposerAction,
     stillSendable?: () => boolean,
   ) => Promise<MessageId | null>;
+  readonly voice?: NativeVoicePanelProps;
   readonly onShowUsageLimits: (report: UsageLimitsReport | null) => void;
   readonly canSwitchProvider: boolean;
   readonly onHeightChange?: (height: number) => void;
@@ -837,6 +842,18 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
         style={{ maxWidth: props.contentMaxWidth }}
       >
         {props.draftControls}
+        {!props.hidden && !props.isDraft && props.voice ? (
+          <NativeVoicePanel
+            key={props.voice.owner.key}
+            {...props.voice}
+            disabled={
+              isSubmissionLocked ||
+              isVoiceInputPresented ||
+              !!props.sendBlockedReason ||
+              queuedEdit !== null
+            }
+          />
+        ) : null}
         {!isSubmissionLocked &&
         composerMenu.trigger &&
         (composerMenu.items.length > 0 || composerMenu.trigger.kind === "pull-request") ? (

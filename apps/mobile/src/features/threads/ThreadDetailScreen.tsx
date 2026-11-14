@@ -292,6 +292,7 @@ export interface ThreadDetailScreenProps {
   /** Present while the thread's queue is held. */
   readonly onResumeQueue: (() => Promise<void>) | null;
   readonly offersSideChat: boolean;
+  readonly voice?: import("../voice-conversation/NativeVoicePanel").NativeVoicePanelProps;
   readonly onSendMessage: (
     followUp?: ActiveTurnComposerAction,
     beforeDispatch?: (
@@ -1910,6 +1911,7 @@ function ThreadDetailBody(
                         onStopThread={props.onStopThread}
                         onResumeQueue={props.onResumeQueue}
                         onSendMessage={handleSendMessage}
+                        voice={props.voice}
                         onShowUsageLimits={showUsageLimits}
                         canSwitchProvider={props.canSwitchThreadProvider}
                         onHeightChange={handleComposerHeightChange}
