@@ -1,4 +1,11 @@
 import type { NavigationState, PartialState } from "@react-navigation/native";
+import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
+
+export const MOBILE_APP_LINK_PREFIXES = [
+  `${FORK_DESKTOP.scheme}://`,
+  `${FORK_DESKTOP.developmentScheme}://`,
+  `${FORK_DESKTOP.scheme}-preview://`,
+];
 
 /**
  * The Expo dev client launches the app via
@@ -12,7 +19,9 @@ export function shouldHandleAppLink(url: string, cloudConfigured: boolean): bool
   return (
     !route.includes("expo-development-client") &&
     !route.includes("://expo-sharing") &&
-    !/^t3code(-dev|-preview)?:\/*$/.test(url) &&
+    !/^t3code(?:-dev|-preview)?:/i.test(route) &&
+    !/^https?:\/\/app\.t3\.codes(?=[:/]|$)/i.test(route) &&
+    !MOBILE_APP_LINK_PREFIXES.some((prefix) => route.replace(/\/+$/, "") === prefix.slice(0, -2)) &&
     (cloudConfigured || !CLOUD_ONLY_LINK_PATH.test(route))
   );
 }
