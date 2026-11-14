@@ -32,7 +32,7 @@ export const readRealtimeVoiceConfig = Effect.gen(function* () {
   });
   const reference = yield* decodeReference(yield* Config.String("T3CODE_REALTIME_SECRET_REF"));
   const key = yield* requireSettingsSecret(yield* SecretResolver.SecretResolver, reference);
-  if (!key.trim() || /[\r\n]/.test(key)) return yield* Effect.fail(new VoiceRelayError());
+  if (!key.trim() || /[\r\n]/.test(key)) return yield* new VoiceRelayError();
   const voice = yield* Config.String("T3CODE_REALTIME_VOICE").pipe(Config.withDefault("alloy"));
   const transcription = yield* Config.String("T3CODE_REALTIME_TRANSCRIPTION_MODEL").pipe(
     Config.withDefault("whisper-1"),
@@ -121,7 +121,7 @@ export const realtimeVoiceRouteLayer = Layer.unwrap(
                   !instance?.enabled ||
                   instance.driverKind !== "codex"
                 )
-                  return yield* Effect.fail(new VoiceRelayError());
+                  return yield* new VoiceRelayError();
               }),
             );
             yield* relayVoiceSockets(

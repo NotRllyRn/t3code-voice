@@ -1,5 +1,6 @@
 import * as NodeAssert from "node:assert/strict";
 import * as NodeEvents from "node:events";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- exercises real Node HTTP upgrades and ws backpressure.
 import * as NodeHttp from "node:http";
 import * as NodeWS from "@effect/platform-node/NodeWS";
 import * as Effect from "effect/Effect";

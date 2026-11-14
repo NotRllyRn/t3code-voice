@@ -15,7 +15,7 @@ export const encodeVoiceFrame = Schema.encodeEffect(json);
 const decode = Schema.decodeUnknownEffect(json);
 const parseFrame = Effect.fn("voice.parseFrame")(function* (frame: string | Uint8Array) {
   if (typeof frame !== "string" || Buffer.byteLength(frame) > MAX_FRAME_BYTES)
-    return yield* Effect.fail(new VoiceRelayError());
+    return yield* new VoiceRelayError();
   return yield* decode(frame);
 });
 const pump = Effect.fn("voice.pump")(function* <E>(
@@ -50,7 +50,7 @@ export const relayVoiceSockets = Effect.fn("voice.relay")(function* <E>(
         try: () => clientEvent(value),
         catch: () => new VoiceRelayError(),
       });
-      if (!ready) return yield* Effect.fail(new VoiceRelayError());
+      if (!ready) return yield* new VoiceRelayError();
       yield* Effect.try({ try: () => budget.accept(e), catch: () => new VoiceRelayError() });
       yield* toUpstream.write(yield* encodeVoiceFrame(e));
     }),

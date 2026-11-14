@@ -1,4 +1,5 @@
-import * as NodeStream from "node:stream";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- ws upgrade hooks require Node's Duplex type.
+import type * as NodeStream from "node:stream";
 import * as NodeWS from "@effect/platform-node/NodeWS";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -151,7 +152,7 @@ export const boundedVoiceSocket = (
       const reader = yield* socket.reader;
       const ws = wire();
       const guard = ws && guards.get(ws);
-      if (!ws || !guard) return yield* Effect.fail(transportError());
+      if (!ws || !guard) return yield* transportError();
       return {
         ...reader,
         pull: Effect.suspend(() =>

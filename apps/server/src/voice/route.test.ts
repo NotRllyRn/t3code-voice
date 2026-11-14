@@ -74,7 +74,7 @@ test.live.each([{}, { ...config, T3CODE_REALTIME_URL: "https://invalid.example" 
                 Effect.succeed({ enabled: true, driverKind: "codex" } as ProviderInstance),
             }),
           ),
-          Layer.provide(secrets),
+          Layer.provideMerge(secrets),
           Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(variables))),
         ),
         { disableLogger: true },
