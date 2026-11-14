@@ -51,6 +51,7 @@ import * as CloudSpeech from "./speech/CloudSpeech.ts";
 import { speechHttpApiLayer } from "./speech/http.ts";
 import { speechStreamRouteLayer } from "./speech/stream.ts";
 import { realtimeVoiceRouteLayer } from "./voice/route.ts";
+import { VoiceWebSocket } from "./voice/transport.ts";
 import * as PullRequestProviderRegistry from "./pullRequest/PullRequestProviderRegistry.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
 import * as SqlitePersistence from "./persistence/Sqlite.ts";
@@ -379,7 +380,7 @@ const layerHttpServer = Layer.unwrap(
         // window is shared across frames — that also makes small frames cheap
         // to compress, so no size threshold is set (ws only honors
         // `threshold` when context takeover is disabled).
-        websocket: { perMessageDeflate: true },
+        websocket: { perMessageDeflate: true, WebSocket: VoiceWebSocket },
       },
     );
   }),

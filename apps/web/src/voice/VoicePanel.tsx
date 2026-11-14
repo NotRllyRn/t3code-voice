@@ -5,7 +5,8 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
-import { useEffect, useMemo, useRef, useState } from "react";
+import * as SecureRandom from "effect/crypto/SecureRandom";
+import { useEffect, useRef, useState } from "react";
 import { useEnvironmentScope, usePreparedConnection } from "../state/session";
 import { runEnvironmentSpeech } from "../speech/runEnvironmentSpeech";
 import { Button } from "../components/ui/button";
@@ -64,8 +65,9 @@ function VoicePanelSession({ environmentId, threadId, disabled, onQueue }: Props
     controller: VoiceController | null;
     value: VoiceState;
   }>({ controller: null, value: INITIAL_VOICE_STATE });
-  const controller = useMemo(() => {
-    if (!prepared) return null;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Each effect setup owns a fresh disposable audio session, including StrictMode replay.
+  useEffect(() => {
+    if (!prepared) return;
     const owner = new VoiceController(
       {
         microphone: () =>
@@ -85,18 +87,23 @@ function VoicePanelSession({ environmentId, threadId, disabled, onQueue }: Props
       },
       (value) => setSnapshot({ controller: owner, value }),
     );
-    return owner;
+    // Publish the newly acquired external controller, including after StrictMode replay.
+    // eslint-disable-next-line react/set-state-in-effect
+    setSnapshot({ controller: owner, value: INITIAL_VOICE_STATE });
+    return () => owner.dispose();
   }, [prepared, threadId]);
-  const voice = snapshot.controller === controller ? snapshot.value : INITIAL_VOICE_STATE;
+  const controller = snapshot.controller;
+  const voice = snapshot.value;
   const [request, setRequest] = useState("");
   const [sendState, setSendState] = useState<"idle" | "sending" | "sent" | "failed">("idle");
   const retry = useRef<VoiceHandoff | null>(null);
   const sending = useRef(false);
-  const allowed = !disabled && canOperate && !!controller && supported();
-  useEffect(() => () => controller?.dispose(), [controller]);
+  const allowed = !disabled && canOperate && !!prepared && !!controller && supported();
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Permission/connection loss must stop the external microphone and transport.
   useEffect(() => {
     if (!allowed) void controller?.stop();
   }, [allowed, controller]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Browser visibility events release the external audio session.
   useEffect(() => {
     const stop = () => {
       void controller?.stop();
@@ -125,8 +132,8 @@ function VoicePanelSession({ environmentId, threadId, disabled, onQueue }: Props
         ? retry.current
         : {
             text,
-            commandId: crypto.randomUUID(),
-            messageId: crypto.randomUUID(),
+            commandId: SecureRandom.uuidV4Unsafe(),
+            messageId: SecureRandom.uuidV4Unsafe(),
           };
     retry.current = handoff;
     sending.current = true;
