@@ -1,4 +1,11 @@
 import * as NodeModule from "node:module";
+import { vi } from "vite-plus/test";
+
+// Exercise the retained updater engine separately from the tester's mandatory off switch.
+vi.mock("@t3tools/shared/forkIdentity", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@t3tools/shared/forkIdentity")>();
+  return { ...actual, FORK_DESKTOP: { ...actual.FORK_DESKTOP, manualUpdatesOnly: false } };
+});
 
 import { assert, describe, it } from "@effect/vitest";
 import { DESKTOP_UPDATE_RESTART_MARKER_FILE } from "@t3tools/contracts";

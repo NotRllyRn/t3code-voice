@@ -7,6 +7,7 @@ import {
   type DesktopUpdateCheckResult,
   type DesktopUpdateState,
 } from "@t3tools/contracts";
+import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
 import { errorTag } from "@t3tools/shared/observability";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -464,6 +465,7 @@ export const make = Effect.gen(function* () {
   );
 
   const resolveDisabledReason = Effect.gen(function* () {
+    if (FORK_DESKTOP.manualUpdatesOnly) return Option.some(FORK_DESKTOP.manualUpdatesReason);
     const hasFeedConfig = yield* hasUpdateFeedConfig;
     return Option.fromNullishOr(
       getAutoUpdateDisabledReason({
@@ -1118,6 +1120,20 @@ export const make = Effect.gen(function* () {
       Effect.flatMap((state) => resolveStateDisabledReason(state.channel)),
     ),
     configure: Effect.gen(function* () {
+      if (FORK_DESKTOP.manualUpdatesOnly) {
+        yield* electronUpdater.setAutoDownload(false);
+        yield* electronUpdater.setAutoInstallOnAppQuit(false);
+        yield* Ref.set(desktopState.canInstallUpdates, false);
+        const settings = yield* desktopSettings.get;
+        yield* setState(
+          createBaseUpdateState(
+            settings.updateChannel,
+            Option.some(FORK_DESKTOP.manualUpdatesReason),
+            environment,
+          ),
+        );
+        return;
+      }
       const context = yield* Effect.context<never>();
       const runEffect = (effect: Effect.Effect<void>) => {
         void Effect.runPromiseWith(context)(effect);
@@ -1204,6 +1220,7 @@ export const make = Effect.gen(function* () {
       options?: { readonly minimumVersion?: string | undefined },
     ) {
       yield* Effect.annotateCurrentSpan({ channel: nextChannel });
+      if (FORK_DESKTOP.manualUpdatesOnly) return yield* Ref.get(updateStateRef);
       if (Option.isSome(channelBlockedReason(nextChannel))) {
         return yield* new DesktopUpdateChannelManagedError({
           channel: nextChannel,

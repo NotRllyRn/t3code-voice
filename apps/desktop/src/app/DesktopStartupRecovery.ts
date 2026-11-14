@@ -1,3 +1,4 @@
+import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
 import type { DesktopUpdateState } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -18,7 +19,7 @@ import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopObservability from "./DesktopObservability.ts";
 import * as DesktopState from "./DesktopState.ts";
 
-const RELEASES_URL = "https://github.com/pingdotgg/t3code/releases";
+const RELEASES_URL = FORK_DESKTOP.releasesUrl;
 const LAST_STARTED_VERSION_FILE = "desktop-last-started-version";
 // Buttons are plain links to this host; will-navigate cancels them and runs the action.
 const ACTION_ORIGIN = "https://startup-recovery.invalid";
@@ -44,6 +45,9 @@ export function resolveStartupRecoveryOffer(
   lastStartedVersion: string | null,
   managedPolicy = false,
 ): StartupRecoveryOffer {
+  if (FORK_DESKTOP.manualUpdatesOnly) {
+    return managedPolicy ? { _tag: "ManagedPolicy" } : { _tag: "Releases" };
+  }
   if (update.status === "downloading" && update.availableVersion !== null) {
     return {
       _tag: "Downloading",
@@ -99,7 +103,7 @@ function describeOffer(offer: StartupRecoveryOffer): { text: string; action: str
       };
     case "Releases":
       return {
-        text: "Get a different version from the releases page.",
+        text: `${FORK_DESKTOP.manualUpdatesReason} Get a tester from the fork's releases page.`,
         action: actionLink("releases", "Open releases", true),
       };
     case "ManagedPolicy":

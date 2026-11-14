@@ -30,71 +30,15 @@ const updateState = (patch: Partial<DesktopUpdateState>): DesktopUpdateState => 
 });
 
 describe("resolveStartupRecoveryOffer", () => {
-  it("offers a newer version before going back", () => {
-    expect(
-      resolveStartupRecoveryOffer(
-        updateState({ status: "available", availableVersion: "0.1.4" }),
-        "0.1.2",
-      ),
-    ).toEqual({ _tag: "Update", version: "0.1.4" });
-  });
-
-  it("offers a retained download after a later check fails", () => {
-    expect(
-      resolveStartupRecoveryOffer(
-        updateState({ status: "error", errorContext: "check", downloadedVersion: "0.1.4" }),
-        null,
-      ),
-    ).toEqual({ _tag: "Update", version: "0.1.4" });
-  });
-
-  it("waits for the update check before offering to go back", () => {
-    expect(resolveStartupRecoveryOffer(updateState({ status: "checking" }), "0.1.2")).toEqual({
-      _tag: "Checking",
-    });
-  });
-
-  it("offers the last version that started when no update exists", () => {
-    expect(resolveStartupRecoveryOffer(updateState({ status: "up-to-date" }), "0.1.2")).toEqual({
-      _tag: "Reinstall",
-      version: "0.1.2",
-    });
-  });
-
-  it("does not offer an update that already failed to apply here", () => {
-    expect(
-      resolveStartupRecoveryOffer(
-        updateState({
-          status: "downloaded",
-          downloadedVersion: "0.1.4",
-          notAppliedVersion: "0.1.4",
-        }),
-        "0.1.2",
-      ),
-    ).toEqual({ _tag: "Reinstall", version: "0.1.2" });
-  });
-
-  it("blames the managed policy unless a newer version can read it", () => {
-    expect(
-      resolveStartupRecoveryOffer(
-        updateState({ status: "available", availableVersion: "0.1.4" }),
-        "0.1.2",
-        true,
-      ),
-    ).toEqual({ _tag: "Update", version: "0.1.4" });
-    expect(
-      resolveStartupRecoveryOffer(updateState({ status: "up-to-date" }), "0.1.2", true),
-    ).toEqual({ _tag: "ManagedPolicy" });
-  });
-
-  it("falls back to the releases page when this version never started", () => {
-    expect(resolveStartupRecoveryOffer(updateState({ status: "disabled" }), "0.1.3")).toEqual({
-      _tag: "Releases",
-    });
-    expect(resolveStartupRecoveryOffer(updateState({ status: "up-to-date" }), null)).toEqual({
-      _tag: "Releases",
-    });
-  });
+  it.each(["available", "downloaded", "checking", "up-to-date", "disabled"] as const)(
+    "offers only manual fork releases, never an upstream replacement (%s)",
+    (status) => {
+      const state = updateState({ status, availableVersion: "0.1.4", downloadedVersion: "0.1.4" });
+      expect(resolveStartupRecoveryOffer(state, "0.1.2")).toEqual({ _tag: "Releases" });
+      expect(resolveStartupRecoveryOffer(state, null)).toEqual({ _tag: "Releases" });
+      expect(resolveStartupRecoveryOffer(state, "0.1.2", true)).toEqual({ _tag: "ManagedPolicy" });
+    },
+  );
 });
 
 it.effect.each([

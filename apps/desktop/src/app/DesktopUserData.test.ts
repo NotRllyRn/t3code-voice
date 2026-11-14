@@ -7,38 +7,47 @@ import * as PlatformError from "effect/PlatformError";
 
 import { clearStaleGpuCaches, resolveUserDataPath } from "./DesktopUserData.ts";
 
-it.effect.each(["t3code", "T3 Code (Alpha)"])(
-  "preserves Windows credential keys from %s without copying browser databases",
-  (sourceName) =>
+it.effect.each([
+  { platform: "darwin", isDevelopment: false },
+  { platform: "darwin", isDevelopment: true },
+  { platform: "win32", isDevelopment: false },
+  { platform: "win32", isDevelopment: true },
+] as const)(
+  "never probes or migrates upstream profiles on $platform (dev=$isDevelopment)",
+  ({ platform, isDevelopment }) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-v2-profile-" });
-      const source = path.join(directory, sourceName);
-      const destination = path.join(directory, "t3code-v2");
-      const state = '{"os_crypt":{"encrypted_key":"test-encrypted-key"}}';
-      yield* fs.makeDirectory(path.join(directory, "T3 Code (Alpha)"), { recursive: true });
-      yield* fs.makeDirectory(path.join(source, "IndexedDB"), { recursive: true });
-      yield* fs.writeFileString(path.join(source, "Local State"), state);
-      yield* fs.writeFileString(path.join(source, "IndexedDB", "LOCK"), "V1 owns this database");
-      yield* resolveUserDataPath({
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "voice-profile-" });
+      for (const name of [
+        "t3code",
+        "t3code-v2",
+        "t3code-dev",
+        "T3 Code (Alpha)",
+        "T3 Code (Dev)",
+      ]) {
+        yield* fs.makeDirectory(path.join(directory, name), { recursive: true });
+        yield* fs.writeFileString(path.join(directory, name, "Local State"), "upstream state");
+      }
+      const profile = yield* resolveUserDataPath({
         appDataDirectory: directory,
-        isDevelopment: false,
-        platform: "win32",
-      });
-      assert.equal(yield* fs.readFileString(path.join(destination, "Local State")), state);
-      assert.equal(yield* fs.readFileString(path.join(source, "Local State")), state);
-      assert.isFalse(yield* fs.exists(path.join(destination, "IndexedDB")));
-      yield* fs.writeFileString(path.join(destination, "Local State"), "existing V2 state");
-      yield* resolveUserDataPath({
-        appDataDirectory: directory,
-        isDevelopment: false,
-        platform: "win32",
-      });
-      assert.equal(
-        yield* fs.readFileString(path.join(destination, "Local State")),
-        "existing V2 state",
+        isDevelopment,
+        platform,
+      }).pipe(
+        Effect.provideService(
+          FileSystem.FileSystem,
+          FileSystem.makeNoop({
+            exists: () => Effect.die("must not probe upstream profiles"),
+            readFileString: () => Effect.die("must not read upstream state"),
+            writeFileString: () => Effect.die("must not migrate upstream state"),
+          }),
+        ),
       );
+      assert.equal(
+        profile,
+        path.join(directory, isDevelopment ? "t3code-voice-dev" : "t3code-voice"),
+      );
+      assert.isFalse(yield* fs.exists(profile));
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 

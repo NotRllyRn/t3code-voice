@@ -1,3 +1,4 @@
+import { forkDesktopScheme } from "@t3tools/shared/forkIdentity";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -13,12 +14,7 @@ import * as Scope from "effect/Scope";
 import * as Electron from "electron";
 
 export const DESKTOP_HOST = "app";
-const DESKTOP_PRODUCTION_SCHEME = "t3code";
-const DESKTOP_DEVELOPMENT_SCHEME = "t3code-dev";
-
-export function getDesktopScheme(isDevelopment: boolean): string {
-  return isDevelopment ? DESKTOP_DEVELOPMENT_SCHEME : DESKTOP_PRODUCTION_SCHEME;
-}
+export const getDesktopScheme = forkDesktopScheme;
 
 function getDesktopOrigin(isDevelopment: boolean): string {
   return `${getDesktopScheme(isDevelopment)}://${DESKTOP_HOST}`;
@@ -111,7 +107,7 @@ function withContentSecurityPolicy(response: Response, policy: string): Response
 function registerDesktopSchemePrivilegesSync(): void {
   Electron.protocol.registerSchemesAsPrivileged([
     {
-      scheme: DESKTOP_PRODUCTION_SCHEME,
+      scheme: getDesktopScheme(false),
       privileges: {
         standard: true,
         secure: true,
@@ -123,7 +119,7 @@ function registerDesktopSchemePrivilegesSync(): void {
       },
     },
     {
-      scheme: DESKTOP_DEVELOPMENT_SCHEME,
+      scheme: getDesktopScheme(true),
       privileges: {
         standard: true,
         secure: true,
