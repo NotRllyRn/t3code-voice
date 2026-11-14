@@ -1,6 +1,7 @@
 // Copied unchanged to the browser host. Uses its existing Playwright/Chromium, never installs.
 import * as NodeAssert from "node:assert/strict";
 import * as NodeModule from "node:module";
+import { createPlaybackLedger } from "./accounting.mjs";
 const config = JSON.parse(Buffer.from(process.argv[2], "base64").toString());
 const { chromium } = NodeModule.createRequire(import.meta.url)(config.playwrightPath);
 let browser, context, page;
@@ -31,11 +32,7 @@ for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"])
   });
 const errors = [];
 try {
-  browser = await chromium.launch({
-    headless: true,
-    chromiumSandbox: true,
-    args: ["--autoplay-policy=no-user-gesture-required"],
-  });
+  browser = await chromium.connect(config.browserEndpoint);
   context = await browser.newContext();
   await context.route("**/*", (route) => {
     const url = new URL(route.request().url());
@@ -43,7 +40,8 @@ try {
       ? route.continue()
       : route.abort("blockedbyclient");
   });
-  await context.addInitScript(() => {
+  const instrument = () => {
+    const ledger = window.__voiceLedger;
     const metrics = (window.__voiceOffline = {
       sockets: 0,
       opened: 0,
@@ -65,7 +63,9 @@ try {
     const streams = [],
       contexts = [],
       ports = [];
-    let cut = false;
+    let cut = false,
+      identity;
+    const interruptions = (window.__voiceInterruptions = []);
     window.__voiceResources = { streams, contexts, ports };
     // Synthetic input only. The application's own AudioContext and AudioWorklet are real.
     const NativeContext = window.AudioContext;
@@ -95,6 +95,8 @@ try {
       constructor(...args) {
         super(...args);
         metrics.worklets++;
+        const nodeId = metrics.worklets;
+        let epoch = 0;
         const port = this.port;
         ports.push({ closed: false });
         const lease = ports.at(-1),
@@ -109,15 +111,30 @@ try {
           if (event.type === "audio") {
             metrics.playbackChunks++;
             metrics.playbackSamples += event.samples.length;
+            ledger.enqueue(nodeId, event.epoch, event.samples.length, identity);
             if (cut) metrics.stalePlayback++;
           }
-          if (event.type === "flush") metrics.flushes++;
+          if (event.type === "flush") {
+            metrics.flushes++;
+            ledger.flush(
+              nodeId,
+              epoch,
+              event,
+              Math.ceil(((args[0].baseLatency || 0) + (args[0].outputLatency || 0)) * 24000),
+              args[0].sampleRate,
+            );
+            epoch = event.epoch;
+          }
           return post(...values);
         };
         port.addEventListener("message", ({ data }) => {
           if (data.type === "capture") metrics.captureSamples += data.samples.length;
-          if (data.type === "progress") metrics.progressSamples += data.played;
-          if (data.type === "flushed") metrics.flushed++;
+          if (data.type === "progress") ledger.progress(nodeId, data.epoch, data.played);
+          if (data.type === "flushed") {
+            metrics.flushed++;
+            ledger.flushed(nodeId, data);
+          }
+          metrics.progressSamples = ledger.snapshot().progressSamples;
         });
         port.start();
       }
@@ -135,7 +152,10 @@ try {
           if (event.type === "relay.ready") metrics.ready++;
           if (event.type === "relay.error") metrics.errors++;
           if (event.type === "response.created") cut = false;
-          if (event.type === "response.output_audio.delta" && cut) metrics.stale++;
+          if (event.type === "response.output_audio.delta") {
+            if (cut) metrics.stale++;
+            else identity = { item_id: event.item_id, content_index: event.content_index };
+          }
         });
         const send = this.send.bind(this);
         this.send = (data) => {
@@ -143,12 +163,27 @@ try {
           if (event.type === "input_audio_buffer.append") metrics.appends++;
           if (event.type === "input_audio_buffer.commit") metrics.commits++;
           if (event.type === "response.cancel") cut = true;
+          if (event.type === "conversation.item.truncate") {
+            const flush = ledger.flushes.findLast((fact) => fact.itemId === event.item_id);
+            if (!flush || flush.played === undefined)
+              throw Error("Truncate preceded its interruption flush acknowledgement");
+            if (interruptions.some((fact) => fact.node === flush.node && fact.id === flush.id))
+              throw Error("Interruption flush reused");
+            interruptions.push({ ...flush });
+          }
           return send(data);
         };
       }
     };
+  };
+  await context.addInitScript({
+    content: `window.__voiceLedger = (${createPlaybackLedger.toString()})();(${instrument.toString()})();`,
   });
   page = await context.newPage();
+  if (config.timeoutProbe) {
+    console.log(JSON.stringify({ timeoutProbeReady: true }));
+    await new Promise(() => {});
+  }
   page.setDefaultTimeout(20_000);
   page.on("pageerror", (error) => errors.push(error.stack));
   await page.goto(`${config.origin}/pair#token=${config.auth}`, { timeout: 90_000 });
@@ -285,14 +320,11 @@ try {
     await clickEnabled("Record turn");
     // Capture enough actual 24kHz worklet PCM for the server's minimum turn budget.
     await page.waitForFunction((count) => window.__voiceOffline.appends >= count + 4, before);
-    const played = await page.evaluate(() => window.__voiceOffline.progressSamples);
     await clickEnabled("Send voice turn");
-    await page.waitForFunction(
-      ({ turn, played }) =>
-        window.__voiceOffline.playbackChunks === turn &&
-        window.__voiceOffline.progressSamples > played,
-      { turn, played },
-    );
+    await page.waitForFunction((turn) => {
+      const rows = window.__voiceLedger.epochs.filter((row) => row.enqueued > 0);
+      return rows.length === turn && rows.at(-1).enqueued === 12000 && rows.at(-1).progress > 0;
+    }, turn);
     await clickEnabled("Interrupt voice");
     await page.waitForFunction((count) => window.__voiceOffline.stale === count, turn);
     NodeAssert.equal(await page.evaluate(() => window.__voiceOffline.stalePlayback), 0);
@@ -310,6 +342,8 @@ try {
   );
   const metrics = await page.evaluate(() => ({
     ...window.__voiceOffline,
+    ...window.__voiceLedger.snapshot(),
+    interruptions: window.__voiceInterruptions,
     contexts: window.__voiceResources.contexts.length,
     streams: window.__voiceResources.streams.length,
   }));
@@ -319,6 +353,16 @@ try {
   NodeAssert.equal(metrics.stale, 2);
   NodeAssert.equal(metrics.stalePlayback, 0);
   NodeAssert.equal(metrics.playbackChunks, 2);
+  NodeAssert.equal(metrics.playbackSamples, 24000);
+  NodeAssert.equal(metrics.interruptions.length, 2);
+  for (const row of metrics.epochs.filter((row) => row.enqueued > 0)) {
+    NodeAssert.equal(row.enqueued, 12000);
+    NodeAssert.ok(row.progress > 0);
+    NodeAssert.ok(
+      row.consumed >= row.progress && row.consumed < row.enqueued,
+      "interrupt before playback drains",
+    );
+  }
   NodeAssert.ok(metrics.captureSamples >= 4800);
   NodeAssert.ok(metrics.progressSamples > 0);
   NodeAssert.ok(metrics.worklets >= 1);

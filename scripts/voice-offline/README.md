@@ -49,6 +49,9 @@ Source remains here after cleanup. On failure, use the printed log path.
   Interrupt each after playback progresses, inject late audio after truncate,
   and prove it never reaches playback. Stop explicitly; assert idle, closed
   sockets/contexts/ports, and ended media tracks.
+- Count cumulative playback progress per native node/epoch, and assert 12,000
+  enqueued samples per response. Match each truncate's item, content index, and
+  endpoint to its acknowledged interruption flush and measured output latency.
 - Assert mock protocol counts, no tools or unexpected events, and finite stop
   diagnostics. Stop currently logs a non-upstream relay failure too; this check
   records that existing behavior without changing the application.
@@ -60,10 +63,18 @@ HTTP requests are restricted to loopback. SSH is transport to the test browser,
 not provider access. This is an offline regression check, not a security sandbox.
 There is no live mode. Do not pass provider keys or production state paths.
 
-Normal completion, failure, and termination signals clean up child processes,
-tunnels, remote runner files, temporary state, and synthetic audio. Evidence is
-retained. SIGKILL/host loss cannot guarantee cleanup; inspect the named temporary
-resources if that happens.
+The browser-host owner retains the actual driver/Chromium child handles. Cleanup
+requests its private, token-checked socket and waits for child exit before deleting
+runner files; it never kills by process name or a PID read from a file. An independent
+four-minute watchdog also stops those children if the SSH transport disappears.
+Normal completion, failure, and termination clean up tunnels, temporary state,
+and synthetic audio. A failed remote cleanup retains its runner directory.
+SIGKILL of the owner or host loss cannot guarantee cleanup.
+
+For a bounded negative cleanup check, set `VOICE_OFFLINE_TIMEOUT_PROBE=1` with the
+same command. It deliberately aborts the local browser wait once a real disposable
+Chromium context is open. Expect nonzero exit and `ownedCleanup: true` in `run.log`.
+Focused accounting regressions: `node --test scripts/voice-offline/accounting.test.mjs`.
 
 This does **not** validate a live provider, physical microphone/speakers,
 subjective audio quality, native app permissions, or the unknown live-provider
