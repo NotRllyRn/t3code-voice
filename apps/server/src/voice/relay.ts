@@ -5,6 +5,7 @@ import {
   clientEvent,
   MAX_FRAME_BYTES,
   MAX_SESSION_MS,
+  object,
   serverEvent,
   VoiceBudget,
 } from "./protocol.ts";
@@ -42,6 +43,20 @@ export const relayVoiceSockets = Effect.fn("voice.relay")(function* <E>(
   const toUpstream = yield* upstream.writer;
   const budget = new VoiceBudget();
   let ready = false;
+  let responseId: unknown;
+  const diagnostics = {
+    upstreamFailureEvent: "none",
+    upstreamErrorCode: "none",
+    lastClientEvent: "none",
+    lastServerEvent: "none",
+    responsePending: false,
+    responseGenerating: false,
+    responsesCreated: 0,
+    responsesDone: 0,
+    cancelRequests: 0,
+    cancelWithoutObservedActiveResponse: 0,
+    truncateRequests: 0,
+  };
   yield* toUpstream.write(yield* encodeVoiceFrame(update));
   const fromClient = pump(clientReader, (frame) =>
     Effect.gen(function* () {
@@ -52,18 +67,62 @@ export const relayVoiceSockets = Effect.fn("voice.relay")(function* <E>(
       });
       if (!ready) return yield* new VoiceRelayError();
       yield* Effect.try({ try: () => budget.accept(e), catch: () => new VoiceRelayError() });
+      diagnostics.lastClientEvent = String(e.type);
+      if (e.type === "response.create") diagnostics.responsePending = true;
+      if (e.type === "response.cancel") {
+        diagnostics.cancelRequests++;
+        if (!diagnostics.responseGenerating || e.response_id !== responseId)
+          diagnostics.cancelWithoutObservedActiveResponse++;
+      }
+      if (e.type === "conversation.item.truncate") diagnostics.truncateRequests++;
       yield* toUpstream.write(yield* encodeVoiceFrame(e));
     }),
   );
   const fromUpstream = pump(upstreamReader, (frame) =>
     Effect.gen(function* () {
       const value = yield* parseFrame(frame);
+      const raw = object(value);
+      const response = object(raw.response);
+      if (
+        raw.type === "error" ||
+        (raw.type === "response.done" && response.status === "failed") ||
+        raw.type === "conversation.item.input_audio_transcription.failed"
+      ) {
+        diagnostics.upstreamFailureEvent = raw.type;
+        const code = object(
+          raw.type === "response.done" ? object(response.status_details).error : raw.error,
+        ).code;
+        diagnostics.upstreamErrorCode =
+          typeof code === "string" &&
+          [
+            "response_cancel_not_active",
+            "invalid_value",
+            "invalid_api_key",
+            "rate_limit_exceeded",
+            "server_error",
+          ].includes(code)
+            ? code
+            : "other";
+      }
       const event = yield* Effect.try({
         try: () => serverEvent(value),
         catch: () => new VoiceRelayError(),
       });
       if (event?.type === "relay.ready") ready = true;
-      if (event) yield* toClient.write(yield* encodeVoiceFrame(event));
+      if (event) {
+        diagnostics.lastServerEvent = String(event.type);
+        if (event.type === "response.created") {
+          responseId = object(event.response).id;
+          diagnostics.responsePending = false;
+          diagnostics.responseGenerating = true;
+          diagnostics.responsesCreated++;
+        }
+        if (event.type === "response.done") {
+          diagnostics.responsesDone++;
+          if (object(event.response).id === responseId) diagnostics.responseGenerating = false;
+        }
+        yield* toClient.write(yield* encodeVoiceFrame(event));
+      }
     }),
   );
   const handshakeTimeout = Effect.sleep("10 seconds").pipe(
@@ -72,5 +131,9 @@ export const relayVoiceSockets = Effect.fn("voice.relay")(function* <E>(
   yield* Effect.raceFirst(
     Effect.raceFirst(fromClient, fromUpstream),
     Effect.raceFirst(watchOwner, handshakeTimeout),
-  ).pipe(Effect.timeoutOrElse({ duration: MAX_SESSION_MS, orElse: () => Effect.void }));
+  ).pipe(
+    Effect.timeoutOrElse({ duration: MAX_SESSION_MS, orElse: () => Effect.void }),
+    // Only fixed categories and local counters; never log a cause or provider payload.
+    Effect.tapError(() => Effect.logWarning("Voice relay failed", { ...diagnostics })),
+  );
 });

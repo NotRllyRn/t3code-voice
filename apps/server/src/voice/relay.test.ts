@@ -3,6 +3,7 @@ import { it as test } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Queue from "effect/Queue";
+import * as Logger from "effect/Logger";
 import * as Socket from "effect/socket/Socket";
 import { relayVoiceSockets } from "./relay.ts";
 import { sessionUpdate } from "./protocol.ts";
@@ -132,6 +133,103 @@ test.effect("relay acquires the lazy upstream reader before writing session conf
     ).pipe(Effect.timeout("2 seconds"));
     NodeAssert.equal(wire.closed, true);
   }),
+);
+
+test.effect.each([
+  { eventType: "error", code: "response_cancel_not_active" },
+  { eventType: "error", code: "server_error" },
+  { eventType: "error", code: "server_error", staleDone: true },
+  { eventType: "error", code: "Bearer fictional-secret" },
+  { eventType: "response.done", code: "server_error" },
+  { eventType: "conversation.item.input_audio_transcription.failed", code: "invalid_value" },
+])(
+  "relay keeps upstream failure $eventType fatal with safe diagnostics",
+  ({ eventType, code, staleDone }) =>
+    Effect.gen(function* () {
+      const logs: unknown[] = [];
+      let peers: Array<{ closed: () => boolean }> = [];
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const down = yield* peer,
+            up = yield* peer;
+          peers = [down, up];
+          const fiber = yield* relayVoiceSockets(down.socket, up.socket, {}, Effect.never).pipe(
+            Effect.forkScoped,
+          );
+          yield* Queue.take(up.output);
+          yield* Queue.offer(up.input, JSON.stringify({ type: "session.updated" }));
+          yield* Queue.take(down.output);
+          const receive = (event: object) => Queue.offer(up.input, JSON.stringify(event));
+          yield* receive({ type: "response.created", response: { id: "private-response-id" } });
+          yield* Queue.take(down.output);
+          yield* receive({
+            type: "response.done",
+            response: {
+              id: staleDone ? "private-stale-id" : "private-response-id",
+              status: "completed",
+            },
+          });
+          yield* Queue.take(down.output);
+          for (const command of [
+            { type: "response.cancel", response_id: "private-response-id" },
+            {
+              type: "conversation.item.truncate",
+              item_id: "private-item-id",
+              content_index: 2,
+              audio_end_ms: 40,
+            },
+          ]) {
+            yield* Queue.offer(down.input, JSON.stringify(command));
+            yield* Queue.take(up.output);
+          }
+          const error = {
+            code,
+            type: "fictional-secret",
+            message: "fictional-secret",
+            param: "fictional-secret",
+            event_id: "private-event-id",
+            request_body: { token: "fictional-secret" },
+          };
+          yield* receive({
+            type: eventType,
+            event_id: "private-event-id",
+            error,
+            response: { id: "private-response-id", status: "failed", status_details: { error } },
+          });
+          NodeAssert.equal((yield* Fiber.join(fiber).pipe(Effect.result))._tag, "Failure");
+          NodeAssert.deepEqual(logs, [
+            [
+              "Voice relay failed",
+              {
+                upstreamFailureEvent: eventType,
+                upstreamErrorCode: code === "Bearer fictional-secret" ? "other" : code,
+                lastClientEvent: "conversation.item.truncate",
+                lastServerEvent: "response.done",
+                responsePending: false,
+                responseGenerating: !!staleDone,
+                responsesCreated: 1,
+                responsesDone: 1,
+                cancelRequests: 1,
+                cancelWithoutObservedActiveResponse: staleDone ? 0 : 1,
+                truncateRequests: 1,
+              },
+            ],
+          ]);
+          NodeAssert.equal(JSON.stringify(logs).includes("fictional-secret"), false);
+          NodeAssert.equal(JSON.stringify(logs).includes("private-"), false);
+        }),
+      ).pipe(
+        Effect.provide(
+          Logger.layer([Logger.make(({ message }) => logs.push(message))], {
+            mergeWithExisting: false,
+          }),
+        ),
+      );
+      NodeAssert.equal(
+        peers.every((p) => p.closed()),
+        true,
+      );
+    }),
 );
 
 test.effect("relay refuses audio before session acknowledgment", () =>
