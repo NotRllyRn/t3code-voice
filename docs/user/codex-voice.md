@@ -18,15 +18,41 @@ Configure the environment's server, not the browser:
 - `T3CODE_REALTIME_URL`: complete OpenAI-compatible Realtime WebSocket URL, including
   its model query parameter. For example,
   `wss://realtime.example/v1/realtime?model=example-realtime`.
-- `T3CODE_REALTIME_SECRET_REF`: JSON secret reference resolved by the existing
-  configured secret-provider service. For example,
-  `{"provider":"team-secrets","reference":"op://Example/Realtime/key"}`.
-  Replace both fields with an existing configured provider/reference. Do not put
-  the upstream key in browser settings, source, URLs, or chat.
+- Configure exactly one server-side credential source:
+  - `T3CODE_REALTIME_API_KEY`: the upstream API key, supplied directly in the server
+    process environment. No external secret manager or `op` CLI is required.
+  - `T3CODE_REALTIME_SECRET_REF`: JSON secret reference resolved by the existing
+    configured secret-provider service. For example,
+    `{"provider":"team-secrets","reference":"op://Example/Realtime/key"}`.
+    Replace both fields with an existing configured provider/reference.
 - `T3CODE_REALTIME_VOICE`: optional voice name; defaults to `alloy`.
 - `T3CODE_REALTIME_TRANSCRIPTION_MODEL`: defaults to `whisper-1`; set to an empty
   string to disable input transcription if unsupported. Manual reviewed text can
   still be queued.
+
+For an interactive Bash launch, enter the key without putting it in shell history
+or command-line arguments, then start the server normally from that shell:
+
+```bash
+export T3CODE_REALTIME_URL='wss://realtime.example/v1/realtime?model=example-realtime'
+unset T3CODE_REALTIME_SECRET_REF
+read -r -s -p 'Realtime API key: ' T3CODE_REALTIME_API_KEY
+printf '\n'
+export T3CODE_REALTIME_API_KEY
+```
+
+For a managed server, set the same variables in its protected service environment
+and restart the server. Keep credentials out of tracked files, browser settings,
+URLs, CLI arguments, and chat. Environment variables remain accessible to the
+server process owner and administrators; use the secret-reference option if that
+is not suitable. The browser cannot choose another environment variable to read.
+
+There is no precedence or fallback between sources: if both variables are set
+(even if one is empty), or neither is set, voice Start fails with an empty `503`
+response. Empty, whitespace-only, or newline-bearing keys also fail closed.
+Secret-reference resolution failures do not fall back to environment credentials.
+Credentials are redacted in server configuration values and never returned to the
+browser; only the upstream Bearer header receives the resolved key.
 
 The endpoint must use `wss:`; plain `ws:` is allowed only on loopback. The relay
 adds a server-side Bearer header. There is no account-token extraction, direct
@@ -55,10 +81,11 @@ Upstream errors and unneeded event fields are not forwarded to the browser.
 - Only the latest bounded transcript/reply is displayed. It is local panel state,
   not saved chat history. No coding output is spoken automatically.
 
-Focused tests can run without the workspace task runner:
+Focused server tests can run without the workspace task runner:
 
 ```sh
-node --experimental-transform-types --test apps/server/src/voice/*.node-test.ts apps/web/src/voice/*.node-test.ts
+cd apps/server
+../../node_modules/.bin/vp test run src/voice
 ```
 
 ## Not yet verified or implemented

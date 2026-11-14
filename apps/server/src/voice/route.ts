@@ -9,6 +9,8 @@ import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretReso
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import * as Socket from "effect/socket/Socket";
@@ -30,15 +32,26 @@ export const readRealtimeVoiceConfig = Effect.gen(function* () {
     try: () => upstreamUrl(rawUrl),
     catch: () => new VoiceRelayError(),
   });
-  const reference = yield* decodeReference(yield* Config.String("T3CODE_REALTIME_SECRET_REF"));
-  const key = yield* requireSettingsSecret(yield* SecretResolver.SecretResolver, reference);
-  if (!key.trim() || /[\r\n]/.test(key)) return yield* new VoiceRelayError();
+  const environmentKey = yield* Config.Redacted("T3CODE_REALTIME_API_KEY").pipe(Config.option);
+  const reference = yield* Config.String("T3CODE_REALTIME_SECRET_REF").pipe(Config.option);
+  if (Option.isSome(environmentKey) === Option.isSome(reference))
+    return yield* new VoiceRelayError();
+  const key = Option.isSome(environmentKey)
+    ? environmentKey.value
+    : Redacted.make(
+        yield* requireSettingsSecret(
+          yield* SecretResolver.SecretResolver,
+          yield* decodeReference(Option.getOrThrow(reference)),
+        ),
+      );
+  if (!Redacted.value(key).trim() || /[\r\n]/.test(Redacted.value(key)))
+    return yield* new VoiceRelayError();
   const voice = yield* Config.String("T3CODE_REALTIME_VOICE").pipe(Config.withDefault("alloy"));
   const transcription = yield* Config.String("T3CODE_REALTIME_TRANSCRIPTION_MODEL").pipe(
     Config.withDefault("whisper-1"),
   );
   return { url, key, voice, transcription };
-});
+}).pipe(Effect.mapError(() => new VoiceRelayError()));
 
 export const realtimeVoiceRouteLayer = Layer.unwrap(
   Effect.gen(function* () {
@@ -97,7 +110,10 @@ export const realtimeVoiceRouteLayer = Layer.unwrap(
               yield* Socket.fromWebSocket(
                 Effect.acquireRelease(
                   Effect.sync(() => {
-                    wire = makeVoiceUpstream(config.success.url, config.success.key);
+                    wire = makeVoiceUpstream(
+                      config.success.url,
+                      Redacted.value(config.success.key),
+                    );
                     return wire;
                   }),
                   (ws) => Effect.sync(() => ws.terminate()),
