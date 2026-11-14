@@ -118,6 +118,8 @@ test("push-to-talk appends only recorded audio; finish creates only an audio res
   await h.controller.stop();
   NodeAssert.equal(h.track.stopped, true);
   NodeAssert.equal(h.counts().mediaClosed, 1);
+  NodeAssert.equal(h.controller.state.phase, "idle");
+  NodeAssert.equal(h.controller.state.error, "");
 });
 
 test("mute discards a recording, stops upload and disables hardware tracks", async () => {
@@ -194,6 +196,35 @@ test("voice interruption silences first, cancels only voice, truncates played au
   );
   await h.controller.stop();
 });
+
+test.each(["relay.error", "error"])(
+  "%s fails closed, releases resources, and rejects stale playback",
+  async (type) => {
+    const h = harness();
+    await active(h);
+    h.socket.event({
+      type,
+      message: "Bearer fictional-secret",
+      error: { code: "response_cancel_not_active", message: "fictional-secret" },
+    });
+    await vi.waitFor(() => NodeAssert.equal(h.controller.state.phase, "error"));
+    NodeAssert.equal(h.track.stopped, true);
+    NodeAssert.equal(h.socket.readyState, 3);
+    NodeAssert.equal(h.counts().mediaClosed, 1);
+    NodeAssert.equal(JSON.stringify(h.states).includes("fictional-secret"), false);
+    const count = h.counts().played;
+    h.socket.event({
+      type: "response.output_audio.delta",
+      response_id: "old",
+      item_id: "old",
+      content_index: 0,
+      delta: "AAAAAA==",
+    });
+    NodeAssert.equal(h.counts().played, count);
+    await h.controller.stop();
+    NodeAssert.equal(h.counts().mediaClosed, 1);
+  },
+);
 
 test("owner disposal clears socket/media and ignores stale callbacks", async () => {
   const h = harness();
