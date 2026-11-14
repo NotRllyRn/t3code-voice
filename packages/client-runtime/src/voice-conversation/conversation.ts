@@ -1,5 +1,5 @@
 import { deadline } from "./lifecycle.js";
-import type { AudioEvent, PlayedAudio, VoiceMedia } from "./media.js";
+import type { AudioEvent, PlayedAudio, VoiceMedia } from "./media.ts";
 
 import * as SecureRandom from "effect/crypto/SecureRandom";
 
@@ -29,11 +29,18 @@ export class Conversation {
   private cuts = new Map<string, Cut>();
   private cut: Cut | null = null;
   private interrupting: Promise<void> | null = null;
+  private send: (event: object) => void;
+  private output: Pick<VoiceMedia, "allow" | "silence" | "enqueue">;
+  private fail: (message: string) => void;
   constructor(
-    private send: (event: object) => void,
-    private output: Pick<VoiceMedia, "allow" | "silence" | "enqueue">,
-    private fail: (message: string) => void,
-  ) {}
+    send: (event: object) => void,
+    output: Pick<VoiceMedia, "allow" | "silence" | "enqueue">,
+    fail: (message: string) => void,
+  ) {
+    this.send = send;
+    this.output = output;
+    this.fail = fail;
+  }
   private changed() {
     for (const notify of this.waiters) notify();
   }

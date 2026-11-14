@@ -1,11 +1,7 @@
+// @effect-diagnostics globalTimers:off - Push-to-talk deadlines run outside an Effect runtime.
 import { Conversation, type RealtimeEvent } from "./conversation.ts";
 import { deadline, Lifecycle, type VoiceLifetime } from "./lifecycle.js";
-import type { pcmMedia, VoiceMedia } from "./media.js";
-
-type SocketLike = Pick<
-  WebSocket,
-  "readyState" | "bufferedAmount" | "send" | "close" | "addEventListener" | "removeEventListener"
->;
+import type { VoiceMedia, VoiceMediaFactory, VoiceSocket } from "./media.ts";
 export interface VoiceState {
   phase: string;
   error: string;
@@ -25,9 +21,8 @@ export const INITIAL_VOICE_STATE: VoiceState = {
   reply: "",
 };
 export interface VoiceDependencies {
-  microphone: () => Promise<MediaStream>;
-  media: typeof pcmMedia;
-  socket: (url: string) => SocketLike;
+  media: VoiceMediaFactory;
+  socket: (url: string) => VoiceSocket;
   url: (signal: AbortSignal) => Promise<string>;
 }
 
@@ -37,18 +32,18 @@ export class VoiceController {
   private lifetime: Lifecycle;
   private media: VoiceMedia | null = null;
   private conversation: Conversation | null = null;
-  private socket: SocketLike | null = null;
-  private stream: MediaStream | null = null;
+  private socket: VoiceSocket | null = null;
   private samples = 0;
   private inputTurn = 0;
   private inputCommits: number[] = [];
   private inputItems = new Map<string, number>();
   private captureTimer: ReturnType<typeof setTimeout> | undefined;
   private disposed = false;
-  constructor(
-    private deps: VoiceDependencies,
-    private publish: (state: VoiceState) => void,
-  ) {
+  private deps: VoiceDependencies;
+  private publish: (state: VoiceState) => void;
+  constructor(deps: VoiceDependencies, publish: (state: VoiceState) => void) {
+    this.deps = deps;
+    this.publish = publish;
     this.lifetime = new Lifecycle((phase, error) => this.update({ phase, error }));
   }
   private update(change: Partial<VoiceState>) {
@@ -75,17 +70,7 @@ export class VoiceController {
       if (this.alive(session)) void this.stop(message);
     };
     try {
-      // Register late microphone grants before checking ownership, so Stop cannot leak tracks.
-      const stream = await this.deps.microphone();
-      own(() => stream.getTracks().forEach((track) => track.stop()));
-      if (!this.alive(session)) return;
-      this.stream = stream;
-      for (const track of stream.getTracks()) {
-        const ended = () => fail("Microphone disconnected");
-        track.addEventListener("ended", ended);
-        own(() => track.removeEventListener("ended", ended));
-      }
-      const media = await this.deps.media(stream, {
+      const media = await this.deps.media({
         own,
         alive: () => this.alive(session),
         fail,
@@ -96,14 +81,9 @@ export class VoiceController {
           this.send({ type: "input_audio_buffer.append", audio });
         },
       });
+      own(() => media.dispose());
       if (!this.alive(session)) return;
       this.media = media;
-      const audioChanged = () => {
-        if (media.context.state !== "running")
-          fail("Audio focus was lost; start a new voice conversation");
-      };
-      media.context.addEventListener("statechange", audioChanged);
-      own(() => media.context.removeEventListener("statechange", audioChanged));
       const url = await this.deps.url(session.controller.signal);
       if (!this.alive(session)) return;
       const socket = this.deps.socket(url);
@@ -119,7 +99,7 @@ export class VoiceController {
       });
       this.conversation = new Conversation((event) => this.send(event), media, fail);
       own(() => this.conversation?.close());
-      const message = (event: MessageEvent) => {
+      const message = (event: { data: unknown }) => {
         if (!this.alive(session)) return;
         try {
           if (typeof event.data !== "string" || event.data.length > 128 * 1024)
@@ -233,9 +213,7 @@ export class VoiceController {
       return;
     const muted = !this.state.muted,
       wasRecording = this.state.recording;
-    this.stream?.getAudioTracks().forEach((track) => {
-      track.enabled = !muted;
-    });
+    this.media?.mute(muted);
     this.update({ muted, recording: muted ? false : wasRecording });
     if (muted && wasRecording) {
       clearTimeout(this.captureTimer);
@@ -266,9 +244,7 @@ export class VoiceController {
   async stop(error = "") {
     clearTimeout(this.captureTimer);
     // Silence synchronously; cleanup promises must not prolong local playback or microphone use.
-    this.stream?.getTracks().forEach((track) => {
-      track.enabled = false;
-    });
+    this.media?.mute(true);
     void this.media?.silence().catch(() => {});
     this.conversation?.close();
     this.update({ recording: false, busy: false });
@@ -276,7 +252,6 @@ export class VoiceController {
     this.media = null;
     this.conversation = null;
     this.socket = null;
-    this.stream = null;
   }
   dispose() {
     this.disposed = true;

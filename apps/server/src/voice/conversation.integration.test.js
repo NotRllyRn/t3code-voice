@@ -7,7 +7,7 @@ import * as Fiber from "effect/Fiber";
 import * as Queue from "effect/Queue";
 import * as Socket from "effect/socket/Socket";
 import { relayVoiceSockets } from "./relay.ts";
-import { Conversation } from "../../../web/src/voice/conversation.ts";
+import { Conversation } from "../../../../packages/client-runtime/src/voice-conversation/index.ts";
 import { decodePCM, playedItem } from "../../../web/src/voice/pcm.js";
 
 const peer = Effect.gen(function* () {
