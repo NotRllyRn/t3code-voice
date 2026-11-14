@@ -1,3 +1,4 @@
+/* eslint-disable unicorn/require-post-message-target-origin -- AudioWorklet MessagePort, not Window.postMessage. */
 import { Resampler, MAX_PLAYBACK } from "./pcm.js";
 
 class VoicePCM extends AudioWorkletProcessor {

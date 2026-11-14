@@ -1,3 +1,4 @@
+/* eslint-disable unicorn/require-post-message-target-origin -- AudioWorklet MessagePort, not Window.postMessage. */
 import { deadline } from "./lifecycle.js";
 import workletUrl from "./pcm-worklet.js?worker&url";
 import { MAX_PLAYBACK, decodePCM, encodePCM, playedItem } from "./pcm.js";

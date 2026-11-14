@@ -1,6 +1,8 @@
 import { deadline } from "./lifecycle.js";
 import type { AudioEvent, PlayedAudio, VoiceMedia } from "./media.js";
 
+import * as SecureRandom from "effect/crypto/SecureRandom";
+
 export interface RealtimeEvent {
   type: string;
   response?: { id: string; status?: string; metadata?: { voice_turn?: string } };
@@ -116,7 +118,7 @@ export class Conversation {
     if (this.closed || this.pending || this.generating || this.interrupting)
       throw Error("Previous voice response is still active");
     if (++this.count > 32) throw Error("Start a new voice conversation");
-    this.turn = `turn_${this.count}_${crypto.randomUUID()}`;
+    this.turn = `turn_${this.count}_${SecureRandom.uuidV4Unsafe()}`;
     this.pending = true;
     this.cut = null;
     this.send({

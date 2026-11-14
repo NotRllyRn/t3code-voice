@@ -1,3 +1,4 @@
+import * as NodeHttpServerRequest from "@effect/platform-node/NodeHttpServerRequest";
 import {
   AuthOrchestrationOperateScope,
   REALTIME_VOICE_PATH,
@@ -14,23 +15,26 @@ import * as Socket from "effect/socket/Socket";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
-import { upstreamWebSocketConstructor } from "../device/DeviceHubProxy.ts";
+import { boundedVoiceSocket, claimVoiceUpgrade, makeVoiceUpstream } from "./transport.ts";
 import { requireSettingsSecret } from "../secrets/settingsSecretValue.ts";
 import { sessionUpdate, upstreamUrl } from "./protocol.ts";
-import { relayVoiceSockets } from "./relay.ts";
+import { encodeVoiceFrame, relayVoiceSockets, VoiceRelayError } from "./relay.ts";
+
+const decodeReference = Schema.decodeUnknownEffect(Schema.fromJsonString(SecretReference));
+const decodeThreadId = Schema.decodeUnknownEffect(ThreadId);
 
 // Config and secret references are server-owned. The browser cannot choose an upstream URL or key.
-const readConfig = Effect.gen(function* () {
-  const rawUrl = yield* Config.string("T3CODE_REALTIME_URL");
-  const url = yield* Effect.try(() => upstreamUrl(rawUrl));
-  const reference = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(SecretReference))(
-    yield* Config.string("T3CODE_REALTIME_SECRET_REF"),
-  );
+export const readRealtimeVoiceConfig = Effect.gen(function* () {
+  const rawUrl = yield* Config.String("T3CODE_REALTIME_URL");
+  const url = yield* Effect.try({
+    try: () => upstreamUrl(rawUrl),
+    catch: () => new VoiceRelayError(),
+  });
+  const reference = yield* decodeReference(yield* Config.String("T3CODE_REALTIME_SECRET_REF"));
   const key = yield* requireSettingsSecret(yield* SecretResolver.SecretResolver, reference);
-  if (!key.trim() || /[\r\n]/.test(key))
-    return yield* Effect.fail(new Error("Invalid voice credential"));
-  const voice = yield* Config.string("T3CODE_REALTIME_VOICE").pipe(Config.withDefault("alloy"));
-  const transcription = yield* Config.string("T3CODE_REALTIME_TRANSCRIPTION_MODEL").pipe(
+  if (!key.trim() || /[\r\n]/.test(key)) return yield* Effect.fail(new VoiceRelayError());
+  const voice = yield* Config.String("T3CODE_REALTIME_VOICE").pipe(Config.withDefault("alloy"));
+  const transcription = yield* Config.String("T3CODE_REALTIME_TRANSCRIPTION_MODEL").pipe(
     Config.withDefault("whisper-1"),
   );
   return { url, key, voice, transcription };
@@ -56,9 +60,7 @@ export const realtimeVoiceRouteLayer = Layer.unwrap(
         if (!session.scopes.includes(AuthOrchestrationOperateScope))
           return HttpServerResponse.empty({ status: 403 });
         const query = new URL(request.url, "http://localhost").searchParams;
-        const id = yield* Schema.decodeUnknownEffect(ThreadId)(query.get("threadId")).pipe(
-          Effect.result,
-        );
+        const id = yield* decodeThreadId(query.get("threadId")).pipe(Effect.result);
         if (id._tag === "Failure") return HttpServerResponse.empty({ status: 400 });
         const thread = yield* threads.getThreadShell(id.success);
         if (!thread || thread.archivedAt || thread.deletedAt)
@@ -68,7 +70,7 @@ export const realtimeVoiceRouteLayer = Layer.unwrap(
           return HttpServerResponse.empty({ status: 403 });
         if (active.has(session.sessionId)) return HttpServerResponse.empty({ status: 409 });
         // Do not expose config/secret failures, even in the server logs. No fallback auth.
-        const config = yield* readConfig.pipe(Effect.result);
+        const config = yield* readRealtimeVoiceConfig.pipe(Effect.result);
         if (config._tag === "Failure") return HttpServerResponse.empty({ status: 503 });
         return yield* Effect.gen(function* () {
           // Register cleanup before claiming, including on a cancelled HTTP upgrade.
@@ -81,15 +83,31 @@ export const realtimeVoiceRouteLayer = Layer.unwrap(
           if (active.has(session.sessionId)) return HttpServerResponse.empty({ status: 409 });
           active.add(session.sessionId);
           claimed = true;
-          const downstream = yield* request.upgrade;
+          const claim = yield* Effect.acquireRelease(
+            Effect.sync(() =>
+              claimVoiceUpgrade(NodeHttpServerRequest.toIncomingMessage(request).socket),
+            ),
+            (claim) => Effect.sync(claim.close),
+          );
+          const downstream = boundedVoiceSocket(yield* request.upgrade, claim.wire);
           const toClient = yield* downstream.writer;
           const relay = Effect.gen(function* () {
-            const upstream = yield* Socket.makeWebSocket(config.success.url, {
-              openTimeout: "10 seconds",
-              headers: { Authorization: `Bearer ${config.success.key}` },
-            }).pipe(Effect.provide(upstreamWebSocketConstructor));
+            let wire: ReturnType<typeof makeVoiceUpstream> | undefined;
+            const upstream = boundedVoiceSocket(
+              yield* Socket.fromWebSocket(
+                Effect.acquireRelease(
+                  Effect.sync(() => {
+                    wire = makeVoiceUpstream(config.success.url, config.success.key);
+                    return wire;
+                  }),
+                  (ws) => Effect.sync(() => ws.terminate()),
+                ),
+                { openTimeout: "10 seconds", highWaterMark: 64 * 1024 },
+              ),
+              () => wire,
+            );
 
-            const initialModel = JSON.stringify(thread.modelSelection);
+            const initialModel = yield* encodeVoiceFrame(thread.modelSelection);
             const watchOwner = Effect.forever(
               Effect.gen(function* () {
                 yield* Effect.sleep("2 seconds");
@@ -99,11 +117,11 @@ export const realtimeVoiceRouteLayer = Layer.unwrap(
                   !current ||
                   current.archivedAt ||
                   current.deletedAt ||
-                  JSON.stringify(current.modelSelection) !== initialModel ||
+                  (yield* encodeVoiceFrame(current.modelSelection)) !== initialModel ||
                   !instance?.enabled ||
                   instance.driverKind !== "codex"
                 )
-                  return yield* Effect.fail(new Error("Voice owner changed"));
+                  return yield* Effect.fail(new VoiceRelayError());
               }),
             );
             yield* relayVoiceSockets(
@@ -117,11 +135,7 @@ export const realtimeVoiceRouteLayer = Layer.unwrap(
             Effect.catchCause(() =>
               toClient
                 .write(
-                  JSON.stringify({
-                    type: "relay.error",
-                    message:
-                      "Voice connection ended. Check server realtime configuration or start a new conversation.",
-                  }),
+                  '{"type":"relay.error","message":"Voice connection ended. Check server realtime configuration or start a new conversation."}',
                 )
                 .pipe(
                   Effect.timeoutOrElse({ duration: "1 second", orElse: () => Effect.void }),

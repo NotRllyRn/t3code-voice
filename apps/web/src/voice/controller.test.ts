@@ -1,9 +1,8 @@
-import assert from "node:assert/strict";
-import { test } from "node:test";
+import * as NodeAssert from "node:assert/strict";
+import { test, vi } from "vite-plus/test";
 import { VoiceController, type VoiceDependencies, type VoiceState } from "./controller.ts";
 import type { VoiceMedia } from "./media.js";
 
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 class Track extends EventTarget {
   enabled = true;
   stopped = false;
@@ -14,6 +13,16 @@ class Track extends EventTarget {
 class FakeSocket extends EventTarget {
   readyState = 1;
   bufferedAmount = 0;
+  private markConnected = () => {};
+  connected = {
+    promise: new Promise<void>((resolve) => {
+      this.markConnected = resolve;
+    }),
+  };
+  override addEventListener(...args: Parameters<EventTarget["addEventListener"]>) {
+    super.addEventListener(...args);
+    if (args[0] === "message") this.markConnected();
+  }
   sent: Array<Record<string, unknown>> = [];
   send(value: string) {
     this.sent.push(JSON.parse(value));
@@ -80,21 +89,21 @@ function harness(microphone?: VoiceDependencies["microphone"]) {
 }
 async function active(h: ReturnType<typeof harness>) {
   const starting = h.controller.start();
-  await tick();
+  await h.socket.connected.promise;
   h.socket.event({ type: "relay.ready" });
   await starting;
-  assert.equal(h.controller.state.phase, "active");
+  NodeAssert.equal(h.controller.state.phase, "active");
 }
 
 test("push-to-talk appends only recorded audio; finish creates only an audio response", async () => {
   const h = harness();
   await active(h);
   h.capture();
-  assert.equal(h.socket.sent.length, 0);
+  NodeAssert.equal(h.socket.sent.length, 0);
   await h.controller.record();
   h.capture();
   await h.controller.finish();
-  assert.deepEqual(
+  NodeAssert.deepEqual(
     h.socket.sent.map((e) => e.type),
     [
       "input_audio_buffer.clear",
@@ -104,11 +113,11 @@ test("push-to-talk appends only recorded audio; finish creates only an audio res
     ],
   );
   const response = h.socket.sent.at(-1)!.response as { output_modalities: string[] };
-  assert.deepEqual(response.output_modalities, ["audio"]);
-  assert.equal(h.controller.state.recording, false);
+  NodeAssert.deepEqual(response.output_modalities, ["audio"]);
+  NodeAssert.equal(h.controller.state.recording, false);
   await h.controller.stop();
-  assert.equal(h.track.stopped, true);
-  assert.equal(h.counts().mediaClosed, 1);
+  NodeAssert.equal(h.track.stopped, true);
+  NodeAssert.equal(h.counts().mediaClosed, 1);
 });
 
 test("mute discards a recording, stops upload and disables hardware tracks", async () => {
@@ -119,16 +128,16 @@ test("mute discards a recording, stops upload and disables hardware tracks", asy
   await h.controller.mute();
   const sent = h.socket.sent.length;
   h.capture();
-  assert.equal(h.track.enabled, false);
-  assert.equal(h.controller.state.recording, false);
-  assert.equal(h.socket.sent.at(-1)?.type, "input_audio_buffer.clear");
-  assert.equal(h.socket.sent.length, sent);
-  assert.equal(
+  NodeAssert.equal(h.track.enabled, false);
+  NodeAssert.equal(h.controller.state.recording, false);
+  NodeAssert.equal(h.socket.sent.at(-1)?.type, "input_audio_buffer.clear");
+  NodeAssert.equal(h.socket.sent.length, sent);
+  NodeAssert.equal(
     h.socket.sent.some((e) => e.type === "response.create"),
     false,
   );
   await h.controller.mute();
-  assert.equal(h.track.enabled, true);
+  NodeAssert.equal(h.track.enabled, true);
   await h.controller.stop();
 });
 
@@ -142,10 +151,9 @@ test("late microphone grants after Stop release tracks and never start media", a
   await h.controller.stop();
   grant(h.stream);
   await starting;
-  await tick();
-  assert.equal(h.track.stopped, true);
-  assert.equal(h.counts().mediaClosed, 0);
-  assert.equal(h.controller.state.phase, "idle");
+  await vi.waitFor(() => NodeAssert.equal(h.track.stopped, true));
+  NodeAssert.equal(h.counts().mediaClosed, 0);
+  NodeAssert.equal(h.controller.state.phase, "idle");
 });
 
 test("voice interruption silences first, cancels only voice, truncates played audio and drops late deltas", async () => {
@@ -166,12 +174,12 @@ test("voice interruption silences first, cancels only voice, truncates played au
     content_index: 0,
     delta: "AAAAAA==",
   });
-  assert.equal(h.counts().played, 1);
+  NodeAssert.equal(h.counts().played, 1);
   const interrupted = h.controller.interrupt();
-  assert.equal(h.socket.sent.at(-1)?.type, "response.cancel");
+  NodeAssert.equal(h.socket.sent.at(-1)?.type, "response.cancel");
   h.socket.event({ type: "response.done", response: { id: "resp_1", status: "cancelled" } });
   await interrupted;
-  assert.equal(h.socket.sent.at(-1)?.type, "conversation.item.truncate");
+  NodeAssert.equal(h.socket.sent.at(-1)?.type, "conversation.item.truncate");
   h.socket.event({
     type: "response.audio.delta",
     response_id: "resp_1",
@@ -179,8 +187,8 @@ test("voice interruption silences first, cancels only voice, truncates played au
     content_index: 0,
     delta: "AAAAAA==",
   });
-  assert.equal(h.counts().played, 1);
-  assert.equal(
+  NodeAssert.equal(h.counts().played, 1);
+  NodeAssert.equal(
     h.socket.sent.some((e) => String(e.type).includes("coding") || e.type === "message.dispatch"),
     false,
   );
@@ -192,26 +200,26 @@ test("owner disposal clears socket/media and ignores stale callbacks", async () 
   await active(h);
   const count = h.states.length;
   h.controller.dispose();
-  await tick();
+  await vi.waitFor(() => NodeAssert.equal(h.counts().mediaClosed, 1));
   h.socket.event({
     type: "conversation.item.input_audio_transcription.completed",
     transcript: "stale",
   });
-  assert.equal(h.states.length, count);
-  assert.equal(h.socket.readyState, 3);
-  assert.equal(h.track.stopped, true);
-  assert.equal(h.counts().mediaClosed, 1);
+  NodeAssert.equal(h.states.length, count);
+  NodeAssert.equal(h.socket.readyState, 3);
+  NodeAssert.equal(h.track.stopped, true);
+  NodeAssert.equal(h.counts().mediaClosed, 1);
 });
 
 test("Stop during readiness wait settles startup and releases every resource", async () => {
   const h = harness();
   const starting = h.controller.start();
-  await tick();
+  await h.socket.connected.promise;
   await h.controller.stop();
   await starting;
-  assert.equal(h.track.stopped, true);
-  assert.equal(h.socket.readyState, 3);
-  assert.equal(h.controller.state.phase, "idle");
+  NodeAssert.equal(h.track.stopped, true);
+  NodeAssert.equal(h.socket.readyState, 3);
+  NodeAssert.equal(h.controller.state.phase, "idle");
 });
 
 test("audio focus loss fails closed and releases the microphone", async () => {
@@ -219,9 +227,8 @@ test("audio focus loss fails closed and releases the microphone", async () => {
   await active(h);
   h.audio.state = "suspended";
   h.audio.dispatchEvent(new Event("statechange"));
-  await tick();
-  assert.equal(h.controller.state.phase, "error");
-  assert.equal(h.track.stopped, true);
+  await vi.waitFor(() => NodeAssert.equal(h.controller.state.phase, "error"));
+  NodeAssert.equal(h.track.stopped, true);
 });
 
 test("interrupt waits for a delayed response identity, cancels it and rejects its audio", async () => {
@@ -232,12 +239,11 @@ test("interrupt waits for a delayed response identity, cancels it and rejects it
   await h.controller.finish();
   const response = h.socket.sent.at(-1)!.response as { metadata: object };
   const interrupting = h.controller.interrupt();
-  await tick();
   h.socket.event({
     type: "response.created",
     response: { id: "late", metadata: response.metadata },
   });
-  assert.equal(h.socket.sent.at(-1)?.type, "response.cancel");
+  NodeAssert.equal(h.socket.sent.at(-1)?.type, "response.cancel");
   h.socket.event({
     type: "response.audio.delta",
     response_id: "late",
@@ -247,8 +253,8 @@ test("interrupt waits for a delayed response identity, cancels it and rejects it
   });
   h.socket.event({ type: "response.done", response: { id: "late", status: "cancelled" } });
   await interrupting;
-  assert.equal(h.counts().played, 0);
-  assert.equal(h.controller.state.phase, "active");
+  NodeAssert.equal(h.counts().played, 0);
+  NodeAssert.equal(h.controller.state.phase, "active");
   await h.controller.stop();
 });
 
@@ -270,14 +276,14 @@ test("late transcription from an old input turn cannot replace the reviewed curr
     item_id: "input_1",
     transcript: "first",
   });
-  assert.equal(h.controller.state.transcript, "first");
+  NodeAssert.equal(h.controller.state.transcript, "first");
   await h.controller.record();
   h.socket.event({
     type: "conversation.item.input_audio_transcription.completed",
     item_id: "input_1",
     transcript: "stale",
   });
-  assert.equal(h.controller.state.transcript, "");
+  NodeAssert.equal(h.controller.state.transcript, "");
   h.capture();
   await h.controller.finish();
   h.socket.event({ type: "input_audio_buffer.committed", item_id: "input_2" });
@@ -286,6 +292,6 @@ test("late transcription from an old input turn cannot replace the reviewed curr
     item_id: "input_2",
     transcript: "second",
   });
-  assert.equal(h.controller.state.transcript, "second");
+  NodeAssert.equal(h.controller.state.transcript, "second");
   await h.controller.stop();
 });
