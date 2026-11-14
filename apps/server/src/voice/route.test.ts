@@ -10,6 +10,7 @@ import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretReso
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Redacted from "effect/Redacted";
 import { HttpRouter } from "effect/http";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import { liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
@@ -36,16 +37,73 @@ test.effect("executes actual Effect 4 configuration, secret-reference decoding a
       Effect.provide(secrets),
       Effect.provideService(ConfigProvider.ConfigProvider, ConfigProvider.fromUnknown(config)),
     );
+    expect(Redacted.value(value.key)).toBe("fixture-only-secret");
+    expect(JSON.stringify(value)).not.toContain("fixture-only-secret");
     expect(value).toEqual({
       url: config.T3CODE_REALTIME_URL,
-      key: "fixture-only-secret",
+      key: Redacted.make("fixture-only-secret"),
       voice: "alloy",
       transcription: "whisper-1",
     });
   }),
 );
 
-test.live.each([{}, { ...config, T3CODE_REALTIME_URL: "https://invalid.example" }])(
+test.effect(
+  "reads a dedicated redacted server environment credential without a secret provider",
+  () =>
+    Effect.gen(function* () {
+      const value = yield* readRealtimeVoiceConfig.pipe(
+        Effect.provide(secrets),
+        Effect.provideService(
+          ConfigProvider.ConfigProvider,
+          ConfigProvider.fromEnv({
+            env: {
+              T3CODE_REALTIME_URL: config.T3CODE_REALTIME_URL,
+              T3CODE_REALTIME_API_KEY: "fictional-env-only-key",
+            },
+          }),
+        ),
+      );
+      expect(Redacted.value(value.key)).toBe("fictional-env-only-key");
+      expect(JSON.stringify(value)).not.toContain("fictional-env-only-key");
+    }),
+);
+
+const invalidConfigs = [
+  {},
+  { T3CODE_REALTIME_URL: config.T3CODE_REALTIME_URL },
+  { ...config, T3CODE_REALTIME_URL: "https://invalid.example" },
+  { ...config, T3CODE_REALTIME_API_KEY: "fictional-ambiguous-key" },
+  { ...config, T3CODE_REALTIME_API_KEY: " " },
+  { ...config, T3CODE_REALTIME_SECRET_REF: "invalid-fictional-reference" },
+  ...["", "  ", "fictional\r\nInjected: header"].map((key) => ({
+    T3CODE_REALTIME_URL: config.T3CODE_REALTIME_URL,
+    T3CODE_REALTIME_API_KEY: key,
+  })),
+  ...[
+    "ws://192.0.2.1/v1/realtime",
+    "wss://user:fictional-url-password@voice.example/v1/realtime",
+    "wss://voice.example/v1/realtime#fragment",
+  ].map((url) => ({ T3CODE_REALTIME_URL: url, T3CODE_REALTIME_API_KEY: "fictional-key" })),
+];
+
+test.effect.each(invalidConfigs)("sanitizes configuration failures %#", (variables) =>
+  Effect.gen(function* () {
+    const error = yield* readRealtimeVoiceConfig.pipe(
+      Effect.provide(secrets),
+      Effect.provideService(
+        ConfigProvider.ConfigProvider,
+        ConfigProvider.fromEnv({ env: variables }),
+      ),
+      Effect.flip,
+    );
+    expect(error._tag).toBe("VoiceRelayError");
+    expect(JSON.stringify(error)).toBe('{"_tag":"VoiceRelayError"}');
+    expect(String(error)).not.toContain("fictional");
+  }),
+);
+
+test.live.each(invalidConfigs)(
   "constructs the actual route and fails closed on missing/invalid config",
   (variables) =>
     Effect.gen(function* () {
