@@ -3,8 +3,17 @@ import Foundation
 // Standalone native accounting check. Run on macOS:
 // swiftc ios/VoicePlaybackLedger.swift tests/main.swift -o /tmp/t3-voice-ledger && /tmp/t3-voice-ledger
 func milliseconds(_ value: [String: Any]?) -> Int64 {
-  value?["ms"] as? Int64 ?? -1
+  // Expo bridges either Swift integer representation to the same JS number.
+  switch value?["ms"] {
+  case let ms as Int64: return ms
+  case let ms as Int: return Int64(ms)
+  default: return -1
+  }
 }
+assert(milliseconds(["ms": Int(0)]) == 0)
+assert(milliseconds(["ms": Int64(0)]) == 0)
+assert(milliseconds(["ms": "0"]) == -1)
+assert(milliseconds(nil) == -1)
 
 var ledger = VoicePlaybackLedger()
 assert(ledger.position(rendered: 0, latencyFrames: 0) == nil)
