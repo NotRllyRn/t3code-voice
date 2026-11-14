@@ -2,6 +2,7 @@
 // Offline-only integration driver. No provider credential or production state is accepted.
 import * as NodeAssert from "node:assert/strict";
 import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
 import * as NodeEvents from "node:events";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeNet from "node:net";
@@ -10,12 +11,14 @@ import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import { WebSocketServer } from "@effect/platform-node/NodeWS";
 import { DEFAULT_MODEL } from "@t3tools/contracts";
+import { assertTruncate } from "./accounting.mjs";
 
+const { randomUUID } = NodeCrypto;
 const assert = NodeAssert,
   path = NodePath;
 const { spawn } = NodeChildProcess,
   { once } = NodeEvents;
-const { mkdtemp, mkdir, writeFile, rm, access } = NodeFSP;
+const { mkdtemp, mkdir, writeFile, rm, access, copyFile } = NodeFSP;
 const { createServer } = NodeNet,
   { tmpdir } = NodeOS;
 const root = NodeURL.fileURLToPath(new URL("../../", import.meta.url));
@@ -35,6 +38,10 @@ const logs = [];
 const pendingLogs = new Map();
 let privateDir;
 let remoteDir;
+let runnerDir;
+let ownedCleaned = false;
+const ownerToken = randomUUID();
+const timeoutProbe = process.env.VOICE_OFFLINE_TIMEOUT_PROBE === "1";
 let mock;
 const auth = "fictional-offline-development-auth-0000000000000000";
 const sanitize = (text) =>
@@ -67,9 +74,21 @@ function start(label, command, args, options = {}) {
 }
 async function command(label, command, args, options = {}) {
   const child = start(label, command, args, options);
-  let stdout = "";
+  let stdout = "",
+    probeDeadline;
   child.stdout.on("data", (data) => {
     stdout += data;
+    if (
+      label === "browser" &&
+      timeoutProbe &&
+      !probeDeadline &&
+      stdout.includes('"timeoutProbeReady":true')
+    ) {
+      probeDeadline = AbortSignal.timeout(1000);
+      probeDeadline.addEventListener("abort", () => interrupted.abort(probeDeadline.reason), {
+        once: true,
+      });
+    }
   });
   try {
     const [code, signal] = await once(child, "exit", {
@@ -82,23 +101,29 @@ async function command(label, command, args, options = {}) {
   }
 }
 async function stop(child) {
-  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
-  try {
-    process.kill(-child.pid, "SIGTERM");
-  } catch (error) {
-    if (error.code === "ESRCH") return;
-    throw error;
-  }
-  const timer = setTimeout(() => {
+  if (!children.delete(child) || !child.pid) return;
+  // The captured group can still contain descendants after its wrapper has exited.
+  const signal = (name) => {
     try {
-      process.kill(-child.pid, "SIGKILL");
-    } catch {}
-  }, 5000);
-  try {
-    await once(child, "exit");
-  } finally {
-    clearTimeout(timer);
+      process.kill(-child.pid, name);
+      return true;
+    } catch (error) {
+      if (error.code === "ESRCH") return false;
+      throw error;
+    }
+  };
+  if (!signal("SIGTERM")) return;
+  const exited =
+    child.exitCode !== null || child.signalCode !== null ? Promise.resolve() : once(child, "exit");
+  const end = Date.now() + 5000;
+  while (signal(0)) {
+    if (Date.now() >= end) {
+      signal("SIGKILL");
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
+  await exited;
 }
 async function port() {
   const server = createServer();
@@ -181,7 +206,8 @@ async function run() {
     stale: 0,
     closed: 0,
   };
-  const mockErrors = [];
+  const mockErrors = [],
+    truncates = [];
   mock = new WebSocketServer({ host: "127.0.0.1", port: mockPort });
   await once(mock, "listening");
   mock.on("connection", (socket, request) => {
@@ -242,8 +268,16 @@ async function run() {
           assert.equal(event.response_id, response);
           send({ type: "response.done", response: { id: response, status: "cancelled" } });
         } else if (event.type === "conversation.item.truncate") {
+          assert.equal(event.item_id, item, "Mock truncate item identity");
+          assert.equal(event.content_index, 0, "Mock truncate content identity");
+          assert.ok(
+            Number.isInteger(event.audio_end_ms) &&
+              event.audio_end_ms >= 0 &&
+              event.audio_end_ms <= 500,
+          );
+          truncates.push(event);
           stats.truncate++;
-          // Inject after the local flush AND truncate, not before interruption.
+          // The browser records the matching flush ACK before forwarding this truncate.
           stats.stale++;
           send(audio());
         } else
@@ -274,9 +308,12 @@ async function run() {
     ]);
     assert.match(created, /^\/tmp\/t3-voice-offline\.[a-zA-Z0-9]+$/);
     remoteDir = created;
+    runnerDir = remoteDir;
     await command("copy-browser", "scp", [
-      path.join(root, "scripts/voice-offline/browser.mjs"),
-      `${host}:${remoteDir}/browser.mjs`,
+      ...["browser.mjs", "owned-browser.mjs", "accounting.mjs"].map((file) =>
+        path.join(root, "scripts/voice-offline", file),
+      ),
+      `${host}:${remoteDir}/`,
     ]);
     const tunnel = start("tunnel", "ssh", [
       "-N",
@@ -290,6 +327,11 @@ async function run() {
     ]);
     // Browser fetch readiness below also verifies the tunnel, without arbitrary startup sleeps.
     assert.ok(tunnel.pid);
+  } else {
+    runnerDir = path.join(privateDir, "browser");
+    await mkdir(runnerDir);
+    for (const file of ["browser.mjs", "owned-browser.mjs", "accounting.mjs"])
+      await copyFile(path.join(root, "scripts/voice-offline", file), path.join(runnerDir, file));
   }
   for (let index = 1; index <= 2; index++) {
     const state = path.join(privateDir, `run-${index}`),
@@ -365,21 +407,26 @@ async function run() {
         model: DEFAULT_MODEL,
         workspace: path.join(state, "workspace"),
         playwrightPath,
+        ownerToken,
+        timeoutProbe,
       }),
     ).toString("base64");
-    const browserArgs = [
-      host ? `${remoteDir}/browser.mjs` : path.join(root, "scripts/voice-offline/browser.mjs"),
-      config,
-    ];
+    const browserArgs = [`${runnerDir}/owned-browser.mjs`, config];
     const browserOutput = host
       ? await command("browser", "ssh", [
           host,
           [browserNode, ...browserArgs].map(shellQuote).join(" "),
         ])
       : await command("browser", browserNode, browserArgs);
-    evidence.runs.push(
-      JSON.parse(browserOutput.split("\n").findLast((line) => line.startsWith('{"passed"'))),
+    const result = JSON.parse(
+      browserOutput.split("\n").findLast((line) => line.startsWith('{"passed"')),
     );
+    assert.equal(truncates.length, index * 2);
+    result.truncates = truncates.slice((index - 1) * 2, index * 2);
+    result.metrics.interruptions.forEach((flush, offset) =>
+      assertTruncate(result.truncates[offset], flush),
+    );
+    evidence.runs.push(result);
     await stop(web);
     await stop(server);
     // The next run receives a new DB, HOME, credentials, and browser context.
@@ -450,6 +497,22 @@ try {
   failed = error;
   record("failure", error.stack);
 } finally {
+  if (runnerDir) {
+    try {
+      const args = [`${runnerDir}/owned-browser.mjs`, "--stop", ownerToken];
+      const cleanup = host
+        ? await command("remote-cleanup", "ssh", [
+            host,
+            [browserNode, ...args].map(shellQuote).join(" "),
+          ])
+        : await command("remote-cleanup", browserNode, args);
+      record("owned-cleanup", cleanup);
+      ownedCleaned = true;
+    } catch (error) {
+      record("cleanup", error.stack);
+      failed ||= error;
+    }
+  }
   for (const child of [...children].reverse()) {
     try {
       await stop(child);
@@ -462,7 +525,7 @@ try {
     for (const client of mock.clients) client.terminate();
     await new Promise((resolve) => mock.close(resolve));
   }
-  if (remoteDir) {
+  if (remoteDir && ownedCleaned) {
     try {
       await command("remote-cleanup", "ssh", [host, `rm -rf ${shellQuote(remoteDir)}`]);
     } catch (error) {
