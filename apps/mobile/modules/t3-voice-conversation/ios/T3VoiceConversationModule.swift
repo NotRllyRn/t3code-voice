@@ -308,7 +308,8 @@ private final class VoiceAudioSession {
   }
 
   private func rendered() -> Int64? {
-    guard let time = player.lastRenderTime, let position = player.playerTime(forNodeTime: time),
+    guard player.engine === engine,
+          let time = player.lastRenderTime, let position = player.playerTime(forNodeTime: time),
           position.isSampleTimeValid, position.sampleRate == 24_000 else { return nil }
     return max(0, position.sampleTime)
   }
@@ -348,6 +349,11 @@ private final class VoiceAudioSession {
     defer { lock.unlock() }
     outputAllowed = false
     outputEpoch += 1
+    // open() can throw before attachment. Avoid node operations until attached.
+    guard player.engine === engine else {
+      ledger = VoicePlaybackLedger()
+      return nil
+    }
     let position = ledger.position(rendered: rendered(), latencyFrames: latency)
     player.stop()
     player.reset()

@@ -119,16 +119,17 @@ private extension VoiceAudioSession {
     defer { inputLock.unlock() }
     let frame = rendered()
     let delay = latency
-    let node = player.lastRenderTime
+    let playing = player.engine === engine && player.isPlaying
+    let node = player.engine === engine ? player.lastRenderTime : nil
     let clock = node.flatMap { player.playerTime(forNodeTime: $0) }
     let playerHost = node?.isHostTimeValid == true ? node?.hostTime : nil
     let playerFrame = clock?.isSampleTimeValid == true && clock?.sampleRate == 24000 ? clock?.sampleTime : nil
     let audio = AVAudioSession.sharedInstance()
-    let clean = closed && !engine.isRunning && !player.isPlaying && !outputAllowed
+    let clean = closed && !engine.isRunning && !playing && !outputAllowed
       && ledger.segments.isEmpty && observers.isEmpty && !tapped && !hasConverter
       && inputFormat == nil && !accepting && reservedFrames == 0 && outstanding.isEmpty
     return EngineSnapshot(json: [
-      "closed": closed, "engineRunning": engine.isRunning, "playerPlaying": player.isPlaying,
+      "closed": closed, "engineRunning": engine.isRunning, "playerPlaying": playing,
       "outputAllowed": outputAllowed, "outputEpoch": outputEpoch, "tapped": tapped,
       "converter": hasConverter, "inputFormat": inputFormat != nil, "accepting": accepting,
       "reservedFrames": reservedFrames, "outstanding": outstanding.count, "observers": observers.count,
@@ -145,6 +146,25 @@ private extension VoiceAudioSession {
       "category": audio.category.rawValue, "mode": audio.mode.rawValue,
       "route": audio.currentRoute.outputs.map { ["type": $0.portType.rawValue, "channels": $0.channels?.count ?? 0] }
     ], ledger: ledger, rendered: frame, latency: delay, playerHost: playerHost, playerFrame: playerFrame, clean: clean)
+  }
+
+  // Recreate both throwing-open states without activation, a tap, or an engine start.
+  // The unattached case used to abort in silence() rather than return nil.
+  static func diagnosticPartialOpenRegression() throws -> Bool {
+    for attached in [false, true] {
+      let session = VoiceAudioSession(id: "partial-open") { _, _ in }
+      if attached { session.engine.attach(session.player) }
+      session.allow(epoch: 1)
+      session.close(deactivate: false)
+      let epoch = session.outputEpoch
+      session.allow(epoch: 2)
+      try session.enqueue(epoch: 2, item: "late", index: 0, pcm: "AAA=")
+      session.close(deactivate: false)
+      guard session.diagnosticSnapshot().clean, epoch == 2, session.outputEpoch == epoch,
+            session.captureEpoch == 1, (session.player.engine === session.engine) == attached,
+            session.rendered() == nil, session.silence() == nil else { return false }
+    }
+    return true
   }
 
   func installOutputProbe() throws -> OutputProbe {
@@ -224,7 +244,10 @@ private final class EngineScenario: NSObject {
         && s.ledger.segments[1].start == s.ledger.segments[0].end, "contiguous_chunks")
       display = CADisplayLink(target: self, selector: #selector(drain))
       display?.add(to: .main, forMode: .common)
-    } catch { finish(error: error.localizedDescription) }
+    } catch {
+      let failure = error as NSError
+      finish(error: "\(failure.domain) (\(failure.code)): \(failure.localizedDescription)")
+    }
   }
 
   private func open(id: String) throws {
@@ -477,6 +500,7 @@ private final class EngineScenario: NSObject {
         guard let self else { return }
         do {
           try self.require(self.released == nil, "background_weak_release")
+          try self.require(VoiceAudioSession.diagnosticPartialOpenRegression(), "partial_open_teardown_regression")
           self.finish(error: nil)
         } catch { self.finish(error: error.localizedDescription) }
       }
@@ -485,11 +509,20 @@ private final class EngineScenario: NSObject {
 
   private func finish(error: String?) {
     guard !terminal else { return }
-    terminal = true; display?.invalidate(); display = nil; watchdog?.invalidate(); watchdog = nil
+    terminal = true
+    if let error {
+      let message = String(decoding: error.utf8.prefix(4096), as: UTF8.self)
+      gates["terminal"] = "FAIL"; evidence["error"] = message
+      // Persist a bounded FAIL before native cleanup can abort. The normal transcript
+      // replaces this checkpoint only if cleanup returns; it can never certify a pass.
+      let failure: [String: Any] = ["kind": "actual-engine-output-only-simulator", "passed": false,
+        "phase": "failure-before-cleanup", "gates": ["terminal": "FAIL"], "evidence": ["error": message]]
+      do { try persist(failure) }
+      catch { print("Pre-cleanup error persistence failed: \(error)"); fflush(stdout) }
+    } else { gates["terminal"] = "PASS" }
+    display?.invalidate(); display = nil; watchdog?.invalidate(); watchdog = nil
     if probe != nil { owner?.removeOutputProbe(); probe = nil }
     owner?.close(deactivate: true); owner = nil
-    if let error { gates["terminal"] = "FAIL"; evidence["error"] = error }
-    else { gates["terminal"] = "PASS" }
     gates["no_capture_events"] = captureEvents == 0 ? "PASS" : "FAIL"
     let required = ["tone_freshness_regression", "fresh_first_interrupt_tone", "fresh_second_interrupt_tone",
       "fresh_stop_tone", "fresh_background_tone",
@@ -519,12 +552,16 @@ private final class EngineScenario: NSObject {
         "hostContinuityToleranceFrames": 2, "positionRoundingToleranceMs": 1],
       "notProven": ["physical speaker", "duplex/input", "Expo JS bridge", "JS flush latency", "audio-session isActive", "OS background transition"]]
     do {
-      let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("result.json")
-      try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]).write(to: url, options: .atomic)
+      try persist(result)
       print("actual-engine-output-only-simulator: \(passed ? "PASS" : "NOT PASS")")
       fflush(stdout)
       exit(passed ? 0 : 1)
     } catch { print("Result persistence failed: \(error)"); fflush(stdout); exit(2) }
+  }
+
+  private func persist(_ result: [String: Any]) throws {
+    let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("result.json")
+    try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]).write(to: url, options: .atomic)
   }
 }
 
