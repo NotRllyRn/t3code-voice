@@ -26,9 +26,15 @@ import { boundedVoiceSocket, claimVoiceUpgrade, makeVoiceUpstream } from "./tran
 import { requireSettingsSecret } from "../secrets/settingsSecretValue.ts";
 import { sessionUpdate, upstreamUrl } from "./protocol.ts";
 import { encodeVoiceFrame, relayVoiceSockets, VoiceRelayError } from "./relay.ts";
+import { makeVoiceAgentSession, VoiceDraft } from "./agentSession.ts";
+import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
+import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 
 const decodeReference = Schema.decodeUnknownEffect(Schema.fromJsonString(SecretReference));
 const decodeThreadId = Schema.decodeUnknownEffect(ThreadId);
+const decodeDraft = Schema.decodeUnknownEffect(Schema.fromJsonString(VoiceDraft), {
+  onExcessProperty: "error",
+});
 
 // Only credential selection preserves empty values; other server config keeps its normal semantics.
 export const RealtimeVoiceCredentialProvider = Context.Reference<ConfigProvider.ConfigProvider>(
@@ -112,6 +118,8 @@ export const realtimeVoiceRouteLayer = Layer.unwrap(
   Effect.gen(function* () {
     const auth = yield* EnvironmentAuth.EnvironmentAuth;
     const threads = yield* ThreadManagement.ThreadManagementService;
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
     const providers = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
     // One socket per authenticated app session, not one per tab or thread.
     const active = new Set<string>();
@@ -128,12 +136,18 @@ export const realtimeVoiceRouteLayer = Layer.unwrap(
         if (!session.scopes.includes(AuthOrchestrationOperateScope))
           return HttpServerResponse.empty({ status: 403 });
         const query = new URL(request.url, "http://localhost").searchParams;
+        const continuous = query.get("continuous") === "1";
         const id = yield* decodeThreadId(query.get("threadId")).pipe(Effect.result);
-        if (id._tag === "Failure") return HttpServerResponse.empty({ status: 400 });
-        const thread = yield* threads.getThreadShell(id.success);
-        if (!thread || thread.archivedAt || thread.deletedAt)
+        const draft = yield* decodeDraft(query.get("draft")).pipe(Effect.result);
+        if (id._tag === "Failure" && (!continuous || draft._tag === "Failure"))
+          return HttpServerResponse.empty({ status: 400 });
+        const thread =
+          id._tag === "Success" ? yield* threads.getThreadShell(id.success) : undefined;
+        if (id._tag === "Success" && (!thread || thread.archivedAt || thread.deletedAt))
           return HttpServerResponse.empty({ status: 404 });
-        const provider = yield* providers.getInstance(thread.modelSelection.instanceId);
+        const draftValue = draft._tag === "Success" ? draft.success : undefined;
+        const modelSelection = thread?.modelSelection ?? draftValue!.modelSelection;
+        const provider = yield* providers.getInstance(modelSelection.instanceId);
         if (!provider?.enabled || provider.driverKind !== "codex")
           return HttpServerResponse.empty({ status: 403 });
         if (active.has(session.sessionId)) return HttpServerResponse.empty({ status: 409 });
@@ -178,17 +192,21 @@ export const realtimeVoiceRouteLayer = Layer.unwrap(
               () => wire,
             );
 
-            const initialModel = yield* encodeVoiceFrame(thread.modelSelection);
+            let boundThreadId = thread?.id;
+            const initialModel = yield* encodeVoiceFrame(modelSelection);
             const watchOwner = Effect.forever(
               Effect.gen(function* () {
                 yield* Effect.sleep("2 seconds");
-                const current = yield* threads.getThreadShell(thread.id);
-                const instance = yield* providers.getInstance(thread.modelSelection.instanceId);
+                const current = boundThreadId
+                  ? yield* threads.getThreadShell(boundThreadId)
+                  : undefined;
+                const instance = yield* providers.getInstance(modelSelection.instanceId);
                 if (
-                  !current ||
-                  current.archivedAt ||
-                  current.deletedAt ||
-                  (yield* encodeVoiceFrame(current.modelSelection)) !== initialModel ||
+                  (boundThreadId &&
+                    (!current ||
+                      current.archivedAt ||
+                      current.deletedAt ||
+                      (yield* encodeVoiceFrame(current.modelSelection)) !== initialModel)) ||
                   !instance?.enabled ||
                   instance.driverKind !== "codex"
                 )
@@ -198,8 +216,25 @@ export const realtimeVoiceRouteLayer = Layer.unwrap(
             yield* relayVoiceSockets(
               downstream,
               upstream,
-              sessionUpdate(config.success.voice, config.success.transcription),
+              sessionUpdate(config.success.voice, config.success.transcription, continuous),
               watchOwner,
+              continuous
+                ? (up, down) =>
+                    makeVoiceAgentSession(
+                      thread ? { threadId: thread.id } : { draft: draftValue! },
+                      up,
+                      (event) => {
+                        const value = event as { type?: string; thread_id?: string };
+                        if (value.type === "agent.bound" && value.thread_id)
+                          boundThreadId = ThreadId.make(value.thread_id);
+                        return down(event);
+                      },
+                    ).pipe(
+                      Effect.provideService(ThreadManagement.ThreadManagementService, threads),
+                      Effect.provideService(ThreadLaunch.ThreadLaunchService, launches),
+                      Effect.provideService(ManagedProjectFolders.ManagedProjectFolders, folders),
+                    )
+                : undefined,
             );
           });
           yield* relay.pipe(

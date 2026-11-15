@@ -1,15 +1,26 @@
-# Codex voice conversation (initial slice)
+# Continuous Codex voice prototype (web/macOS)
 
-A separate push-to-talk conversation in the web composer. It does not read coding
-history, run tools, or control the coding runtime. Select a saved Codex thread with
-its current model, then open **Voice conversation**. Start, record a short turn,
-and send it for a spoken reply. Stop releases the microphone. Mute discards an
-unfinished turn; Interrupt stops only voice playback/generation.
+A conversational voice front end for the selected **T3 Codex agent**, using the
+environment's configured Realtime transport. This is a prototype, not native Codex
+voice parity or a production release.
 
-To send work to coding, choose **Use my transcript** or type a request, review it,
-and press **Confirm and queue to coding thread**. Nothing is sent automatically.
-This uses the normal `message.dispatch` queue and approval rules, never steer or
-restart. A failed-delivery retry keeps the same command/message identity.
+1. Select one Codex model in an existing thread or an empty new-chat draft. For no
+   project, use the normal **Start without a project** action to open Scratch.
+2. Press **Start voice**, allow the microphone, then speak normally. Server VAD
+   detects turns; there is no Record/End button or per-turn text confirmation.
+3. Work and contextual questions are delegated through a bounded Realtime function
+   to normal T3 thread launch/message delivery. A draft creates its saved thread
+   lazily on the first delegated utterance. No typed message is needed.
+4. Speak over a reply to stop speech and start another voice turn. **Mute mic**
+   discards unfinished input; **Stop voice** releases audio. Neither stops coding.
+
+T3 remains the only coding runtime. Its actual run states and bounded final reply
+feed back to the voice model; acceptance is not reported as successful work.
+Existing-thread history is limited to recent user/assistant snippets. Approvals
+and questions stay in the normal chat UI; voice cannot grant permissions. A draft
+shows an **Open coding thread** link for that UI (navigation stops voice).
+Messages use normal queue delivery, not steer/restart. No automatic replay/retry
+is attempted after an ambiguous failure.
 
 ## Server setup
 
@@ -74,28 +85,36 @@ The endpoint must use `wss:`; plain `ws:` is allowed only on loopback. The relay
 adds a server-side Bearer header. There is no account-token extraction, direct
 subscription-auth fallback, or service-specific branch. The browser uses the
 existing authenticated environment connection and short-lived media ticket.
-The server checks operate scope, the saved thread, and its Codex provider.
+The server checks operate scope, the bound thread or draft, and its Codex provider.
 Missing/invalid server setup fails closed; Start does not fall back to dictation.
 
 The upstream must support the GA Realtime session shape: PCM16 mono at 24 kHz,
-explicit input commits and response creation, session-update acknowledgment,
-response identities/metadata, cancellation, and audio truncation. Both common
-WS audio-event spellings are accepted. This is not a universal provider adapter.
-Tools and browser-supplied session settings/text/upstream endpoints are rejected.
-Upstream errors and unneeded event fields are not forwarded to the browser.
+server VAD with automatic responses disabled, finalized input transcription,
+explicit response creation, function-call arguments/output, session-update
+acknowledgment, response identities/metadata, cancellation, and audio truncation.
+Both common WS audio-event spellings are accepted. This is not a universal adapter.
+The only voice function has zero arguments: the server owns its finalized
+transcript and target. Browser-supplied tools, text, session settings, credentials,
+and upstream endpoints are rejected. Unneeded upstream fields are not forwarded.
 
 ## Current limits and checks
 
 - One voice connection per authenticated app session; no reconnect/replay.
-- Stop on owner/model/provider switch, panel close/unmount, permission/focus loss,
+- Stop on owner/model/provider switch, panel unmount, permission/connection loss,
   page hide, or tab hiding. Backend ownership is also checked every two seconds.
-- 14-second UI recording limit; server enforces 15 seconds of audio per turn,
-  32 response requests, bounded frames/command rate, and ten minutes per socket.
-- Playback is bounded to eight queued seconds; overflow stops rather than buffering
-  indefinitely. Interrupted audio is flushed locally and truncated conservatively
-  using consumed samples minus estimated device latency.
-- Only the latest bounded transcript/reply is displayed. It is local panel state,
-  not saved chat history. No coding output is spoken automatically.
+- Ten minutes per socket, 64 finalized utterances, 96 voice responses, 16 pending
+  responses, and bounded frames/command rate. Voice replies use a 512-token limit.
+- Playback uses the bounded 120-second compact PCM spool with a short worklet
+  window. The next response waits for actual consumed-sample playback completion,
+  not merely generation completion. Barge-in flushes/truncates conservatively at
+  consumed samples minus estimated device latency.
+- Progress is run state, not raw tools/logs. Final result context is capped at 8,000
+  characters for recent runs and marked as this turn only: background work may
+  still be running. Result data is untrusted conversation content, not instructions.
+- Only the latest bounded transcript/reply is displayed locally. Delegated requests
+  and coding replies are saved by the normal T3 pipeline. A draft's typed text,
+  attachments, and worktree-launch settings are not sent by voice; voice launches
+  the selected project's normal root workspace (or managed Scratch).
 
 Focused server tests can run without the workspace task runner:
 
@@ -115,11 +134,6 @@ macOS uses the shared Electron/web UI. Existing packaging already declares audio
 input entitlement and microphone usage text; an actual signed macOS build and TCC
 permission/device test are still required. No packaging changes were made.
 
-Native iPhone source now includes a local AVFoundation PCM module, the shared
-conversation controller, and an explicit confirmed queue handoff. It requires a
-rebuilt iOS development client; missing modules remain unavailable, not dictation
-fallbacks. Backgrounding, audio interruption/route changes, or owner changes stop
-voice without automatic resume. Android conversation voice remains hidden.
-Swift/Xcode compilation, native engine/timing tests, simulator checks, and a
-physical iPhone microphone/speaker run are still required. This is not a release
-or an installable signed iPhone build. iOS browser use remains disabled.
+This continuous prototype does not change native mobile voice. Its older confirmed
+handoff path is separate and has not been validated here. iOS browser use remains
+disabled; no iOS/native build or release is part of this task.

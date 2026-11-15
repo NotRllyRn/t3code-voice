@@ -12,6 +12,9 @@ export interface RealtimeEvent {
   part?: { type: string };
   delta?: string;
   transcript?: string;
+  voice_turn?: string;
+  thread_id?: string;
+  status?: string;
 }
 type Cut = { ready: boolean; sent: boolean; played: PlayedAudio | null };
 
@@ -23,6 +26,7 @@ export class Conversation {
   private pending = false;
   private closed = false;
   private count = 0;
+  private playbackEpoch = 0;
   private blocked = new Set<string>();
   private waiters = new Set<() => void>();
   private audioItems = new Map<string, PlayedAudio>();
@@ -30,11 +34,11 @@ export class Conversation {
   private cut: Cut | null = null;
   private interrupting: Promise<void> | null = null;
   private send: (event: object) => void;
-  private output: Pick<VoiceMedia, "allow" | "silence" | "enqueue">;
+  private output: Pick<VoiceMedia, "allow" | "silence" | "enqueue" | "drain">;
   private fail: (message: string) => void;
   constructor(
     send: (event: object) => void,
-    output: Pick<VoiceMedia, "allow" | "silence" | "enqueue">,
+    output: Pick<VoiceMedia, "allow" | "silence" | "enqueue" | "drain">,
     fail: (message: string) => void,
   ) {
     this.send = send;
@@ -73,6 +77,7 @@ export class Conversation {
   }
   private async runInterrupt() {
     if (this.closed) return;
+    ++this.playbackEpoch;
     const old = this.pending ? null : this.response;
     const cut = old
       ? (this.cuts.get(old) ?? { ready: false, sent: false, played: null })
@@ -120,6 +125,30 @@ export class Conversation {
       return;
     this.audioItems.set(responseId, { itemId: e.item_id, contentIndex: e.content_index!, ms: 0 });
     this.truncate(responseId);
+  }
+  async playbackDone(responseId: string) {
+    if (this.closed || responseId !== this.response) return;
+    if (this.blocked.has(responseId)) {
+      await this.interrupting;
+      return;
+    }
+    if (!this.audioItems.has(responseId)) return;
+    if (!this.output.drain) throw Error("Continuous voice requires playback drain support");
+    const epoch = this.playbackEpoch;
+    try {
+      await this.output.drain();
+    } catch (error) {
+      if (!this.closed && epoch === this.playbackEpoch) throw error;
+    }
+    // Flush rejects a drain normally on barge-in. Wait for cancel/truncate before permitting another response.
+    if (!this.closed && epoch !== this.playbackEpoch) await this.interrupting;
+  }
+  async expect(turn: string) {
+    await this.interrupt();
+    if (this.closed) return;
+    this.turn = turn;
+    this.pending = true;
+    this.cut = null;
   }
   createResponse() {
     if (this.closed || this.pending || this.generating || this.interrupting)
@@ -198,6 +227,7 @@ export class Conversation {
     }
   }
   close() {
+    ++this.playbackEpoch;
     this.closed = true;
     this.turn = null;
     this.changed();

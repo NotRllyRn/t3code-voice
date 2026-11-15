@@ -27,7 +27,11 @@ class FakeSocket extends EventTarget {
     this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(data) }));
   }
 }
-function harness(acquire?: (media: VoiceMedia) => Promise<VoiceMedia>) {
+function harness(
+  acquire?: (media: VoiceMedia) => Promise<VoiceMedia>,
+  continuous = false,
+  drain: () => Promise<void> = async () => {},
+) {
   const socket = new FakeSocket();
   const track = { enabled: true, stopped: false };
   let capture: (audio: string, samples: number) => void = () => {};
@@ -54,10 +58,12 @@ function harness(acquire?: (media: VoiceMedia) => Promise<VoiceMedia>) {
     enqueue: () => {
       played++;
     },
+    drain,
   };
   const states: VoiceState[] = [];
   const controller = new VoiceController(
     {
+      continuous,
       media: async (options) => {
         capture = options.capture;
         fail = options.fail;
@@ -316,5 +322,154 @@ test("late transcription from an old input turn cannot replace the reviewed curr
     transcript: "second",
   });
   NodeAssert.equal(h.controller.state.transcript, "second");
+  await h.controller.stop();
+});
+
+test("continuous Start captures automatically without manual commit; Mute/Unmute resumes VAD capture", async () => {
+  const h = harness(undefined, true);
+  await active(h);
+  NodeAssert.equal(h.controller.state.recording, true);
+  h.capture(24_000 * 30);
+  NodeAssert.equal(h.socket.sent.at(-1)?.type, "input_audio_buffer.append");
+  NodeAssert.equal(
+    h.socket.sent.some((event) =>
+      ["response.create", "input_audio_buffer.commit"].includes(String(event.type)),
+    ),
+    false,
+  );
+  await h.controller.mute();
+  const mutedCount = h.socket.sent.length;
+  h.capture();
+  NodeAssert.equal(h.socket.sent.length, mutedCount);
+  NodeAssert.equal(h.track.enabled, false);
+  await h.controller.mute();
+  NodeAssert.equal(h.controller.state.recording, true);
+  h.capture();
+  NodeAssert.equal(h.socket.sent.at(-1)?.type, "input_audio_buffer.append");
+  await h.controller.stop();
+});
+
+test("continuous VAD barge-in flushes immediately, truncates played position and ignores old audio while capture stays live", async () => {
+  const h = harness(undefined, true);
+  await active(h);
+  h.socket.event({ type: "relay.response", voice_turn: "vad_turn_1" });
+  h.socket.event({
+    type: "response.created",
+    response: { id: "resp_1", metadata: { voice_turn: "vad_turn_1" } },
+  });
+  h.socket.event({
+    type: "response.audio.delta",
+    response_id: "resp_1",
+    item_id: "item_1",
+    content_index: 0,
+    delta: "AAAAAA==",
+  });
+  await vi.waitFor(() => NodeAssert.equal(h.counts().played, 1));
+  const before = h.counts().silenced;
+  h.socket.event({ type: "input_audio_buffer.speech_started", item_id: "vad_turn_2" });
+  NodeAssert.equal(h.counts().silenced, before + 1);
+  NodeAssert.equal(h.socket.sent.at(-1)?.type, "response.cancel");
+  h.capture();
+  NodeAssert.equal(h.socket.sent.at(-1)?.type, "input_audio_buffer.append");
+  h.socket.event({ type: "response.done", response: { id: "resp_1", status: "cancelled" } });
+  h.socket.event({
+    type: "response.audio.delta",
+    response_id: "resp_1",
+    item_id: "item_1",
+    content_index: 0,
+    delta: "AAAAAA==",
+  });
+  h.socket.event({
+    type: "conversation.item.input_audio_transcription.completed",
+    item_id: "vad_turn_2",
+    transcript: "Next request",
+  });
+  await vi.waitFor(() => NodeAssert.equal(h.controller.state.transcript, "Next request"));
+  NodeAssert.equal(h.counts().played, 1);
+  NodeAssert.equal(h.controller.state.recording, true);
+  const truncate = h.socket.sent.find((event) => event.type === "conversation.item.truncate");
+  NodeAssert.equal(truncate?.audio_end_ms, 45);
+  NodeAssert.equal(
+    h.socket.sent.some((event) =>
+      ["message.dispatch", "run.interrupt", "response.create"].includes(String(event.type)),
+    ),
+    false,
+  );
+  h.socket.event({ type: "agent.status", status: "waiting_for_user_in_T3" });
+  await vi.waitFor(() =>
+    NodeAssert.equal(h.controller.state.agentStatus, "waiting_for_user_in_T3"),
+  );
+  await h.controller.stop();
+  const states = h.states.length;
+  h.socket.event({ type: "agent.bound", thread_id: "late_thread" });
+  NodeAssert.equal(h.states.length, states);
+});
+
+test("continuous playback ACK waits for actual media drain, not generation done", async () => {
+  let resolveDrain: () => void = () => {};
+  const drained = new Promise<void>((resolve) => {
+    resolveDrain = resolve;
+  });
+  const h = harness(undefined, true, () => drained);
+  await active(h);
+  h.socket.event({ type: "relay.response", voice_turn: "turn_long" });
+  h.socket.event({
+    type: "response.created",
+    response: { id: "resp_1", metadata: { voice_turn: "turn_long" } },
+  });
+  h.socket.event({
+    type: "response.audio.delta",
+    response_id: "resp_1",
+    item_id: "item_1",
+    content_index: 0,
+    delta: "AAAAAA==",
+  });
+  h.socket.event({ type: "response.done", response: { id: "resp_1", status: "completed" } });
+  await vi.waitFor(() => NodeAssert.equal(h.counts().played, 1));
+  NodeAssert.equal(
+    h.socket.sent.some((event) => event.type === "relay.playback.done"),
+    false,
+  );
+  resolveDrain();
+  await vi.waitFor(() =>
+    NodeAssert.deepEqual(h.socket.sent.at(-1), {
+      type: "relay.playback.done",
+      response_id: "resp_1",
+    }),
+  );
+  await h.controller.stop();
+});
+
+test("expected drain rejection after VAD flush is normal cancellation, not session failure", async () => {
+  let rejectDrain: (error: Error) => void = () => {};
+  let beganDrain = false;
+  const drained = new Promise<void>((_resolve, reject) => {
+    rejectDrain = reject;
+  });
+  const h = harness(undefined, true, () => {
+    beganDrain = true;
+    return drained;
+  });
+  await active(h);
+  h.socket.event({ type: "relay.response", voice_turn: "turn_draining" });
+  h.socket.event({
+    type: "response.created",
+    response: { id: "resp_1", metadata: { voice_turn: "turn_draining" } },
+  });
+  h.socket.event({
+    type: "response.audio.delta",
+    response_id: "resp_1",
+    item_id: "item_1",
+    content_index: 0,
+    delta: "AAAAAA==",
+  });
+  h.socket.event({ type: "response.done", response: { id: "resp_1", status: "completed" } });
+  await vi.waitFor(() => NodeAssert.equal(beganDrain, true));
+  h.socket.event({ type: "input_audio_buffer.speech_started", item_id: "next_utterance" });
+  rejectDrain(Error("Playback epoch flushed"));
+  await vi.waitFor(() => NodeAssert.equal(h.socket.sent.at(-1)?.type, "relay.playback.done"));
+  NodeAssert.equal(h.controller.state.phase, "active");
+  NodeAssert.equal(h.controller.state.error, "");
+  NodeAssert.equal(h.controller.state.recording, true);
   await h.controller.stop();
 });

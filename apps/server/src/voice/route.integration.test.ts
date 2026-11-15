@@ -33,6 +33,8 @@ import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
+import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
@@ -66,6 +68,12 @@ const startRoute = Effect.fn("voice.test.startRoute")(function* (
   const services = yield* Layer.build(
     HttpRouter.serve(
       realtimeVoiceRouteLayer.pipe(
+        Layer.provide(Layer.mock(ThreadLaunch.ThreadLaunchService)({})),
+        Layer.provide(
+          Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+            namedProjectsRoot: "/fixture/projects",
+          }),
+        ),
         Layer.provide(
           Layer.mock(ThreadManagement.ThreadManagementService)({
             getThreadShell: (id) => Effect.succeed(id === threadId ? liveThreadShell(id) : null),

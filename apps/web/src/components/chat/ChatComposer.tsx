@@ -1,4 +1,5 @@
 import { VoiceInputSetup } from "./VoiceInputSetup";
+import { DEFAULT_INTERACTION_MODE } from "../../types";
 import { useComposerTypingGuard } from "./useComposerTypingGuard";
 import { insertAttachmentReferencesForDraft } from "./composerAttachmentReferences";
 import { DESKTOP_PASTE_AS_TEXT_EVENT } from "../../lib/desktopPasteAsText";
@@ -135,7 +136,7 @@ import { attachmentUploadBlockReason } from "../../lib/attachmentUploadState";
 import { useDictationShortcut } from "../../speech/useDictationShortcut";
 import { useDictationSubmissionShortcut } from "../../speech/useDictationSubmissionShortcut";
 import { useEnvironmentSpeechInput } from "../../speech/useEnvironmentSpeechInput";
-import { VoicePanel, type VoiceHandoff } from "../../voice/VoicePanel";
+import { VoicePanel } from "../../voice/VoicePanel";
 import { ComposerSpeechButton, ComposerSpeechRecordingPill } from "./ComposerSpeechButton";
 import type { AssistantCitationSourceAnchor } from "~/lib/assistantTextSelection";
 import { shortcutLabelForCommand } from "../../keybindings";
@@ -455,7 +456,6 @@ export interface ChatComposerProps {
     dispatchMode?: ComposerDispatchMode,
     submissionIntent?: ComposerSubmissionIntent,
   ) => void;
-  onQueueVoiceMessage?: (request: VoiceHandoff) => Promise<void>;
   onResume: () => void;
   onInterrupt: () => void;
   onSelectActivePendingUserInputOption: (questionId: string, optionValue: string) => void;
@@ -559,7 +559,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onPageScrollRelease,
     onCompactContext,
     onSend,
-    onQueueVoiceMessage,
     onResume,
     onInterrupt,
     onSelectActivePendingUserInputOption,
@@ -3542,29 +3541,28 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               message={providerInputSubmissionError ?? composerSubmissionError}
             />
 
-            {routeKind === "server" &&
-            activeThreadId &&
-            selectedProvider === "codex" &&
-            multipleModelSelections === null &&
-            onQueueVoiceMessage ? (
+            {selectedProvider === "codex" && multipleModelSelections === null ? (
               <VoicePanel
-                key={JSON.stringify([
-                  environmentId,
-                  activeThreadId,
-                  selectedInstanceId,
-                  selectedModel,
-                  composerProviderState,
-                ])}
                 environmentId={environmentId}
-                threadId={activeThreadId}
+                threadId={routeKind === "server" ? (activeThreadId ?? undefined) : undefined}
+                draft={
+                  routeKind === "draft"
+                    ? {
+                        ...(activeProjectId ? { projectId: activeProjectId } : {}),
+                        modelSelection: selectedModelSelection,
+                        runtimeMode: compatibleRuntimeMode,
+                        interactionMode: DEFAULT_INTERACTION_MODE,
+                      }
+                    : undefined
+                }
                 disabled={
-                  dictationDisabled ||
                   voiceInputActive ||
                   !canOperateThread ||
-                  activeThreadModelSelection?.instanceId !== selectedInstanceId ||
-                  activeThreadModelSelection?.model !== selectedModel
+                  environmentUnavailable !== null ||
+                  (routeKind === "server" &&
+                    (activeThreadModelSelection?.instanceId !== selectedInstanceId ||
+                      activeThreadModelSelection?.model !== selectedModel))
                 }
-                onQueue={onQueueVoiceMessage}
               />
             ) : null}
 

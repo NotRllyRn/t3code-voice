@@ -19,6 +19,8 @@ import { HttpRouter } from "effect/http";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import { liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
+import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import {
   readRealtimeVoiceConfig,
@@ -213,6 +215,12 @@ test.live.each(invalidConfigs)(
     Effect.gen(function* () {
       const { handler, dispose } = HttpRouter.toWebHandler(
         realtimeVoiceRouteLayer.pipe(
+          Layer.provide(Layer.mock(ThreadLaunch.ThreadLaunchService)({})),
+          Layer.provide(
+            Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+              namedProjectsRoot: "/fixture/projects",
+            }),
+          ),
           Layer.provide(
             Layer.mock(EnvironmentAuth.EnvironmentAuth)({
               authenticateWebSocketUpgrade: () =>

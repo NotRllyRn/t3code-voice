@@ -62,7 +62,6 @@ import {
   orchestrationV2WorktreePending,
   type EnvironmentId,
   MessageId,
-  CommandId,
   type ModelSelection,
   type PreviewAnnotationPayload,
   ProviderInstanceId,
@@ -263,7 +262,6 @@ import {
 } from "../state/entities";
 import { useEnvironmentShellHasSnapshot } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
-import type { VoiceHandoff } from "../voice/VoicePanel";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialogHost, openExpandedImagePreview } from "./chat/ExpandedImageDialog";
 import {
@@ -1871,28 +1869,6 @@ export default function ChatView(props: ChatViewProps) {
     }
   };
   const sendAppMessageStable = useStableCallback(sendAppMessage);
-  const queueVoiceMessage = async (request: VoiceHandoff) => {
-    if (!isServerThread || activeThreadId === null) throw new Error("Voice needs a saved thread.");
-    const result = await startThreadTurn({
-      environmentId,
-      input: {
-        commandId: CommandId.make(request.commandId),
-        threadId: activeThreadId,
-        message: {
-          messageId: MessageId.make(request.messageId),
-          role: "user",
-          text: request.text,
-          attachments: [],
-        },
-        runtimeMode,
-        interactionMode: DEFAULT_INTERACTION_MODE,
-        // Voice may queue work, never steer or restart an active coding run.
-        dispatchMode: "queue",
-      },
-    });
-    if (result._tag === "Failure") throw new Error("Could not confirm voice request delivery.");
-  };
-  const queueVoiceMessageStable = useStableCallback(queueVoiceMessage);
   const queuedRunsControlRef = useRef<QueuedRunsControlHandle>(null);
 
   const {
@@ -3714,7 +3690,6 @@ export default function ChatView(props: ChatViewProps) {
                                 onPageScrollRelease={onComposerPageScrollReleaseStable}
                                 onCompactContext={onComposerCompactContextStable}
                                 onSend={onComposerSendStable}
-                                onQueueVoiceMessage={queueVoiceMessageStable}
                                 onResume={onComposerResumeStable}
                                 onInterrupt={onInterruptStable}
                                 onSelectActivePendingUserInputOption={

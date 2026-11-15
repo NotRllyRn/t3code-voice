@@ -232,6 +232,74 @@ test.effect.each([
     }),
 );
 
+test.effect(
+  "continuous relay keeps function calls and playback ACK local to the bridge and rejects client response ownership",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const down = yield* peer,
+          up = yield* peer;
+        const received = yield* Queue.unbounded<Record<string, unknown>>();
+        const fiber = yield* relayVoiceSockets(
+          down.socket,
+          up.socket,
+          sessionUpdate("alloy", "whisper-1", true),
+          Effect.never,
+          () =>
+            Effect.succeed({
+              receive: (event) => Queue.offer(received, event).pipe(Effect.asVoid),
+              run: Effect.never,
+            }),
+        ).pipe(Effect.forkScoped);
+        const setup = JSON.parse(yield* Queue.take(up.output));
+        NodeAssert.equal(setup.session.audio.input.turn_detection.create_response, false);
+        NodeAssert.equal(setup.session.tools[0].name, "run_t3_agent");
+        yield* Queue.offer(up.input, JSON.stringify({ type: "session.updated" }));
+        yield* Queue.take(down.output);
+        yield* Queue.take(received);
+        yield* Queue.offer(
+          up.input,
+          JSON.stringify({
+            type: "response.function_call_arguments.done",
+            response_id: "resp_1",
+            call_id: "call_1",
+            name: "run_t3_agent",
+            arguments: "{}",
+          }),
+        );
+        NodeAssert.equal(
+          (yield* Queue.take(received)).type,
+          "response.function_call_arguments.done",
+        );
+        NodeAssert.equal(yield* Queue.size(down.output), 0);
+        yield* Queue.offer(
+          down.input,
+          JSON.stringify({ type: "relay.playback.done", response_id: "resp_1" }),
+        );
+        NodeAssert.deepEqual(yield* Queue.take(received), {
+          type: "relay.playback.done",
+          response_id: "resp_1",
+        });
+        yield* Queue.offer(down.input, JSON.stringify({ type: "input_audio_buffer.clear" }));
+        NodeAssert.deepEqual(JSON.parse(yield* Queue.take(up.output)), {
+          type: "input_audio_buffer.clear",
+        });
+        yield* Queue.offer(
+          down.input,
+          JSON.stringify({
+            type: "response.create",
+            response: {
+              output_modalities: ["audio"],
+              max_output_tokens: 512,
+              metadata: { voice_turn: "unowned" },
+            },
+          }),
+        );
+        NodeAssert.equal((yield* Fiber.join(fiber).pipe(Effect.result))._tag, "Failure");
+      }),
+    ).pipe(Effect.timeout("2 seconds")),
+);
+
 test.effect("relay refuses audio before session acknowledgment", () =>
   Effect.scoped(
     Effect.gen(function* () {
