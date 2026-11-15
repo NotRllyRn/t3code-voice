@@ -1,5 +1,7 @@
 export const PCM_RATE = 24000;
-export const MAX_PLAYBACK = PCM_RATE * 8;
+export const MAX_PLAYBACK = PCM_RATE / 2;
+// Matches the protocol's maximum truncation endpoint, independent of arrival rate.
+export const MAX_REPLY = PCM_RATE * 120;
 export const MIN_INPUT_SAMPLES = 2400;
 // Continuous linear resampler; retains phase and a boundary sample across render quanta.
 export class Resampler {
@@ -23,14 +25,26 @@ export class Resampler {
     return out;
   }
 }
-export function decodePCM(base64) {
-  if (base64.length > 131072) throw Error("Audio chunk limit");
-  const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
-  if (bytes.length % 2) throw Error("Invalid PCM");
-  const v = new DataView(bytes.buffer),
+export function decodePCMBytes(base64) {
+  if (typeof base64 !== "string") throw Error("Invalid PCM base64");
+  if (base64.length > 131072) throw Error("Audio chunk exceeds size limit");
+  let text;
+  try {
+    text = atob(base64);
+  } catch {
+    throw Error("Invalid PCM base64");
+  }
+  if (text.length % 2) throw Error("Invalid PCM byte length");
+  return Uint8Array.from(text, (c) => c.charCodeAt(0));
+}
+export function pcmSamples(bytes) {
+  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength),
     result = new Float32Array(bytes.length / 2);
   for (let i = 0; i < result.length; i++) result[i] = v.getInt16(i * 2, true) / 32768;
   return result;
+}
+export function decodePCM(base64) {
+  return pcmSamples(decodePCMBytes(base64));
 }
 export function encodePCM(samples) {
   const bytes = new Uint8Array(samples.length * 2),

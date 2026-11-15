@@ -46,11 +46,14 @@ class VoicePCM extends AudioWorkletProcessor {
         const played = this.played;
         this.read = this.write = this.length = this.phase = this.played = 0;
         this.epoch = d.epoch;
+        this.progressPending = null;
+        this.lastProgress = -1;
+        this.ticks = 0;
         this.port.postMessage({ type: "flushed", id: d.id, played, epoch: this.epoch });
       }
       if (d.type === "audio" && d.epoch === this.epoch) {
         if (this.length + d.samples.length > MAX_PLAYBACK) {
-          this.port.postMessage({ type: "overflow" });
+          this.port.postMessage({ type: "overflow", epoch: this.epoch });
           return;
         }
         for (const v of d.samples) {
