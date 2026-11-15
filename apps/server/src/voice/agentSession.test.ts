@@ -182,9 +182,21 @@ const makeFixture = Effect.fn("voice.test.agentFixture")(function* (
       call_id: callId,
       arguments: args,
     });
+  let barrier = 0;
+  const flush = Effect.fn("voice.test.flushAgentEvents")(function* () {
+    // A tool output with no associated utterance marks the end of earlier queued events.
+    yield* call(`barrier_${++barrier}`, "{}", "unbound_response");
+    while ((yield* next(down, "agent.status")).status !== "not_submitted") {}
+  });
+  const finish = Effect.fn("voice.test.finishResponse")(function* (id: string) {
+    yield* bridge.receive({ type: "response.done", response: { id, status: "completed" } });
+    yield* bridge.receive({ type: "relay.playback.done", response_id: id });
+  });
   return {
     bridge,
     fiber,
+    flush,
+    finish,
     utterance,
     call,
     next,
@@ -475,6 +487,121 @@ it.live.each(["started", "queued"] as const)(
         expect(f.sent[1]?.text).toBe("What is the current progress?");
       }),
     ).pipe(Effect.timeout("3 seconds")),
+);
+
+it.live(
+  "a failed run without assistant text speaks once and still delivers a late actual result",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const f = yield* makeFixture({ threadId }, [run]);
+        f.set({
+          runs: [{ ...run, status: "failed" }],
+          messages: [{ ...message, text: "RAW_ERROR_SECRET_MUST_NOT_BE_SPOKEN" }],
+        });
+        yield* f.bridge.receive({ type: "agent.event", event: { type: "run.updated" } });
+        yield* f.flush();
+        const creates = () =>
+          f.upstream.filter((event) => "type" in event && event.type === "response.create");
+        expect(creates()).toHaveLength(1);
+        expect(creates()[0]).toMatchObject({
+          response: { output_modalities: ["audio"], tool_choice: "none" },
+        });
+        expect(JSON.stringify(f.upstream)).toContain(
+          "The coding run failed. Check the normal T3 UI for details.",
+        );
+        expect(JSON.stringify(f.upstream)).not.toContain("RAW_ERROR_SECRET");
+        yield* f.bridge.receive({ type: "response.created", response: { id: "failure_notice" } });
+        for (let i = 0; i < 3; i++)
+          yield* f.bridge.receive({ type: "agent.event", event: { type: "run.updated" } });
+        yield* f.finish("failure_notice");
+        yield* f.flush();
+        expect(creates()).toHaveLength(1);
+        f.set({
+          messages: [{ ...message, role: "assistant", text: "LATE_ACTUAL_FAILURE_RESULT" }],
+        });
+        yield* f.bridge.receive({ type: "agent.event", event: { type: "message.updated" } });
+        yield* f.flush();
+        expect(creates()).toHaveLength(2);
+        expect(JSON.stringify(f.upstream).split("LATE_ACTUAL_FAILURE_RESULT")).toHaveLength(2);
+        yield* f.bridge.receive({ type: "response.created", response: { id: "late_result" } });
+        yield* f.finish("late_result");
+        for (let i = 0; i < 3; i++)
+          yield* f.bridge.receive({ type: "agent.event", event: { type: "message.updated" } });
+        yield* f.flush();
+        expect(creates()).toHaveLength(2);
+        expect(f.sent).toHaveLength(0);
+      }),
+    ),
+);
+
+it.live.each([false, true])(
+  "an actual failure result replaces a fallback before speech (final initially available: %s)",
+  (initiallyAvailable) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const f = yield* makeFixture();
+        yield* f.utterance();
+        yield* f.call();
+        yield* f.flush();
+        const final = { ...message, role: "assistant" as const, text: "ACTUAL_FAILURE_RESULT" };
+        f.set({
+          runs: [{ ...run, status: "failed" }],
+          messages: initiallyAvailable ? [final] : [],
+        });
+        yield* f.bridge.receive({ type: "agent.event", event: { type: "run.updated" } });
+        yield* f.flush();
+        if (!initiallyAvailable) {
+          f.set({ messages: [final] });
+          yield* f.bridge.receive({ type: "agent.event", event: { type: "message.updated" } });
+          yield* f.flush();
+        }
+        yield* f.finish("response_utterance_1");
+        yield* f.flush();
+        const creates = () =>
+          f.upstream.filter((event) => "type" in event && event.type === "response.create");
+        expect(creates()).toHaveLength(2);
+        expect(creates()[1]).toMatchObject({ response: { output_modalities: ["audio"] } });
+        expect(JSON.stringify(f.upstream)).toContain("ACTUAL_FAILURE_RESULT");
+        expect(JSON.stringify(f.upstream)).not.toContain("The coding run failed.");
+        yield* f.bridge.receive({ type: "response.created", response: { id: "actual_result" } });
+        yield* f.finish("actual_result");
+        yield* f.bridge.receive({ type: "agent.event", event: { type: "message.updated" } });
+        yield* f.flush();
+        expect(creates()).toHaveLength(2);
+        expect(JSON.stringify(f.upstream).split("ACTUAL_FAILURE_RESULT")).toHaveLength(2);
+        expect(f.sent).toHaveLength(1);
+      }),
+    ),
+);
+
+it.live("barge-in drops a queued failure notice without suppressing a later actual result", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const f = yield* makeFixture();
+      yield* f.utterance();
+      yield* f.call();
+      yield* f.flush();
+      f.set({ runs: [{ ...run, status: "failed" }] });
+      yield* f.bridge.receive({ type: "agent.event", event: { type: "run.updated" } });
+      yield* f.flush();
+      yield* f.bridge.receive({ type: "input_audio_buffer.speech_started" });
+      yield* f.finish("response_utterance_1");
+      yield* f.bridge.receive({ type: "input_audio_buffer.speech_stopped" });
+      yield* f.bridge.receive({ type: "agent.event", event: { type: "run.updated" } });
+      yield* f.flush();
+      const creates = () =>
+        f.upstream.filter((event) => "type" in event && event.type === "response.create");
+      expect(creates()).toHaveLength(1);
+      expect(JSON.stringify(f.upstream)).not.toContain("The coding run failed.");
+      f.set({ messages: [{ ...message, role: "assistant", text: "POST_BARGE_IN_RESULT" }] });
+      yield* f.bridge.receive({ type: "agent.event", event: { type: "message.updated" } });
+      yield* f.flush();
+      expect(creates()).toHaveLength(2);
+      expect(JSON.stringify(f.upstream)).toContain("POST_BARGE_IN_RESULT");
+      expect(f.sent).toHaveLength(1);
+    }),
+  ),
 );
 
 it.live("binding during a run delivers its late final text, not historical terminal results", () =>
