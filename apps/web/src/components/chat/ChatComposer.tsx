@@ -138,7 +138,11 @@ import { attachmentUploadBlockReason } from "../../lib/attachmentUploadState";
 import { useDictationShortcut } from "../../speech/useDictationShortcut";
 import { useDictationSubmissionShortcut } from "../../speech/useDictationSubmissionShortcut";
 import { useEnvironmentSpeechInput } from "../../speech/useEnvironmentSpeechInput";
-import { VoicePanel } from "../../voice/VoicePanel";
+import {
+  VoicePanel,
+  ComposerLiveVoiceControls,
+  useComposerLiveVoice,
+} from "../../voice/VoicePanel";
 import { ComposerSpeechButton, ComposerSpeechRecordingPill } from "./ComposerSpeechButton";
 import type { AssistantCitationSourceAnchor } from "~/lib/assistantTextSelection";
 import { shortcutLabelForCommand } from "../../keybindings";
@@ -1853,10 +1857,36 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const primaryActionEnvironmentUnavailable =
     environmentUnavailable !== null ||
     (!activePendingProgress && (noProviderAvailable || projectSelectionRequired));
+  const liveVoiceAvailable =
+    selectedProviderEntry?.driverKind === "codex" && multipleModelSelections === null;
+  const liveVoice = useComposerLiveVoice({
+    environmentId,
+    modelSelection: selectedModelSelection,
+    threadId: routeKind === "server" ? (activeThreadId ?? undefined) : undefined,
+    draft:
+      routeKind === "draft"
+        ? {
+            ...(activeProjectId ? { projectId: activeProjectId } : {}),
+            modelSelection: selectedModelSelection,
+            runtimeMode: compatibleRuntimeMode,
+            interactionMode: DEFAULT_INTERACTION_MODE,
+          }
+        : undefined,
+    disabled:
+      !liveVoiceAvailable ||
+      voiceInputActive ||
+      !canOperateThread ||
+      environmentUnavailable !== null ||
+      projectSelectionRequired ||
+      (routeKind === "server" &&
+        (activeThreadModelSelection?.instanceId !== selectedInstanceId ||
+          activeThreadModelSelection?.model !== selectedModel)),
+  });
+  const liveVoiceActive = liveVoice.voice.phase !== "idle" && liveVoice.voice.phase !== "error";
   const dictationShortcutLabel = useDictationShortcut({
     keybindings,
     speech: speechInput,
-    disabled: dictationDisabled,
+    disabled: dictationDisabled || liveVoiceActive,
     terminalOpen,
     modelPickerOpen: isComposerModelPickerOpen,
     ...(backgroundThread ? { targetRef: composerFormRef } : {}),
@@ -3637,30 +3667,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               message={providerInputSubmissionError ?? composerSubmissionError}
             />
 
-            {selectedProvider === "codex" && multipleModelSelections === null ? (
-              <VoicePanel
-                environmentId={environmentId}
-                threadId={routeKind === "server" ? (activeThreadId ?? undefined) : undefined}
-                draft={
-                  routeKind === "draft"
-                    ? {
-                        ...(activeProjectId ? { projectId: activeProjectId } : {}),
-                        modelSelection: selectedModelSelection,
-                        runtimeMode: compatibleRuntimeMode,
-                        interactionMode: DEFAULT_INTERACTION_MODE,
-                      }
-                    : undefined
-                }
-                disabled={
-                  voiceInputActive ||
-                  !canOperateThread ||
-                  environmentUnavailable !== null ||
-                  (routeKind === "server" &&
-                    (activeThreadModelSelection?.instanceId !== selectedInstanceId ||
-                      activeThreadModelSelection?.model !== selectedModel))
-                }
-              />
-            ) : null}
+            <VoicePanel live={liveVoice} />
 
             {speechInput.preview ? (
               <div
@@ -3672,7 +3679,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               </div>
             ) : null}
 
-            {isComposerCollapsedMobile && speechInput.state.phase === "idle" ? null : (
+            {isComposerCollapsedMobile &&
+            speechInput.state.phase === "idle" &&
+            !liveVoiceActive ? null : (
               <div
                 data-chat-composer-footer="true"
                 className={cn(
@@ -3680,6 +3689,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   pendingUserInputs.length > 0 && "pt-2",
                   showMobilePendingAnswerActions &&
                     speechInput.state.phase === "idle" &&
+                    !liveVoiceActive &&
                     "hidden sm:flex",
                 )}
               >
@@ -3732,6 +3742,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       },
                     )}
                     voiceInputActive={voiceInputActive}
+                    liveVoice={
+                      liveVoiceAvailable || liveVoiceActive
+                        ? {
+                            active: liveVoiceActive,
+                            controls: <ComposerLiveVoiceControls live={liveVoice} />,
+                          }
+                        : undefined
+                    }
                     isSendBusy={isSendBusy}
                     sendDisabledReason={primaryActionSendDisabledReason}
                     isEnvironmentUnavailable={primaryActionEnvironmentUnavailable}
@@ -3749,7 +3767,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     keepFullHistory={props.keepFullHistory}
                     onToggleKeepFullHistory={props.onToggleKeepFullHistory}
                   >
-                    {speechInput.available ? (
+                    {speechInput.available && !liveVoiceActive ? (
                       <>
                         <ComposerSpeechRecordingPill
                           state={speechInput.state}

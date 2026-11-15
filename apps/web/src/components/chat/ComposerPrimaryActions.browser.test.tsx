@@ -35,9 +35,16 @@ function setup() {
   } satisfies ComponentProps<typeof ComposerPrimaryActions>;
 }
 
-it.each(["resume", "draft", "question"] as const)(
-  "keeps repeat Stop clicks from reaching the action that replaces it (%s)",
-  async (mode) => {
+it.each([
+  ["resume", false],
+  ["draft", false],
+  ["question", false],
+  ["resume", true],
+  ["draft", true],
+  ["question", true],
+] as const)(
+  "keeps repeat Stop clicks from reaching the action that replaces it (%s, live voice: %s)",
+  async (mode, voiceActive) => {
     const props = setup();
     const submit = vi.fn();
     const pendingAction =
@@ -58,7 +65,24 @@ it.each(["resume", "draft", "question"] as const)(
           submit();
         }}
       >
-        <ComposerPrimaryActions {...props} pendingAction={pendingAction} {...overrides} />
+        <ComposerPrimaryActions
+          {...props}
+          pendingAction={pendingAction}
+          liveVoice={
+            voiceActive
+              ? {
+                  active: true,
+                  controls: (
+                    <>
+                      <button type="button">Mute live microphone</button>
+                      <button type="button">Stop live voice</button>
+                    </>
+                  ),
+                }
+              : undefined
+          }
+          {...overrides}
+        />
       </form>
     );
     await using screen = await render(view());
