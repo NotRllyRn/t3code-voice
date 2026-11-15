@@ -349,6 +349,11 @@ export interface ProjectionRecordFilter {
   readonly messageRoles?: ReadonlyArray<OrchestrationV2ConversationMessage["role"]>;
   readonly monitorNotificationsOnly?: boolean;
   readonly turnItemRunId?: RunId;
+  readonly turnItemIds?: ReadonlyArray<TurnItemId>;
+  readonly voiceHistory?: {
+    readonly throughOrdinal: number;
+    readonly afterOrdinal: number;
+  };
   readonly messageIds?: ReadonlyArray<MessageId>;
   readonly messageRunIds?: ReadonlyArray<RunId>;
   readonly turnItemRunIds?: ReadonlyArray<RunId | null>;
@@ -3482,7 +3487,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
     });
 
     const turnItemMatch = (threadId: ThreadId, filter: ProjectionRecordFilter | undefined) => sql`
-      thread_id = ${threadId}
+      ${filter?.turnItemIds === undefined ? sql`thread_id` : sql`+thread_id`} = ${threadId}
+        ${filter?.turnItemIds === undefined ? sql`` : sql`AND turn_item_id IN (SELECT value FROM json_each(${encodeIdList(filter.turnItemIds)}))`}
+        ${filter?.voiceHistory === undefined ? sql`` : sql`AND json_type(payload_json, '$.voice') = 'object'`}
+        ${filter?.voiceHistory?.throughOrdinal === undefined ? sql`` : sql`AND ordinal <= ${filter.voiceHistory.throughOrdinal}`}
+        ${filter?.voiceHistory?.afterOrdinal === undefined ? sql`` : sql`AND ordinal > ${filter.voiceHistory.afterOrdinal}`}
         ${filter?.turnItemRequestIds === undefined ? sql`` : sql`AND json_extract(payload_json, '$.requestId') IN (SELECT value FROM json_each(${encodeIdList(filter.turnItemRequestIds)}))`}
         ${filter?.turnItemTypes === undefined ? sql`` : sql`AND type IN (SELECT value FROM json_each(${encodeIdList(filter.turnItemTypes)}))`}
         ${filter?.turnItemStatuses === undefined ? sql`` : sql`AND status IN (SELECT value FROM json_each(${encodeIdList(filter.turnItemStatuses)}))`}
@@ -3579,6 +3588,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           (fields !== undefined && !fields.includes("turnItems")) ||
           (window === undefined &&
             matchesNothing(
+              filter?.turnItemIds,
               filter?.turnItemRequestIds,
               filter?.turnItemTypes,
               filter?.turnItemStatuses,
@@ -3591,7 +3601,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 SELECT payload_json
                 FROM orchestration_v2_projection_turn_items
                 ${
-                  filter?.turnItemTypes === undefined
+                  filter?.turnItemTypes === undefined || filter.voiceHistory !== undefined
                     ? sql`WHERE ${turnItemMatch(threadId, filter)}`
                     : // Seeks the type index. Sorted, SQLite would walk the thread by ordinal instead.
                       sql`WHERE rowid IN (
@@ -4267,6 +4277,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         const loadsEveryItemOf = (type: OrchestrationV2TurnItem["type"]) =>
           window === undefined &&
           (fields === undefined || fields.includes("turnItems")) &&
+          filter?.turnItemIds === undefined &&
+          filter?.voiceHistory === undefined &&
           filter?.turnItemRequestIds === undefined &&
           filter?.turnItemStatuses === undefined &&
           filter?.turnItemRunId === undefined &&

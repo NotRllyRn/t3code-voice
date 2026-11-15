@@ -6428,8 +6428,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const records = yield* projectionStore
       .getThreadRecords(projection.thread.id, ["messages", "turnItems"], {
         messageIds,
-        turnItemRunIds: [null],
-        turnItemTypes: ["user_message", "assistant_message"],
+        turnItemIds: messageIds.map(voiceTurnItemId),
       })
       .pipe(
         Effect.mapError(
@@ -6656,9 +6655,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       if (recordedVoice.runId !== null) return;
     }
-    const voiceHistoryCutoffOrdinal = projection.turnItems.some((item) => item.voice !== undefined)
-      ? Math.max(0, (yield* nextTurnItemOrdinal(projection)) - 1)
-      : undefined;
+    // Freeze the committed conversation high-water mark, not a proposed/pre-normalized position.
+    const lastStoredOrdinal =
+      (yield* projectionStore
+        .getNextTurnItemOrdinal(command.threadId)
+        .pipe(
+          Effect.mapError(
+            (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+          ),
+        )) - 1;
+    const voiceHistoryCutoffOrdinal = lastStoredOrdinal > 0 ? lastStoredOrdinal : undefined;
     if (command.steerFollowUpOfRunId !== undefined) {
       const source = projection.runs.find((run) => run.id === command.steerFollowUpOfRunId);
       if (
@@ -11168,6 +11174,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
 
+    if (queuedMessage.voice !== undefined) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Recorded voice inputs cannot be promoted to Steer.",
+      });
+    }
+
     const now = yield* DateTime.now;
     const emitEvent = emit(events, command);
     const parsedGoalCommand = parseGoalCommand(queuedMessage);
@@ -11534,6 +11548,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         commandId: command.commandId,
         commandType: command.type,
         cause: "Automatic completion deliveries cannot be edited.",
+      });
+    }
+    if (queuedMessage.voice !== undefined) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Recorded voice inputs cannot be edited. Send a separate message instead.",
       });
     }
     // The agent text and the shown text of a guest message must stay the guest's words.
