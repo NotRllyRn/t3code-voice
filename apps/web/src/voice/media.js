@@ -94,7 +94,7 @@ export async function pcmMedia(stream, { own, alive, fail, capture }) {
     played = 0,
     spool = null,
     timeline = [],
-    playbackFault = false,
+    playbackFault = "",
     closed = false,
     flushId = 0,
     capturing = false,
@@ -107,12 +107,18 @@ export async function pcmMedia(stream, { own, alive, fail, capture }) {
     fail("Capture stalled or transfer limit exceeded");
   };
   const pending = new Map();
+  const drains = new Set();
+  const rejectDrains = (message) => {
+    for (const drain of drains) drain.reject(Error(message));
+    drains.clear();
+  };
   let endCapture = null;
   const mute = () => {
     gain.gain.cancelScheduledValues(context.currentTime);
     gain.gain.setValueAtTime(0, context.currentTime);
   };
-  const clearPlayback = () => {
+  const clearPlayback = (reason = "Audio playback interrupted") => {
+    rejectDrains(reason);
     spool = null;
     timeline = [];
     sent = received = played = 0;
@@ -141,7 +147,8 @@ export async function pcmMedia(stream, { own, alive, fail, capture }) {
   };
   const playbackFailed = (message) => {
     if (playbackFault || closed) return;
-    playbackFault = true;
+    playbackFault = message;
+    rejectDrains(message);
     // Stop locally even when the owner has not finished shutting down the session.
     void silence().catch(() => {});
     fail(message);
@@ -162,7 +169,7 @@ export async function pcmMedia(stream, { own, alive, fail, capture }) {
   own(() => {
     closed = true;
     mute();
-    clearPlayback();
+    clearPlayback("Audio playback stopped");
     for (const resolve of pending.values()) resolve(null);
     pending.clear();
   });
@@ -196,6 +203,12 @@ export async function pcmMedia(stream, { own, alive, fail, capture }) {
         else {
           played = d.played;
           pump();
+          for (const drain of drains) {
+            if (drain.epoch === epoch && played >= drain.target) {
+              drains.delete(drain);
+              drain.resolve();
+            }
+          }
         }
       }
       node.port.postMessage({ type: "progressAck", id: d.id });
@@ -226,6 +239,14 @@ export async function pcmMedia(stream, { own, alive, fail, capture }) {
       if (!closed && !playbackFault && alive()) gain.gain.setValueAtTime(1, context.currentTime);
     },
     silence,
+    drain() {
+      if (playbackFault) return Promise.reject(Error(playbackFault));
+      if (closed || !alive()) return Promise.reject(Error("Audio playback stopped"));
+      // Barrier for audio received now, not later enqueue calls or generation completion.
+      const target = received;
+      if (played >= target) return Promise.resolve();
+      return new Promise((resolve, reject) => drains.add({ epoch, target, resolve, reject }));
+    },
     enqueue(e) {
       if (closed || playbackFault || !alive()) return;
       if (
