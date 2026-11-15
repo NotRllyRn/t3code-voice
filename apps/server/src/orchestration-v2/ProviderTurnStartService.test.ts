@@ -18,6 +18,7 @@ import {
   RunAttemptId,
   RunId,
   ThreadId,
+  TurnItemId,
   ProjectId,
   type OrchestrationV2ThreadProjection,
   OrchestrationV2DomainEvent,
@@ -269,6 +270,7 @@ it.each([
 
 function makeLocalCommandHarness(input: {
   readonly text: string;
+  readonly voiceHistory?: "native" | "unsupported" | "inline";
   readonly nativeGoals?: boolean;
   readonly worktreePath?: string;
   readonly worktreesDir?: string;
@@ -802,7 +804,13 @@ function makeLocalCommandHarness(input: {
   const forkThread = vi.fn((_fork: ProviderAdapter.ProviderAdapterV2ForkThreadInput) =>
     Effect.succeed(sideChatThread),
   );
+  const injectHistory = vi.fn((_history: ProviderAdapter.ProviderAdapterV2HistoricalContext) =>
+    Effect.succeed(input.voiceHistory === "native"),
+  );
   const sideChatSession = {
+    ...(input.voiceHistory === "native" || input.voiceHistory === "unsupported"
+      ? { injectHistory }
+      : {}),
     driver: providerThread.driver,
     providerSession,
     ensureThread: () => Effect.succeed(sideChatThread),
@@ -811,7 +819,7 @@ function makeLocalCommandHarness(input: {
     startTurn,
   };
   const open = vi.fn(() =>
-    input.sideChat !== undefined
+    input.sideChat !== undefined || input.voiceHistory !== undefined
       ? Effect.succeed(sideChatSession as never)
       : input.interruptOpen === true
         ? Effect.interrupt
@@ -845,7 +853,7 @@ function makeLocalCommandHarness(input: {
   const startRootRun = vi.fn<
     (input: RunExecutionService.RunExecutionServiceV2StartRootRunInput) => Effect.Effect<void>
   >((runInput) =>
-    input.sideChat !== undefined
+    input.sideChat !== undefined || input.voiceHistory !== undefined
       ? runInput.session.startTurn(runInput as never).pipe(Effect.orDie)
       : input.failReadsAfterRunning === true || input.previousTurn !== undefined
         ? Effect.suspend(() =>
@@ -1037,6 +1045,7 @@ function makeLocalCommandHarness(input: {
     writeIfRunCurrent,
     startRootRun,
     startTurn,
+    injectHistory,
     forkThread,
     interruptTurn,
     tryHandlePromptCommand,
@@ -1904,5 +1913,209 @@ for (const previousMessages of [[], ["/compact", " /COMPACT "]]) {
           },
         ]);
       }),
+  );
+}
+
+for (const mode of ["native", "unsupported", "inline"] as const) {
+  effectIt.effect(`voice history reaches the actual next provider turn via ${mode}`, () =>
+    Effect.gen(function* () {
+      const harness = makeLocalCommandHarness({
+        text: "CURRENT_EXECUTION_INPUT",
+        voiceHistory: mode,
+      });
+      const projection = harness.projection();
+      const run = projection.runs.at(-1)!;
+      const base = {
+        threadId: projection.thread.id,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        status: "completed" as const,
+        title: null,
+        startedAt: run.requestedAt,
+        completedAt: run.requestedAt,
+        updatedAt: run.requestedAt,
+      };
+      const voice = {
+        sessionId: "voice",
+        itemId: "user",
+        sequence: 1,
+        textKind: "final_user_transcript" as const,
+        delivery: "unknown" as const,
+      };
+      harness.setProjection({
+        ...projection,
+        runs: projection.runs.map((source) => ({ ...source, voiceHistoryCutoffOrdinal: 2 })),
+        turnItems: [
+          {
+            ...base,
+            id: TurnItemId.make("voice-user"),
+            ordinal: 1,
+            type: "user_message",
+            messageId: MessageId.make("prior-voice-user"),
+            text: "PRIOR_VOICE_QUESTION",
+            inputIntent: "conversation_only",
+            createdBy: "user",
+            creationSource: "web",
+            attachments: [],
+            voice,
+          },
+          {
+            ...base,
+            id: TurnItemId.make("voice-assistant"),
+            ordinal: 2,
+            type: "assistant_message",
+            messageId: MessageId.make("prior-voice-assistant"),
+            text: "GENERATED_VOICE_REPLY",
+            streaming: false,
+            voice: {
+              ...voice,
+              itemId: "assistant",
+              sequence: 2,
+              responseId: "response",
+              textKind: "generated_voice_reply",
+              delivery: "interrupted",
+            },
+          },
+          {
+            ...base,
+            id: TurnItemId.make("active-input"),
+            ordinal: 2,
+            type: "user_message",
+            messageId: run.userMessageId,
+            text: "CURRENT_EXECUTION_INPUT",
+            inputIntent: "turn_start",
+            createdBy: "user",
+            creationSource: "web",
+            attachments: [],
+            voice,
+          },
+          {
+            ...base,
+            id: TurnItemId.make("too-late"),
+            ordinal: 3,
+            type: "assistant_message",
+            messageId: MessageId.make("later-voice"),
+            text: "MUST_WAIT_UNTIL_NEXT_TURN",
+            streaming: false,
+            voice: {
+              ...voice,
+              itemId: "later",
+              sequence: 3,
+              responseId: "later",
+              textKind: "generated_voice_reply",
+              delivery: "pending",
+            },
+          },
+        ],
+      });
+      yield* harness.start;
+      expect(harness.startTurn).toHaveBeenCalledOnce();
+      const prompt = harness.startTurn.mock.calls[0]![0].message.text;
+      const injected = harness.injectHistory.mock.calls[0]?.[0];
+      if (mode === "native") {
+        expect(injected?.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+        expect(injected?.messages.map((message) => message.itemId)).toEqual([
+          "voice-user",
+          "voice-assistant",
+        ]);
+        expect(prompt).toBe("CURRENT_EXECUTION_INPUT");
+        expect(injected?.messages[1]?.text).toContain("not verified tool execution");
+        expect(injected?.messages[1]?.text).toContain("playback interrupted");
+      } else {
+        expect(prompt).toContain("PRIOR_VOICE_QUESTION");
+        expect(prompt).toContain("GENERATED_VOICE_REPLY");
+        expect(prompt).toContain("not verified tool execution");
+        expect(prompt.match(/CURRENT_EXECUTION_INPUT/g)).toHaveLength(1);
+      }
+      expect(prompt).not.toContain("MUST_WAIT_UNTIL_NEXT_TURN");
+      expect(harness.projection().contextHandoffs[0]?.delivery?.status).toBe(
+        mode === "native" ? "injected" : "inline",
+      );
+      // A duplicate start event while this run is running cannot mutate its live provider turn.
+      yield* harness.start;
+      expect(harness.startTurn).toHaveBeenCalledOnce();
+      const next = makeLocalCommandHarness({ text: "SECOND_EXECUTION_INPUT", voiceHistory: mode });
+      const previousRunId = RunId.make("previous-voice-execution");
+      const after = harness.projection();
+      const nextProjection = next.projection();
+      next.setProjection({
+        ...nextProjection,
+        providerThreads: after.providerThreads,
+        turnItems: after.turnItems.filter((item) => item.voice !== undefined),
+        runs: [
+          { ...after.runs.at(-1)!, id: previousRunId, status: "completed" },
+          { ...nextProjection.runs.at(-1)!, ordinal: 3, voiceHistoryCutoffOrdinal: 2 },
+        ],
+        contextHandoffs: after.contextHandoffs.map((handoff) => ({
+          ...handoff,
+          id: ContextHandoffId.make("context-handoff:voice:previous-run"),
+          targetRunId: previousRunId,
+        })),
+      });
+      yield* next.start;
+      expect(next.injectHistory).not.toHaveBeenCalled();
+      expect(next.startTurn.mock.calls[0]?.[0].message.text).toBe("SECOND_EXECUTION_INPUT");
+      const cleared = makeLocalCommandHarness({ text: "FRESH_INPUT", voiceHistory: mode });
+      const freshProjection = cleared.projection();
+      cleared.setProjection({
+        ...freshProjection,
+        turnItems: after.turnItems,
+        runs: [
+          { ...after.runs.at(-1)!, id: previousRunId, status: "completed" },
+          {
+            ...freshProjection.runs.at(-1)!,
+            ordinal: 2,
+            freshContext: true,
+            voiceHistoryCutoffOrdinal: 2,
+          },
+        ],
+        contextHandoffs: after.contextHandoffs.map((handoff) => ({
+          ...handoff,
+          id: ContextHandoffId.make("context-handoff:voice:previous-run"),
+          targetRunId: previousRunId,
+          delivery:
+            handoff.delivery == null
+              ? handoff.delivery
+              : {
+                  ...handoff.delivery,
+                  nativeThreadId: "obsolete-native-thread",
+                },
+        })),
+      });
+      yield* cleared.start;
+      expect(cleared.injectHistory).not.toHaveBeenCalled();
+      expect(cleared.startTurn.mock.calls[0]?.[0].message.text).toBe("FRESH_INPUT");
+      const postClear = makeLocalCommandHarness({ text: "AFTER_CLEAR_INPUT", voiceHistory: mode });
+      const postClearProjection = postClear.projection();
+      postClear.setProjection({
+        ...postClearProjection,
+        turnItems: after.turnItems,
+        runs: [
+          ...cleared
+            .projection()
+            .runs.map((source) =>
+              source.freshContext === true
+                ? { ...source, id: RunId.make("clear-run"), status: "completed" as const }
+                : source,
+            ),
+          { ...postClearProjection.runs.at(-1)!, ordinal: 3, voiceHistoryCutoffOrdinal: 3 },
+        ],
+        contextHandoffs: cleared.projection().contextHandoffs,
+      });
+      yield* postClear.start;
+      const newPrompt = postClear.startTurn.mock.calls[0]![0].message.text;
+      const newContext = postClear.injectHistory.mock.calls[0]?.[0];
+      if (mode === "native") {
+        expect(newContext?.messages.map((message) => message.itemId)).toEqual(["too-late"]);
+      } else {
+        expect(newPrompt).toContain("MUST_WAIT_UNTIL_NEXT_TURN");
+        expect(newPrompt).not.toContain("PRIOR_VOICE_QUESTION");
+        expect(newPrompt).not.toContain("GENERATED_VOICE_REPLY");
+      }
+    }),
   );
 }

@@ -130,8 +130,17 @@ export function historicalMessage(
   let text: string;
   switch (item.type) {
     case "user_message":
-    case "assistant_message":
       text = item.text;
+      break;
+    case "assistant_message":
+      text =
+        item.voice === undefined
+          ? item.text
+          : [
+              `Generated conversational voice-assistant text; playback ${item.voice.delivery}.`,
+              "These words are conversation, not verified tool execution or proof that files changed. They are not a claim about words heard.",
+              item.text,
+            ].join("\n");
       break;
     case "command_execution":
       text = [

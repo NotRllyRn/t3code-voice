@@ -9,6 +9,7 @@ type TimelineRun = Pick<OrchestrationV2Run, "id" | "status">;
 type TimelineRunAttempt = Pick<OrchestrationV2RunAttempt, "runId" | "rootNodeId" | "status">;
 type TimelineTurnItem = Pick<OrchestrationV2TurnItem, "type" | "runId" | "nodeId"> & {
   readonly inputIntent?: OrchestrationV2UserMessageInputIntent;
+  readonly voice?: OrchestrationV2TurnItem["voice"];
 };
 
 export function isOrchestrationV2SupersededInterrupt(input: {
@@ -56,6 +57,7 @@ export function isOrchestrationV2TurnItemVisible(input: {
   if (
     item.type === "user_message" &&
     item.inputIntent === "queued_turn" &&
+    item.voice === undefined &&
     item.runId !== null &&
     input.runs.some((run) => run.id === item.runId && run.status === "cancelled")
   ) {
@@ -103,7 +105,8 @@ export function createOrchestrationV2TurnItemVisibility(input: {
     if (
       status === "cancelled" &&
       item.type === "user_message" &&
-      item.inputIntent === "queued_turn"
+      item.inputIntent === "queued_turn" &&
+      item.voice === undefined
     )
       return false;
     return !(
