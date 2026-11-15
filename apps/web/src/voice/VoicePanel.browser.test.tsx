@@ -13,7 +13,12 @@ import { DEFAULT_INTERACTION_MODE } from "../types";
 import { act, render } from "../../test/render";
 import { ComposerPrimaryActions } from "../components/chat/ComposerPrimaryActions";
 import * as media from "./media.js";
-import { ComposerLiveVoiceControls, useComposerLiveVoice, VoicePanel } from "./VoicePanel";
+import { VoiceController } from "@t3tools/client-runtime/voice-conversation";
+import {
+  ComposerLiveVoiceControls,
+  ComposerLiveVoiceFeedback,
+  useComposerLiveVoice,
+} from "./VoicePanel";
 
 vi.mock("../state/session", () => {
   const prepared = {};
@@ -84,11 +89,11 @@ function VoiceComposer({
         onChange={(event) => setText(event.target.value)}
         placeholder="Ask anything…"
       />
-      <VoicePanel live={live} />
       <div className="flex items-center justify-end gap-2">
         <span className="mr-auto text-sm text-muted-foreground">
           {provider === "codex" ? "Codex" : "Other provider"}
         </span>
+        <ComposerLiveVoiceFeedback live={live} />
         <ComposerPrimaryActions
           compact
           canOperateThread
@@ -270,11 +275,20 @@ it.each([false, true])(
       enqueue: vi.fn(),
       drain: async () => {},
     });
-    await using screen = await render(<VoiceComposer scratch={scratch} />);
-    await page.screenshot({
-      element: screen.container,
-      path: "../../../../.t3/t3voice-composer-idle-r1.png",
-    });
+    using start = vi.spyOn(VoiceController.prototype, "start");
+    await using screen = await render(<VoiceComposer scratch={scratch} liveVoice={undefined} />);
+    const capture = (state: string) =>
+      page.screenshot({
+        element: screen.container,
+        path: `../../../../.t3/t3voice-clean-after-${scratch ? "draft" : "thread"}-${state}.png`,
+      });
+    await capture("normal-empty");
+    await userEvent.type(screen.getByRole("textbox"), "Keep this draft");
+    await capture("normal-typed");
+    await screen.rerender(<VoiceComposer scratch={scratch} />);
+    await capture("typed");
+    await userEvent.clear(screen.getByRole("textbox"));
+    await capture("empty");
     await userEvent.click(screen.getByRole("button", { name: "Start live voice" }));
     await socket.connected.promise;
     const url = new URL(String(_socketFactory.mock.calls[0]![0]));
@@ -292,6 +306,58 @@ it.each([false, true])(
     await expect
       .element(screen.getByRole("button", { name: "Mute live microphone" }))
       .toBeEnabled();
+    const controller = start.mock.contexts[0] as VoiceController;
+    await act(() => {
+      socket.event({ type: "input_audio_buffer.committed", item_id: "input_1" });
+      socket.event({
+        type: "conversation.item.input_audio_transcription.delta",
+        item_id: "input_1",
+        delta: "My voice request",
+      });
+      socket.event({ type: "relay.response", voice_turn: "turn_1" });
+      socket.event({
+        type: "response.created",
+        response: { id: "reply_1", metadata: { voice_turn: "turn_1" } },
+      });
+      socket.event({
+        type: "response.output_audio_transcript.delta",
+        response_id: "reply_1",
+        item_id: "output_1",
+        content_index: 0,
+        delta: "My voice reply",
+      });
+    });
+    await vi.waitFor(() => {
+      expect(controller.state.transcriptStatus).toBe("live");
+      expect(controller.state.replyPartial).toBe(true);
+    });
+    expect(screen.container.textContent).not.toContain("My voice request");
+    expect(screen.container.textContent).not.toContain("My voice reply");
+    await act(() => {
+      socket.event({
+        type: "conversation.item.input_audio_transcription.completed",
+        item_id: "input_1",
+        transcript: "My voice request",
+      });
+      socket.event({ type: "agent.recorded", item_id: "input_1" });
+      socket.event({
+        type: "response.output_audio_transcript.done",
+        response_id: "reply_1",
+        item_id: "output_1",
+        content_index: 0,
+        transcript: "My voice reply",
+      });
+    });
+    await vi.waitFor(() => {
+      expect(controller.state.transcriptStatus).toBe("saved");
+      expect(controller.state.replyPartial).toBe(false);
+    });
+    expect(controller.state.transcript).toBe("My voice request");
+    expect(controller.state.reply).toBe("My voice reply");
+    expect(screen.container.textContent).not.toContain("My voice request");
+    expect(screen.container.textContent).not.toContain("My voice reply");
+    await expect.element(screen.getByRole("status")).toHaveClass("sr-only");
+    await capture("active");
     await userEvent.click(screen.getByRole("button", { name: "Mute live microphone" }));
     await expect
       .element(screen.getByRole("button", { name: "Unmute live microphone" }))
@@ -308,10 +374,8 @@ it.each([false, true])(
       screen.getByRole("button", { name: "Stop live voice" }).element().getBoundingClientRect()
         .right,
     ).toBeLessThanOrEqual(window.innerWidth);
-    await page.screenshot({
-      element: screen.container,
-      path: "../../../../.t3/t3voice-composer-muted-r1.png",
-    });
+    await expect.element(screen.getByRole("status")).toHaveTextContent("Mic muted");
+    await capture("muted");
     await userEvent.type(screen.getByRole("textbox"), "Keep this draft");
     await expect
       .element(screen.getByRole("button", { name: "Submit message", exact: true }))
@@ -321,10 +385,19 @@ it.each([false, true])(
       .toBeVisible();
     await expect.element(screen.getByRole("button", { name: "Stop live voice" })).toBeVisible();
     expect(dispose).not.toHaveBeenCalled();
-    await page.screenshot({
-      element: screen.container,
-      path: "../../../../.t3/t3voice-composer-draft-r1.png",
-    });
+    await capture("active-typed");
+    if (scratch) {
+      await act(() => socket.event({ type: "agent.bound", thread_id: "created_thread" }));
+      await expect
+        .element(screen.getByRole("link", { name: "Open chat (stops voice)" }))
+        .toHaveAttribute("href", "/env_voice/created_thread");
+      await userEvent.click(screen.getByRole("textbox"));
+      await userEvent.tab();
+      await expect
+        .element(screen.getByRole("link", { name: "Open chat (stops voice)" }))
+        .toHaveFocus();
+      await capture("open-chat");
+    }
     await screen.rerender(<VoiceComposer scratch={scratch} attachment />);
     await userEvent.clear(screen.getByRole("textbox"));
     await expect
@@ -337,14 +410,29 @@ it.each([false, true])(
     await expect
       .element(screen.getByRole("alert"))
       .toHaveTextContent("Voice disconnected. Check server configuration or start again.");
+    await expect.element(screen.getByRole("button", { name: "Live voice error" })).toBeVisible();
+    await capture("error");
+    await userEvent.click(screen.getByRole("button", { name: "Live voice error" }));
+    await expect
+      .element(
+        page
+          .getByRole("dialog")
+          .getByText("Voice disconnected. Check server configuration or start again."),
+      )
+      .toBeVisible();
+    await expect.element(page.getByRole("button", { name: "Try voice again" })).toBeEnabled();
+    await page.screenshot({
+      path: `../../../../.t3/t3voice-clean-after-${scratch ? "draft" : "thread"}-error-popover.png`,
+    });
     await expect.element(screen.getByRole("textbox")).toHaveValue("Keep this draft");
     expect(dispose).toHaveBeenCalled();
     await userEvent.clear(screen.getByRole("textbox"));
     await screen.rerender(<VoiceComposer scratch={scratch} />);
     socket.connected = deferred<void>();
-    await userEvent.click(screen.getByRole("button", { name: "Start live voice" }));
+    await userEvent.click(page.getByRole("button", { name: "Try voice again" }));
     await socket.connected.promise;
     await act(() => socket.event({ type: "relay.ready" }));
+    expect(screen.getByRole("button", { name: "Live voice error" }).query()).toBeNull();
     await expect
       .element(screen.getByRole("button", { name: "Mute live microphone" }))
       .toBeEnabled();

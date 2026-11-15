@@ -18,8 +18,17 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { useEnvironmentScope, usePreparedConnection } from "../state/session";
 import { runEnvironmentSpeech } from "../speech/runEnvironmentSpeech";
-import { MicIcon, MicOffIcon, XIcon, AudioLinesIcon } from "lucide-react";
+import {
+  MicIcon,
+  MicOffIcon,
+  XIcon,
+  AudioLinesIcon,
+  CircleAlertIcon,
+  MessageSquareIcon,
+} from "lucide-react";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../components/ui/tooltip";
+import { Popover, PopoverPopup, PopoverTitle, PopoverTrigger } from "../components/ui/popover";
+import { Button } from "../components/ui/button";
 import { cn } from "../lib/utils";
 import { browserMedia } from "./media.js";
 
@@ -201,57 +210,68 @@ export function ComposerLiveVoiceControls({ live }: { live: LiveVoice }) {
   );
 }
 
-export function VoicePanel({ live }: { live: LiveVoice }) {
-  const { voice, environmentId, threadId } = live;
+export function ComposerLiveVoiceFeedback({ live }: { live: LiveVoice }) {
+  const { voice, environmentId, threadId, controller, allowed } = live;
   const active = voice.phase !== "idle" && voice.phase !== "error";
-  if (!voice.error && !voice.transcript && !voice.reply && !active && !voice.threadId) return null;
   return (
-    <div aria-label="Live voice" className="mx-3 mb-2 space-y-1 text-xs sm:mx-4">
-      {active ? (
-        <p
-          role="status"
-          className="text-muted-foreground"
-          aria-busy={voice.phase !== "active" || voice.busy}
-        >
-          {voice.phase !== "active" ? "Connecting voice…" : voice.muted ? "Mic muted" : "Listening"}
-        </p>
-      ) : null}
+    <>
+      <span role="status" className="sr-only">
+        {active
+          ? voice.phase !== "active"
+            ? "Connecting voice…"
+            : voice.muted
+              ? "Mic muted"
+              : "Listening"
+          : ""}
+      </span>
+      <span role="alert" className="sr-only">
+        {voice.error}
+      </span>
       {voice.error ? (
-        <p role="alert" className="break-words text-destructive">
-          {voice.error}
-        </p>
+        <Popover key={voice.error}>
+          <PopoverTrigger
+            render={
+              <button
+                type="button"
+                aria-label="Live voice error"
+                className={cn(voiceButtonClassName, "text-destructive hover:bg-destructive/15")}
+              />
+            }
+          >
+            <CircleAlertIcon aria-hidden="true" />
+          </PopoverTrigger>
+          <PopoverPopup side="top" align="end" width="sm" padding="compact">
+            <PopoverTitle>Voice stopped</PopoverTitle>
+            <p className="my-2 max-h-40 overflow-y-auto break-words text-sm">{voice.error}</p>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={!allowed || active}
+              onClick={() => void controller?.start()}
+            >
+              Try voice again
+            </Button>
+          </PopoverPopup>
+        </Popover>
       ) : null}
       {voice.threadId && !threadId ? (
-        <Link to="/$environmentId/$threadId" params={{ environmentId, threadId: voice.threadId }}>
-          Open chat (stops voice)
-        </Link>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Link
+                to="/$environmentId/$threadId"
+                params={{ environmentId, threadId: voice.threadId }}
+                aria-label="Open chat (stops voice)"
+                className={cn(voiceButtonClassName, "text-muted-foreground hover:bg-accent")}
+              />
+            }
+          >
+            <MessageSquareIcon aria-hidden="true" />
+          </TooltipTrigger>
+          <TooltipPopup>Open chat (stops voice)</TooltipPopup>
+        </Tooltip>
       ) : null}
-      {voice.transcript || voice.reply ? (
-        <div className="max-h-20 overflow-y-auto whitespace-pre-wrap break-words text-muted-foreground">
-          {voice.transcript ? (
-            <p>
-              <span className="font-medium">
-                You
-                {voice.transcriptStatus === "live"
-                  ? " (live, unsaved)"
-                  : voice.transcriptStatus === "saving"
-                    ? " (saving)"
-                    : ""}
-                :{" "}
-              </span>
-              {voice.transcript}
-            </p>
-          ) : null}
-          {voice.reply ? (
-            <p>
-              <span className="font-medium">
-                Voice ({voice.replyPartial ? "generating" : "generated"}):{" "}
-              </span>
-              {voice.reply}
-            </p>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
+    </>
   );
 }

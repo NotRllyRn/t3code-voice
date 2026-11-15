@@ -137,7 +137,7 @@ import { useDictationShortcut } from "../../speech/useDictationShortcut";
 import { useDictationSubmissionShortcut } from "../../speech/useDictationSubmissionShortcut";
 import { useEnvironmentSpeechInput } from "../../speech/useEnvironmentSpeechInput";
 import {
-  VoicePanel,
+  ComposerLiveVoiceFeedback,
   ComposerLiveVoiceControls,
   useComposerLiveVoice,
 } from "../../voice/VoicePanel";
@@ -1857,6 +1857,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           activeThreadModelSelection?.model !== selectedModel)),
   });
   const liveVoiceActive = liveVoice.voice.phase !== "idle" && liveVoice.voice.phase !== "error";
+  const liveVoiceFeedbackVisible =
+    !!liveVoice.voice.error || (!activeThreadId && !!liveVoice.voice.threadId);
   const dictationShortcutLabel = useDictationShortcut({
     keybindings,
     speech: speechInput,
@@ -3571,8 +3573,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               message={providerInputSubmissionError ?? composerSubmissionError}
             />
 
-            <VoicePanel live={liveVoice} />
-
             {speechInput.preview ? (
               <div
                 aria-label="Live transcription"
@@ -3585,7 +3585,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
             {isComposerCollapsedMobile &&
             speechInput.state.phase === "idle" &&
-            !liveVoiceActive ? null : (
+            !liveVoiceActive &&
+            !liveVoiceFeedbackVisible ? null : (
               <div
                 data-chat-composer-footer="true"
                 className={cn(
@@ -3594,6 +3595,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   showMobilePendingAnswerActions &&
                     speechInput.state.phase === "idle" &&
                     !liveVoiceActive &&
+                    !liveVoiceFeedbackVisible &&
                     "hidden sm:flex",
                 )}
               >
@@ -3614,6 +3616,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   >
                     {composerControls}
                   </div>
+                  <ComposerLiveVoiceFeedback live={liveVoice} />
                   <ComposerFooterPrimaryActions
                     compact={isComposerPrimaryActionsCompact}
                     canOperateThread={canOperateThread}
