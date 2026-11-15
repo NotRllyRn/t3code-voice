@@ -5928,6 +5928,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         turnItemIds: messageIds.map(voiceTurnItemId),
       })
       .pipe(
+        // A child thread can be created and dispatched in the same command, before
+        // projection persistence. Its validated projection and records are in events below.
+        Effect.catchTags({
+          ProjectionStoreThreadNotFoundError: () => Effect.succeed({ messages: [], turnItems: [] }),
+        }),
         Effect.mapError(
           (cause) => new OrchestratorProjectionError({ threadId: projection.thread.id, cause }),
         ),

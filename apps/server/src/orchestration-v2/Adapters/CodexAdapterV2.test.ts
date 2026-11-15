@@ -4105,6 +4105,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const transcript = finalAnswerTranscript("codex-partial-then-final", [
+            { id: "status", text: "Checking the files", phase: "commentary", streamed },
             { id: "partial", text: "CODEX_RECOVERY_OK", phase: "partial_answer", streamed },
             { id: "final", text: "CODEX_RECOVERY_OK", phase: "final_answer", streamed },
           ]);
@@ -4122,8 +4123,18 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           yield* harness.awaitTerminal(1);
           assert.deepEqual(
             assistantMessages(harness.events).map((event) => event.message.text),
-            ["CODEX_RECOVERY_OK", "CODEX_RECOVERY_OK"],
+            ["Checking the files", "CODEX_RECOVERY_OK", "CODEX_RECOVERY_OK"],
           );
+          const updates = harness.events.flatMap((event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "assistant_message"
+              ? [event.turnItem]
+              : [],
+          );
+          for (const phase of ["commentary", "partial_answer", "final_answer"] as const) {
+            assert.isTrue(updates.some((item) => item.phase === phase && !item.streaming));
+          }
+          // Streaming updates must not lose their phase and masquerade as final answers.
+          assert.isTrue(updates.every((item) => item.phase !== undefined));
         }).pipe(
           Effect.provide(
             Layer.mergeAll(

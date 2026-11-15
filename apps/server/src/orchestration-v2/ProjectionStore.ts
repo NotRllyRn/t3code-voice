@@ -405,6 +405,8 @@ export type ProjectionRecords<K extends ProjectionRecordField> = Pick<
 
 export interface ProjectionTimelinePageOptions {
   readonly afterPosition?: number;
+  /** Return the newest matches before this position, in timeline order. */
+  readonly beforePosition?: number;
   readonly itemId?: TurnItemId;
   readonly attachmentId?: string;
   readonly view?: "messages" | "activity";
@@ -3856,11 +3858,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               (filter.messageRoles.includes("user") && filter.messageRoles.includes("assistant")))
               ? undefined
               : messages.map((message) => message.id);
-          // The literal `type = 'user_message'` lets SQLite pick the partial user-message index.
+          // Retained preview migration 88 adds a competing type index. Keep user-message
+          // ordinal lookups on the message/ordinal index rather than scanning every user item.
           const userOnly = messages.every((message) => message.role === "user");
           const rows = yield* sql<{ message_id: string; ordinal: number }>`
             SELECT json_extract(payload_json, '$.messageId') AS message_id, MIN(ordinal) AS ordinal
             FROM orchestration_v2_projection_turn_items
+              ${userOnly ? sql`INDEXED BY orchestration_v2_projection_turn_items_user_message_idx` : sql``}
             WHERE thread_id = ${threadId}
               AND ${userOnly ? sql`type = 'user_message'` : sql`type IN ('user_message', 'assistant_message')`}
               ${loadedMessageIds === undefined ? sql`` : sql`AND json_extract(payload_json, '$.messageId') IN (SELECT value FROM json_each(${encodeIdList(loadedMessageIds)}))`}
@@ -6129,6 +6133,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               .filter((row) =>
                 options.itemId === undefined
                   ? row.position > (options.afterPosition ?? -1) &&
+                    row.position < (options.beforePosition ?? Number.POSITIVE_INFINITY) &&
                     (options.view === "activity" ||
                       ["user_message", "assistant_message", "proposed_plan"].includes(
                         row.item.type,
@@ -6138,7 +6143,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               .filter(
                 (row) => attachmentOwners?.has(`${row.sourceThreadId}:${row.sourceItemId}`) ?? true,
               );
-            const page = matching.slice(0, options.limit);
+            const page =
+              options.beforePosition === undefined
+                ? matching.slice(0, options.limit)
+                : matching.slice(Math.max(0, matching.length - options.limit));
             const sources = yield* encodeTimelineSources(
               page
                 .filter((row) => row.synthetic === undefined)

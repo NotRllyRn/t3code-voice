@@ -4,6 +4,21 @@ A conversational voice front end for the selected **T3 Codex agent**, using the
 environment's configured Realtime transport. This is a prototype, not native Codex
 voice parity or a production release.
 
+## Fork base and updates
+
+The voice fork is based on upstream **v0.1.9**, commit
+`24e77473ecf41bc1f7142529c7911c1c1aae1d76`, not moving upstream main.
+Desktop identity, profile, data directory and URL schemes are fork-owned
+(`T3 Code Voice`, `t3code-voice`, `.t3code-voice`). Updates remain manual.
+The stable port retains migration IDs 82–88 from earlier fork previews so their
+existing databases remain readable; this is not an upstream development merge.
+No saved voice history is deleted or reset by this port. Back up the fork data
+directory before trying a different build; do not run an older upstream build
+against a fork preview database.
+
+GPT-Live protocol/authentication work is not part of this stable port. The
+Realtime prototype below remains the existing implementation, not a Live fallback.
+
 1. Select one Codex model in an existing thread or an empty new-chat draft. For no
    project, use the normal **Start without a project** action to open Scratch.
 2. Press **Start voice**, allow the microphone, then speak normally. Server VAD

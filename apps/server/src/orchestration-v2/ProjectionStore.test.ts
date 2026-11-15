@@ -7940,6 +7940,20 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       });
       assert.deepEqual(followingPage.items, targetAfterRollback.visibleTurnItems.slice(2));
       assert.isFalse(followingPage.hasMore);
+      const latestConversation = yield* projectionStore.getTimelinePage(targetThreadId, {
+        view: "messages",
+        beforePosition: Number.MAX_SAFE_INTEGER,
+        limit: 2,
+      });
+      assert.deepEqual(latestConversation.items, targetAfterRollback.visibleTurnItems.slice(2, 4));
+      assert.isTrue(latestConversation.hasMore);
+      const earlierConversation = yield* projectionStore.getTimelinePage(targetThreadId, {
+        view: "messages",
+        beforePosition: latestConversation.items[0]!.position,
+        limit: 2,
+      });
+      assert.deepEqual(earlierConversation.items, targetAfterRollback.visibleTurnItems.slice(0, 2));
+      assert.isFalse(earlierConversation.hasMore);
       const tracedTimelinePage = (limit: number) =>
         Effect.gen(function* () {
           const { statements, tracer } = traceSqlStatements();
