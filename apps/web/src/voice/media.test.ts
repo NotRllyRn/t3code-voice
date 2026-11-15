@@ -440,6 +440,114 @@ test("capture start/finish and capture across playback silence remain supported"
   media.capture(false);
 });
 
+test("drain snapshots received audio, settles all matching waiters, and does not wait for future enqueue", async () => {
+  await using h = setup();
+  const media = await browserMedia(h.options);
+  NodeAssert.ok(media.drain);
+  await media.drain();
+  media.enqueue(audio());
+  const first = media.drain();
+  const sameSnapshot = media.drain();
+  media.enqueue(audio(36000));
+  let laterDone = false;
+  const later = media.drain().then(() => {
+    laterDone = true;
+  });
+  h.render(4096);
+  await Promise.all([first, sameSnapshot]);
+  NodeAssert.equal(laterDone, false);
+  NodeAssert.ok(h.processor().played < 38400);
+  h.render(38400);
+  await later;
+  await media.drain();
+  NodeAssert.equal(h.processor().played, 38400);
+});
+
+test("drain waits for consumed progress, not generation completion or an unreported empty worklet", async () => {
+  await using h = setup();
+  const media = await browserMedia(h.options);
+  NodeAssert.ok(media.drain);
+  media.enqueue(audio());
+  let done = false;
+  const draining = media.drain().then(() => {
+    done = true;
+  });
+  h.delayProgress(true);
+  h.render(2400);
+  NodeAssert.equal(h.processor().length, 0);
+  await Promise.resolve();
+  NodeAssert.equal(done, false);
+  h.delayProgress(false);
+  h.deliverProgress();
+  await Promise.resolve();
+  NodeAssert.equal(done, false);
+  h.render(1024);
+  await draining;
+  NodeAssert.equal(done, true);
+});
+
+test("silence rejects old drains and late progress cannot complete a new epoch's drain", async () => {
+  await using h = setup();
+  const media = await browserMedia(h.options);
+  NodeAssert.ok(media.drain);
+  media.enqueue(audio(36000));
+  const old = NodeAssert.rejects(media.drain(), /Audio playback interrupted/);
+  const duplicate = NodeAssert.rejects(media.drain(), /Audio playback interrupted/);
+  h.delayProgress(true);
+  h.render(4096);
+  await media.silence();
+  await Promise.all([old, duplicate]);
+  await media.drain();
+  media.enqueue(audio(480, 8192, "next"));
+  let done = false;
+  const next = media.drain().then(() => {
+    done = true;
+  });
+  h.delayProgress(false);
+  h.deliverProgress();
+  await Promise.resolve();
+  NodeAssert.equal(done, false);
+  h.render(4096);
+  await next;
+  NodeAssert.equal(h.processor().played, 480);
+  NodeAssert.equal(h.failed.mock.calls.length, 0);
+});
+
+test.each(["malformed", "transfer"])(
+  "%s failure rejects pending and future drains with its safe reason",
+  async (kind) => {
+    await using h = setup();
+    const media = await browserMedia(h.options);
+    NodeAssert.ok(media.drain);
+    media.enqueue(audio(36000));
+    const reason =
+      kind === "malformed" ? /Invalid PCM byte length/ : /Audio playback transfer failed/;
+    const rejected = NodeAssert.rejects(media.drain(), reason);
+    if (kind === "malformed") media.enqueue({ ...audio(), delta: "AA==" });
+    else {
+      h.failTransfer();
+      h.render(1024);
+    }
+    await rejected;
+    await NodeAssert.rejects(media.drain(), reason);
+    NodeAssert.equal(h.processor().length, 0);
+  },
+);
+
+test("dispose rejects pending and future drains instead of hanging or reporting stale success", async () => {
+  await using h = setup();
+  const media = await browserMedia(h.options);
+  NodeAssert.ok(media.drain);
+  media.enqueue(audio(36000));
+  const rejected = NodeAssert.rejects(media.drain(), /Audio playback stopped/);
+  h.delayProgress(true);
+  h.render(4096);
+  await media.dispose();
+  h.deliverProgress();
+  await rejected;
+  await NodeAssert.rejects(media.drain(), /Audio playback stopped/);
+});
+
 test("empty deltas retain no timeline; dispose invalidates spool and late pumping even if owner is alive", async () => {
   await using h = setup();
   const media = await browserMedia(h.options);
