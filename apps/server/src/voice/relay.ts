@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Socket from "effect/socket/Socket";
+import { VoiceAgentError, type VoiceAgentConnection } from "./agentSession.ts";
 import {
   clientEvent,
   MAX_FRAME_BYTES,
@@ -30,18 +31,36 @@ const pump = Effect.fn("voice.pump")(function* <E>(
 });
 
 /** The caller supplies bounded transports and scopes both peers. */
-export const relayVoiceSockets = Effect.fn("voice.relay")(function* <E>(
+export const relayVoiceSockets = Effect.fn("voice.relay")(function* <E, R = never>(
   downstream: Socket.Socket,
   upstream: Socket.Socket,
   update: object,
   watchOwner: Effect.Effect<never, E>,
+  makeAgent?: (
+    up: (event: object) => Effect.Effect<void, VoiceAgentError>,
+    down: (event: object) => Effect.Effect<void, VoiceAgentError>,
+  ) => Effect.Effect<VoiceAgentConnection, VoiceAgentError, R>,
 ) {
   // Reader acquisition opens Effect's lazy WebSocket and releases its writers.
   const clientReader = yield* downstream.reader;
   const upstreamReader = yield* upstream.reader;
   const toClient = yield* downstream.writer;
   const toUpstream = yield* upstream.writer;
-  const budget = new VoiceBudget();
+  const agent = makeAgent
+    ? yield* makeAgent(
+        (event) =>
+          encodeVoiceFrame(event).pipe(
+            Effect.flatMap((frame) => toUpstream.write(frame)),
+            Effect.mapError(() => new VoiceAgentError()),
+          ),
+        (event) =>
+          encodeVoiceFrame(event).pipe(
+            Effect.flatMap((frame) => toClient.write(frame)),
+            Effect.mapError(() => new VoiceAgentError()),
+          ),
+      ).pipe(Effect.mapError(() => new VoiceRelayError()))
+    : undefined;
+  const budget = new VoiceBudget(!!agent);
   let ready = false;
   let responseId: unknown;
   const diagnostics = {
@@ -65,8 +84,17 @@ export const relayVoiceSockets = Effect.fn("voice.relay")(function* <E>(
         try: () => clientEvent(value),
         catch: () => new VoiceRelayError(),
       });
-      if (!ready) return yield* new VoiceRelayError();
+      if (
+        !ready ||
+        (agent && ["response.create", "input_audio_buffer.commit"].includes(String(e.type)))
+      )
+        return yield* new VoiceRelayError();
       yield* Effect.try({ try: () => budget.accept(e), catch: () => new VoiceRelayError() });
+      if (e.type === "relay.playback.done") {
+        if (!agent) return yield* new VoiceRelayError();
+        yield* agent.receive(e);
+        return;
+      }
       diagnostics.lastClientEvent = String(e.type);
       if (e.type === "response.create") diagnostics.responsePending = true;
       if (e.type === "response.cancel") {
@@ -123,6 +151,10 @@ export const relayVoiceSockets = Effect.fn("voice.relay")(function* <E>(
         }
         yield* toClient.write(yield* encodeVoiceFrame(event));
       }
+      if (agent) {
+        if (raw.type === "input_audio_buffer.committed") budget.committed();
+        yield* agent.receive(raw);
+      }
     }),
   );
   const handshakeTimeout = Effect.sleep("10 seconds").pipe(
@@ -130,7 +162,10 @@ export const relayVoiceSockets = Effect.fn("voice.relay")(function* <E>(
   );
   yield* Effect.raceFirst(
     Effect.raceFirst(fromClient, fromUpstream),
-    Effect.raceFirst(watchOwner, handshakeTimeout),
+    Effect.raceFirst(
+      Effect.raceFirst(watchOwner, handshakeTimeout),
+      agent ? agent.run.pipe(Effect.mapError(() => new VoiceRelayError())) : Effect.never,
+    ),
   ).pipe(
     Effect.timeoutOrElse({ duration: MAX_SESSION_MS, orElse: () => Effect.void }),
     // Only fixed categories and local counters; never log a cause or provider payload.

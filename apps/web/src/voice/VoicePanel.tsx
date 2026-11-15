@@ -8,27 +8,32 @@ import {
   AuthOrchestrationOperateScope,
   type EnvironmentId,
   type ThreadId,
+  type ProjectId,
+  type ModelSelection,
+  type RuntimeMode,
+  type ProviderInteractionMode,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
-import * as SecureRandom from "effect/crypto/SecureRandom";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { useEnvironmentScope, usePreparedConnection } from "../state/session";
 import { runEnvironmentSpeech } from "../speech/runEnvironmentSpeech";
 import { Button } from "../components/ui/button";
 import { browserMedia } from "./media.js";
 
-export interface VoiceHandoff {
-  text: string;
-  commandId: string;
-  messageId: string;
-}
 interface Props {
   environmentId: EnvironmentId;
-  threadId: ThreadId;
+  threadId?: ThreadId | undefined;
+  draft?:
+    | {
+        projectId?: ProjectId;
+        modelSelection: ModelSelection;
+        runtimeMode: RuntimeMode;
+        interactionMode: ProviderInteractionMode;
+      }
+    | undefined;
   disabled: boolean;
-  onQueue: (request: VoiceHandoff) => Promise<void>;
 }
-
 function supported() {
   if (typeof navigator === "undefined" || typeof window === "undefined") return false;
   const ios =
@@ -43,66 +48,48 @@ function supported() {
   );
 }
 
-/** Mounted with an owner key by the composer. All audio and context die with that identity. */
-export function VoicePanel(props: Props) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="mx-3 mb-2 rounded-lg border border-border/60 bg-muted/20 p-2 text-xs sm:mx-4">
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        aria-expanded={open}
-        onClick={() => setOpen(!open)}
-      >
-        {open ? "Close voice conversation" : "Voice conversation"}
-      </Button>
-      {open ? <VoicePanelSession {...props} /> : null}
-    </div>
-  );
-}
-
-function VoicePanelSession({ environmentId, threadId, disabled, onQueue }: Props) {
+/** Binding stays on the draft until Stop: first speech can launch without losing the microphone to navigation. */
+export function VoicePanel({ environmentId, threadId, draft, disabled }: Props) {
   const prepared = Option.getOrNull(usePreparedConnection(environmentId));
   const canOperate = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
+  const binding = JSON.stringify(threadId ? { threadId } : { draft });
   const [snapshot, setSnapshot] = useState<{
     controller: VoiceController | null;
     value: VoiceState;
   }>({ controller: null, value: INITIAL_VOICE_STATE });
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Each effect setup owns a fresh disposable audio session, including StrictMode replay.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- This effect owns and disposes the external microphone/socket, including StrictMode replay.
   useEffect(() => {
     if (!prepared) return;
     const owner = new VoiceController(
       {
+        continuous: true,
         media: browserMedia,
         socket: (url) => new WebSocket(url),
         url: async (signal) => {
           const url = new URL(
             await runEnvironmentSpeech(getEnvironmentRealtimeVoiceUrl(prepared), { signal }),
           );
-          url.searchParams.set("threadId", threadId);
+          url.searchParams.set("continuous", "1");
+          const target = JSON.parse(binding) as { threadId?: string; draft?: Props["draft"] };
+          if (target.threadId) url.searchParams.set("threadId", target.threadId);
+          else url.searchParams.set("draft", JSON.stringify(target.draft));
           return url.toString();
         },
       },
       (value) => setSnapshot({ controller: owner, value }),
     );
-    // Publish the newly acquired external controller, including after StrictMode replay.
-    // eslint-disable-next-line react/set-state-in-effect
+    // eslint-disable-next-line react/set-state-in-effect -- Publish the newly acquired external audio owner after StrictMode cleanup.
     setSnapshot({ controller: owner, value: INITIAL_VOICE_STATE });
     return () => owner.dispose();
-  }, [prepared, threadId]);
+  }, [prepared, binding]);
   const controller = snapshot.controller;
   const voice = snapshot.value;
-  const [request, setRequest] = useState("");
-  const [sendState, setSendState] = useState<"idle" | "sending" | "sent" | "failed">("idle");
-  const retry = useRef<VoiceHandoff | null>(null);
-  const sending = useRef(false);
   const allowed = !disabled && canOperate && !!prepared && !!controller && supported();
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Permission/connection loss must stop the external microphone and transport.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Permission/connection loss must release the external audio resources.
   useEffect(() => {
     if (!allowed) void controller?.stop();
   }, [allowed, controller]);
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Browser visibility events release the external audio session.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Browser visibility events release microphone and playback.
   useEffect(() => {
     const stop = () => {
       void controller?.stop();
@@ -117,112 +104,84 @@ function VoicePanelSession({ environmentId, threadId, disabled, onQueue }: Props
       document.removeEventListener("visibilitychange", visibility);
     };
   }, [controller]);
-  const edit = (text: string) => {
-    setRequest(text);
-    setSendState("idle");
-    retry.current = null;
-  };
-  const queue = async () => {
-    const text = request.trim();
-    if (!allowed || !text || text.length > 16_000 || sending.current || sendState === "sent")
-      return;
-    const handoff =
-      retry.current?.text === text
-        ? retry.current
-        : {
-            text,
-            commandId: SecureRandom.uuidV4Unsafe(),
-            messageId: SecureRandom.uuidV4Unsafe(),
-          };
-    retry.current = handoff;
-    sending.current = true;
-    setSendState("sending");
-    try {
-      await onQueue(handoff);
-      setSendState("sent");
-    } catch {
-      setSendState("failed");
-    } finally {
-      sending.current = false;
-    }
-  };
-  const running = voice.phase === "active";
   const canStart = voice.phase === "idle" || voice.phase === "error";
+  const running = voice.phase === "active";
   return (
-    <section aria-label="Separate voice conversation" className="mt-2 space-y-2">
+    <section
+      aria-label="Live voice for T3 agent"
+      className="mx-3 mb-2 space-y-2 rounded-lg border border-border/60 bg-muted/20 p-2 text-xs sm:mx-4"
+    >
+      <div className="flex flex-wrap items-center gap-1">
+        {canStart ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={!allowed}
+            onClick={() => void controller?.start()}
+          >
+            Start voice
+          </Button>
+        ) : (
+          <>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={!running || voice.busy}
+              aria-pressed={voice.muted}
+              onClick={() => void controller?.mute()}
+            >
+              {voice.muted ? "Unmute mic" : "Mute mic"}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => void controller?.stop()}
+            >
+              Stop voice
+            </Button>
+          </>
+        )}
+        <span role="status">
+          {voice.muted
+            ? "Mic muted"
+            : running
+              ? "Listening · speak to interrupt audio"
+              : voice.phase}
+          {voice.agentStatus ? ` · Agent: ${voice.agentStatus}` : ""}
+        </span>
+      </div>
       <p className="text-muted-foreground">
-        Separate context. No code or chat history is shared. Audio goes through this environment’s
-        configured Realtime service. Push to talk; Stop releases the microphone. Web and macOS only.
+        Prototype · Web/macOS. Speech uses this environment’s Realtime service and delegates work to
+        your selected T3 Codex thread. Normal permissions stay in chat. Stop voice stops audio, not
+        coding.
       </p>
-      <p role="status">
-        Voice: {voice.recording ? "recording (14 second limit)" : voice.phase}
-        {voice.muted ? " · microphone muted" : ""}
-      </p>
+      {!threadId && (
+        <p className="text-muted-foreground">
+          First request creates a normal thread in{" "}
+          {draft?.projectId ? "the selected project" : "managed No project (Scratch)"}. Stay here
+          while speaking; open its chat to answer permissions or questions.
+        </p>
+      )}
+      {voice.threadId && !threadId ? (
+        <Link to="/$environmentId/$threadId" params={{ environmentId, threadId: voice.threadId }}>
+          Open coding thread (stops voice)
+        </Link>
+      ) : null}
       {!supported() ? (
         <p>
-          Voice requires a secure desktop browser with AudioWorklet. Native iOS voice is not
-          implemented.
+          Use a secure desktop browser with microphone and AudioWorklet support. Native iOS is not
+          supported.
         </p>
       ) : null}
-      {disabled ? (
-        <p>
-          Use a saved Codex thread with its current model selected. Finish dictation or pending
-          input first.
-        </p>
-      ) : null}
+      {disabled ? <p>Select one available Codex model and finish dictation first.</p> : null}
       {voice.error ? (
         <p role="alert" className="text-destructive">
           {voice.error}
         </p>
       ) : null}
-      <div className="flex flex-wrap gap-1">
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          disabled={!allowed || !canStart}
-          onClick={() => void controller?.start()}
-        >
-          Start voice
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          disabled={!allowed || !running || voice.busy || voice.muted}
-          onClick={() => void (voice.recording ? controller?.finish() : controller?.record())}
-        >
-          {voice.recording ? "Send voice turn" : "Record turn"}
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          disabled={!running || voice.busy}
-          aria-pressed={voice.muted}
-          onClick={() => controller?.mute()}
-        >
-          {voice.muted ? "Unmute mic" : "Mute mic"}
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          disabled={!running || voice.busy}
-          onClick={() => void controller?.interrupt()}
-        >
-          Interrupt voice
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          disabled={canStart}
-          onClick={() => void controller?.stop()}
-        >
-          Stop voice
-        </Button>
-      </div>
       {voice.transcript ? (
         <div className="max-h-24 overflow-auto whitespace-pre-wrap">
           <strong>You said: </strong>
@@ -231,51 +190,9 @@ function VoicePanelSession({ environmentId, threadId, disabled, onQueue }: Props
       ) : null}
       {voice.reply ? (
         <div className="max-h-24 overflow-auto whitespace-pre-wrap">
-          <strong>Voice reply: </strong>
+          <strong>Voice: </strong>
           {voice.reply}
         </div>
-      ) : null}
-      <label className="block">
-        Review a coding request
-        <textarea
-          aria-label="Coding request from voice"
-          className="mt-1 block min-h-20 w-full rounded-md border border-border bg-background p-2 text-sm"
-          value={request}
-          maxLength={16_000}
-          disabled={sendState === "sending"}
-          onChange={(e) => edit(e.target.value)}
-        />
-      </label>
-      <div className="flex flex-wrap items-center gap-2">
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          disabled={!voice.transcript || sendState === "sending"}
-          onClick={() => edit(voice.transcript)}
-        >
-          Use my transcript
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          disabled={!allowed || !request.trim() || sendState === "sending" || sendState === "sent"}
-          onClick={() => void queue()}
-        >
-          Confirm and queue to coding thread
-        </Button>
-      </div>
-      <p className="text-muted-foreground">
-        Only the reviewed text above is sent. Coding keeps running; normal queue and approval rules
-        apply.
-      </p>
-      {sendState === "sent" ? <p role="status">Request queued to this coding thread.</p> : null}
-      {sendState === "failed" ? (
-        <p role="alert">
-          Could not confirm delivery. Retry uses the same request identity; do not manually send a
-          duplicate.
-        </p>
       ) : null}
     </section>
   );

@@ -28,6 +28,7 @@ export function clientEvent(value: unknown): Record<string, unknown> {
     case "input_audio_buffer.commit":
       valid = keys();
       break;
+    case "relay.playback.done":
     case "response.cancel":
       valid = keys("response_id") && id(e.response_id);
       break;
@@ -72,19 +73,39 @@ export function upstreamUrl(value: string) {
     throw Error("Invalid realtime endpoint");
   return url.toString();
 }
-export function sessionUpdate(voice: string, transcriptionModel: string) {
+export function sessionUpdate(voice: string, transcriptionModel: string, continuous = false) {
   return {
     type: "session.update",
     session: {
       type: "realtime",
-      tools: [],
-      tool_choice: "none",
-      instructions:
-        "You are a separate voice conversation, not the coding runtime. Reply briefly. You have no tools or code context. Never claim to run code or change files. The user must review and confirm any request sent to their coding thread.",
+      tools: continuous
+        ? [
+            {
+              type: "function",
+              name: "run_t3_agent",
+              description:
+                "Delegate the current finalized user utterance to the bound T3 coding agent, verbatim. Use for work, questions about the task, files, context or progress. No arguments: T3 owns the transcript and target. Never use for permission approval.",
+              parameters: { type: "object", properties: {}, additionalProperties: false },
+            },
+          ]
+        : [],
+      tool_choice: continuous ? "auto" : "none",
+      instructions: continuous
+        ? "You are the brief conversational voice front end for the user's existing T3 Codex agent, not a coding runtime. For every task, contextual question, or change of direction call run_t3_agent once. T3 submits the finalized transcript verbatim. Do not invent tool results, progress, code changes or completion. A queued/accepted request is not success. Speak actual T3 status/results briefly, distinguishing this turn from still-running background work. Normal approvals and questions must be answered in the T3 UI; never approve or treat spoken yes as permission. Interruptions stop speech only; coding continues. You may respond to greetings without work. Do not read secrets or raw tool output aloud."
+        : "You are a separate voice conversation, not the coding runtime. Reply briefly. You have no tools or code context. Never claim to run code or change files. The user must review and confirm any request sent to their coding thread.",
       audio: {
         input: {
           format: { type: "audio/pcm", rate: 24000 },
-          turn_detection: null,
+          turn_detection: continuous
+            ? {
+                type: "server_vad",
+                threshold: 0.5,
+                prefix_padding_ms: 300,
+                silence_duration_ms: 600,
+                create_response: false,
+                interrupt_response: false,
+              }
+            : null,
           ...(transcriptionModel ? { transcription: { model: transcriptionModel } } : {}),
         },
         output: { format: { type: "audio/pcm", rate: 24000 }, voice },
@@ -99,6 +120,12 @@ export function serverEvent(value: unknown): Record<string, unknown> | null {
     part = object(e.part);
   if (e.type === "error") throw Error("Realtime upstream rejected the voice session");
   if (e.type === "session.updated") return { type: "relay.ready" };
+  if (
+    (e.type === "input_audio_buffer.speech_started" ||
+      e.type === "input_audio_buffer.speech_stopped") &&
+    id(e.item_id)
+  )
+    return { type: e.type, item_id: e.item_id };
   if (e.type === "input_audio_buffer.committed" && id(e.item_id))
     return { type: e.type, item_id: e.item_id };
   if (e.type === "response.created" || e.type === "response.done") {
@@ -164,6 +191,13 @@ export class VoiceBudget {
   private totalSamples = 0;
   private windowStart = -Infinity;
   private frames = 0;
+  private continuous: boolean;
+  constructor(continuous = false) {
+    this.continuous = continuous;
+  }
+  committed() {
+    this.samples = 0;
+  }
   accept(e: Record<string, unknown>, now = performance.now()) {
     if (now - this.windowStart >= 1000) {
       this.windowStart = now;
@@ -174,9 +208,10 @@ export class VoiceBudget {
       const samples = Buffer.from(String(e.audio), "base64").length / 2;
       this.samples += samples;
       this.totalSamples += samples;
-      if (this.totalSamples > MAX_TURN_SAMPLES * 32)
+      if (this.totalSamples > (this.continuous ? 24_000 * 60 * 10 : MAX_TURN_SAMPLES * 32))
         throw Error("Voice conversation audio limit reached");
-      if (this.samples > MAX_TURN_SAMPLES) throw Error("Voice turn limit reached");
+      if (!this.continuous && this.samples > MAX_TURN_SAMPLES)
+        throw Error("Voice turn limit reached");
     }
     if (e.type === "input_audio_buffer.commit" && this.samples < 2400)
       throw Error("Voice turn too short");

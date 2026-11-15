@@ -10,6 +10,8 @@ export interface VoiceState {
   busy: boolean;
   transcript: string;
   reply: string;
+  agentStatus?: string;
+  threadId?: string;
 }
 export const INITIAL_VOICE_STATE: VoiceState = {
   phase: "idle",
@@ -24,6 +26,7 @@ export interface VoiceDependencies {
   media: VoiceMediaFactory;
   socket: (url: string) => VoiceSocket;
   url: (signal: AbortSignal) => Promise<string>;
+  continuous?: boolean;
 }
 
 /** One application-owned voice identity; no coding session or tool execution lives here. */
@@ -77,7 +80,8 @@ export class VoiceController {
         capture: (audio, samples) => {
           if (!this.alive(session) || !this.state.recording || this.state.muted) return;
           this.samples += samples;
-          if (this.samples > 24_000 * 15) throw Error("Voice turn is too long");
+          if (!this.deps.continuous && this.samples > 24_000 * 15)
+            throw Error("Voice turn is too long");
           this.send({ type: "input_audio_buffer.append", audio });
         },
       });
@@ -99,6 +103,7 @@ export class VoiceController {
       });
       this.conversation = new Conversation((event) => this.send(event), media, fail);
       own(() => this.conversation?.close());
+      let received = Promise.resolve();
       const message = (event: { data: unknown }) => {
         if (!this.alive(session)) return;
         try {
@@ -107,6 +112,52 @@ export class VoiceController {
           const data = JSON.parse(event.data) as RealtimeEvent;
           if (data.type === "relay.ready") {
             ready();
+            return;
+          }
+          if (this.deps.continuous) {
+            if (data.type === "input_audio_buffer.speech_started") {
+              // Flush synchronously without pausing microphone capture for the network barrier.
+              void this.conversation?.interrupt().catch(() => {});
+              this.update({ transcript: "" });
+            }
+            received = received
+              .then(async () => {
+                if (!this.alive(session)) return;
+                if (data.type === "relay.response" && data.voice_turn)
+                  await this.conversation?.expect(data.voice_turn);
+                if (!this.alive(session)) return;
+                this.conversation?.event(data);
+                if (data.type === "response.done" && data.response?.id) {
+                  const responseId = data.response.id;
+                  // Do not block the event pump: cancellation needs response.done while a drain is pending.
+                  void this.conversation
+                    ?.playbackDone(responseId)
+                    .then(() => {
+                      if (this.alive(session))
+                        this.send({ type: "relay.playback.done", response_id: responseId });
+                    })
+                    .catch(() => fail("Voice playback failed; conversation stopped"));
+                }
+                if (data.type === "agent.bound" && data.thread_id)
+                  this.update({ threadId: data.thread_id });
+                if (data.type === "agent.status" && data.status)
+                  this.update({ agentStatus: data.status });
+                if (
+                  data.type === "conversation.item.input_audio_transcription.completed" &&
+                  data.transcript
+                )
+                  this.update({ transcript: data.transcript.slice(0, 16000) });
+                if (
+                  [
+                    "response.audio_transcript.done",
+                    "response.output_audio_transcript.done",
+                  ].includes(data.type) &&
+                  data.transcript &&
+                  this.conversation?.accepts(data.response_id)
+                )
+                  this.update({ reply: data.transcript.slice(0, 16000) });
+              })
+              .catch(() => fail("Voice synchronization failed; conversation stopped"));
             return;
           }
           this.conversation?.event(data);
@@ -150,7 +201,14 @@ export class VoiceController {
         socket.removeEventListener("error", disconnected);
       });
       await deadline(configured, 10_000, "Voice session did not become ready");
-      if (this.alive(session)) this.lifetime.active(session);
+      if (this.alive(session)) {
+        this.lifetime.active(session);
+        if (this.deps.continuous) {
+          this.samples = 0;
+          this.update({ recording: true });
+          this.media?.capture(true);
+        }
+      }
     } catch {
       fail(
         "Could not start voice. Check microphone permission, the saved Codex thread and server realtime configuration.",
@@ -215,6 +273,11 @@ export class VoiceController {
       wasRecording = this.state.recording;
     this.media?.mute(muted);
     this.update({ muted, recording: muted ? false : wasRecording });
+    if (this.deps.continuous && !muted) {
+      this.samples = 0;
+      this.update({ recording: true });
+      this.media?.capture(true);
+    }
     if (muted && wasRecording) {
       clearTimeout(this.captureTimer);
       this.update({ busy: true });

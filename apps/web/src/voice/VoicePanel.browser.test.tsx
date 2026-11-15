@@ -28,29 +28,26 @@ it("starts after StrictMode replay and releases late grants on close and owner c
         environmentId={EnvironmentId.make("env_voice")}
         threadId={ThreadId.make(owner)}
         disabled={false}
-        onQueue={async () => {}}
       />
     </StrictMode>
   );
   // The panel owns only audio resources, not navigation.
   await using screen = await render(panel("thread_1"), { router: false });
-  await userEvent.click(screen.getByRole("button", { name: "Voice conversation", exact: true }));
   await userEvent.click(screen.getByRole("button", { name: "Start voice", exact: true }));
-  await expect.element(screen.getByRole("status")).toHaveTextContent("Voice: starting");
+  await expect.element(screen.getByRole("status")).toHaveTextContent("starting");
   expect(microphone).toHaveBeenCalledTimes(1);
   await expect
-    .element(screen.getByRole("button", { name: "Start voice", exact: true }))
+    .element(screen.getByRole("button", { name: "Mute mic", exact: true }))
     .toBeDisabled();
-  await userEvent.click(screen.getByRole("button", { name: "Close voice conversation" }));
+  await userEvent.click(screen.getByRole("button", { name: "Stop voice" }));
   grants[0]!(stream);
   await vi.waitFor(() => expect(stopped).toHaveBeenCalledTimes(1));
-  await userEvent.click(screen.getByRole("button", { name: "Voice conversation", exact: true }));
   await userEvent.click(screen.getByRole("button", { name: "Start voice", exact: true }));
   expect(microphone).toHaveBeenCalledTimes(2);
   await screen.rerender(panel("thread_2"));
   grants[1]!(stream);
   await vi.waitFor(() => expect(stopped).toHaveBeenCalledTimes(2));
   await expect
-    .element(screen.getByRole("button", { name: "Voice conversation", exact: true }))
+    .element(screen.getByRole("button", { name: "Start voice", exact: true }))
     .toBeVisible();
 });

@@ -14,6 +14,8 @@ export interface VoiceMedia {
   allow(): void;
   silence(): Promise<PlayedAudio | null>;
   enqueue(event: AudioEvent): void;
+  /** Resolve after queued audio is consumed; flush/teardown must release pending waits. */
+  drain?(): Promise<void>;
   mute(muted: boolean): void;
   /** Gate hardware immediately; cleanup is idempotent, including after a late grant. */
   dispose(): void | Promise<unknown>;
