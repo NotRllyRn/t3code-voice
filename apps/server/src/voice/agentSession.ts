@@ -1,6 +1,7 @@
 import {
   CommandId,
-  MessageId,
+  type MessageId,
+  type OrchestrationV2VoiceMessage,
   ModelSelection,
   ProjectId,
   ProviderInteractionMode,
@@ -14,6 +15,7 @@ import * as Stream from "effect/Stream";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
+import * as VoiceConversation from "../orchestration-v2/VoiceConversation.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import { object } from "./protocol.ts";
 
@@ -35,7 +37,14 @@ const terminal = new Set(["completed", "failed", "cancelled", "interrupted", "ro
 const agentEvents = new Set([
   "input_audio_buffer.speech_started",
   "input_audio_buffer.speech_stopped",
+  "input_audio_buffer.committed",
   "conversation.item.input_audio_transcription.completed",
+  "response.output_audio_transcript.done",
+  "response.audio_transcript.done",
+  "response.content_part.added",
+  "response.output_audio.delta",
+  "response.audio.delta",
+  "conversation.item.truncate",
   "response.created",
   "response.done",
   "response.function_call_arguments.done",
@@ -58,7 +67,15 @@ export const makeVoiceAgentSession = Effect.fn("voice.makeAgentSession")(functio
   const events = yield* Queue.bounded<Record<string, unknown>>(256);
   let threadId = "threadId" in binding ? binding.threadId : undefined;
   const sessionId = SecureRandom.uuidV4Unsafe();
-  const utterances = new Map<string, { text: string; submitted: boolean }>();
+  const utterances = new Map<string, { text: string; messageId: MessageId; submitted: boolean }>();
+  const committed: string[] = [];
+  const inputs = new Map<string, { text?: string; predecessor?: string; saved: boolean }>();
+  let sequence = 0;
+  const outputResponses = new Map<
+    string,
+    { delivery: OrchestrationV2VoiceMessage["delivery"]; done: boolean }
+  >();
+  const outputs = new Map<string, { text?: string; voice: OrchestrationV2VoiceMessage }>();
   const responses = new Map<string, string>();
   const calls = new Set<string>();
   const calledResponses = new Set<string>();
@@ -77,8 +94,52 @@ export const makeVoiceAgentSession = Effect.fn("voice.makeAgentSession")(functio
   let responsePending = false;
   let count = 0;
   let watching = false;
-  let latestItem = "";
   let speaking = false;
+  let stopped = false;
+  let expectedTurn: string | undefined;
+  const boundShell = Effect.fn("voice.boundShell")(function* () {
+    if (!threadId) return yield* new VoiceAgentError();
+    const shell = yield* threads.getThreadShell(threadId);
+    if (!shell || shell.archivedAt || shell.deletedAt) return yield* new VoiceAgentError();
+    return shell;
+  });
+  const record = (input: VoiceConversation.RecordVoiceMessageInput) =>
+    VoiceConversation.recordVoiceMessage(input).pipe(
+      Effect.provideService(ThreadManagement.ThreadManagementService, threads),
+    );
+  const saveOutput = Effect.fn("voice.saveOutput")(function* (output: {
+    text?: string;
+    voice: OrchestrationV2VoiceMessage;
+  }) {
+    if (!output.text) return;
+    const shell = yield* boundShell();
+    yield* record({
+      projectId: shell.projectId,
+      threadId: shell.id,
+      role: "assistant",
+      text: output.text,
+      voice: output.voice,
+      creationSource: "server",
+    });
+  });
+  const disposition = Effect.fn("voice.outputDisposition")(function* (
+    responseId: string,
+    delivery: OrchestrationV2VoiceMessage["delivery"],
+  ) {
+    const response = outputResponses.get(responseId);
+    if (
+      !response ||
+      response.delivery === "drained" ||
+      (delivery === "drained" && response.delivery !== "pending")
+    )
+      return;
+    response.delivery = delivery;
+    for (const output of outputs.values()) {
+      if (output.voice.responseId !== responseId) continue;
+      output.voice = { ...output.voice, delivery };
+      yield* saveOutput(output);
+    }
+  });
   const enqueue = (event: Record<string, unknown>) =>
     Queue.offer(events, event).pipe(Effect.asVoid);
   const speak = Effect.fn("voice.agentSpeak")(function* () {
@@ -103,6 +164,7 @@ export const makeVoiceAgentSession = Effect.fn("voice.makeAgentSession")(functio
         },
       });
     responsePending = true;
+    expectedTurn = next.turn;
     yield* sendClient({ type: "relay.response", voice_turn: next.turn });
     yield* sendUpstream({
       type: "response.create",
@@ -232,6 +294,7 @@ export const makeVoiceAgentSession = Effect.fn("voice.makeAgentSession")(functio
     if (raw.arguments.length > 128 || !/^\{\s*\}$/.test(raw.arguments.trim()))
       return yield* new VoiceAgentError();
     if (calls.has(raw.call_id)) return;
+    if (calls.size >= 256) return yield* new VoiceAgentError();
     calls.add(raw.call_id);
     calledResponses.add(raw.response_id);
     const itemId = responses.get(raw.response_id);
@@ -243,54 +306,24 @@ export const makeVoiceAgentSession = Effect.fn("voice.makeAgentSession")(functio
     if (utterance && !utterance.submitted && !cancelledResponses.has(raw.response_id)) {
       // Mark before any I/O: an ambiguous delivery is never retried with a new identity.
       utterance.submitted = true;
-      const commandId = CommandId.make(`voice_${sessionId}_${itemId}`);
-      const messageId = MessageId.make(`voice_${sessionId}_${itemId}`);
-      if (!threadId && "draft" in binding) {
-        const draft = binding.draft;
-        const projectId = draft.projectId ?? (yield* folders.ensureScratchProject).projectId;
-        const launched = yield* launches.launch({
-          commandId,
-          projectId,
-          title: "Voice chat",
-          generateTitle: true,
-          modelSelection: draft.modelSelection,
-          runtimeMode: draft.runtimeMode,
-          interactionMode: draft.interactionMode,
-          workspaceStrategy: { type: "root" },
-          initialMessage: { messageId, text: utterance.text, attachments: [] },
-          createdBy: "user",
-          creationSource: "web",
-        });
-        threadId = launched.threadId;
-        yield* sendClient({ type: "agent.bound", thread_id: threadId });
-        yield* watch(threadId);
-        output = {
-          status: "accepted",
-          threadId,
-          messageId,
-          note: "Normal T3 launch; not a completed coding result.",
-        };
-      } else if (threadId) {
-        const shell = yield* threads.getThreadShell(threadId);
-        if (!shell || shell.archivedAt || shell.deletedAt) return yield* new VoiceAgentError();
-        const requests = yield* threads.getThreadRecords(threadId, ["runtimeRequests"]);
-        if (requests.runtimeRequests.some((request) => request.status === "pending")) {
+      if (threadId) {
+        const shell = yield* boundShell();
+        const state = yield* threads.getThreadRecords(threadId, ["runtimeRequests", "runs"]);
+        if (
+          state.runtimeRequests.some((request) => request.status === "pending") ||
+          state.runs.some((run) => run.status === "queued" && run.queueHeld === true)
+        ) {
           output = {
             status: "waiting_for_user_in_T3",
-            note: "No message sent. Answer the existing permission or question in the normal T3 UI; voice cannot approve.",
+            note: "Your words are saved, but no coding run was started. Resolve the pending question, permission, or held queue in the normal T3 UI; voice cannot approve or release held work.",
           };
         } else {
-          const sent = yield* threads.sendToThread({
+          const sent = yield* VoiceConversation.sendRecordedVoiceMessage({
             projectId: shell.projectId,
             threadId,
-            commandId,
-            messageId,
-            text: utterance.text,
-            attachments: [],
-            mode: "queue",
-            createdBy: "user",
-            creationSource: "web",
-          });
+            sessionId,
+            messageId: utterance.messageId,
+          }).pipe(Effect.provideService(ThreadManagement.ThreadManagementService, threads));
           output = {
             status: sent.delivery,
             threadId,
@@ -312,12 +345,67 @@ export const makeVoiceAgentSession = Effect.fn("voice.makeAgentSession")(functio
     }
     yield* snapshot();
   });
+  const commitFinals = Effect.fn("voice.commitFinals")(function* () {
+    for (const itemId of committed) {
+      const input = inputs.get(itemId)!;
+      if (input.saved) continue;
+      if (input.text === undefined) break;
+      if (!input.text.trim()) {
+        input.saved = true;
+        continue;
+      }
+      if (!threadId && "draft" in binding) {
+        const draft = binding.draft;
+        const projectId = draft.projectId ?? (yield* folders.ensureScratchProject).projectId;
+        const launched = yield* launches.launch({
+          commandId: CommandId.make(`voice_thread_${sessionId}`),
+          projectId,
+          title: "Voice chat",
+          generateTitle: false,
+          modelSelection: draft.modelSelection,
+          runtimeMode: draft.runtimeMode,
+          interactionMode: draft.interactionMode,
+          workspaceStrategy: { type: "root" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        threadId = launched.threadId;
+        yield* watch(threadId);
+        yield* sendClient({ type: "agent.bound", thread_id: threadId });
+      }
+      const shell = yield* boundShell();
+      const saved = yield* record({
+        projectId: shell.projectId,
+        threadId: shell.id,
+        role: "user",
+        text: input.text,
+        voice: {
+          sessionId,
+          itemId,
+          sequence: sequence++,
+          textKind: "final_user_transcript",
+          delivery: "unknown",
+          ...(input.predecessor ? { predecessorItemId: input.predecessor } : {}),
+        },
+        creationSource: "web",
+      });
+      input.saved = true;
+      utterances.set(itemId, { text: input.text, messageId: saved.messageId, submitted: false });
+      yield* sendClient({ type: "agent.recorded", item_id: itemId, message_id: saved.messageId });
+      if (pending.length >= 16) return yield* new VoiceAgentError();
+      pending.push({ turn: itemId, delegate: true });
+    }
+    yield* speak();
+  });
   const handle = Effect.fn("voice.agentEvent")(function* (raw: Record<string, unknown>) {
     const response = object(raw.response);
     switch (raw.type) {
       case "input_audio_buffer.speech_started":
         speaking = true;
-        if (lastResponse) cancelledResponses.add(lastResponse);
+        if (lastResponse) {
+          cancelledResponses.add(lastResponse);
+          yield* disposition(lastResponse, "interrupted");
+        }
         if (responsePending) cancelPending = true;
         // Never replay stale narration after a barge-in; canonical coding state is untouched.
         for (let i = pending.length - 1; i >= 0; i--)
@@ -327,6 +415,15 @@ export const makeVoiceAgentSession = Effect.fn("voice.makeAgentSession")(functio
         speaking = false;
         yield* speak();
         break;
+      case "input_audio_buffer.committed": {
+        if (!key(raw.item_id) || inputs.has(raw.item_id)) break;
+        if (inputs.size >= 64) return yield* new VoiceAgentError();
+        const predecessor = key(raw.previous_item_id) ? raw.previous_item_id : undefined;
+        // Upstream commits define order, not asynchronous transcription completion order.
+        inputs.set(raw.item_id, { saved: false, ...(predecessor ? { predecessor } : {}) });
+        committed.push(raw.item_id);
+        break;
+      }
       case "conversation.item.input_audio_transcription.completed": {
         if (
           !key(raw.item_id) ||
@@ -334,15 +431,33 @@ export const makeVoiceAgentSession = Effect.fn("voice.makeAgentSession")(functio
           raw.transcript.length > 16000
         )
           return;
-        if (utterances.has(raw.item_id) || !raw.transcript.trim()) break;
-        if (utterances.size >= 64 || pending.length >= 16) return yield* new VoiceAgentError();
-        utterances.set(raw.item_id, { text: raw.transcript.trim(), submitted: false });
-        pending.push({ turn: raw.item_id, delegate: true });
-        yield* speak();
+        let input = inputs.get(raw.item_id);
+        if (!input) {
+          if (inputs.size >= 64) return yield* new VoiceAgentError();
+          input = { saved: false };
+          inputs.set(raw.item_id, input);
+          committed.push(raw.item_id);
+        }
+        if (input.text !== undefined && input.text !== raw.transcript)
+          return yield* new VoiceAgentError();
+        input.text = raw.transcript;
+        yield* commitFinals();
         break;
       }
       case "response.created": {
-        if (!key(response.id)) break;
+        if (
+          !key(response.id) ||
+          !responsePending ||
+          !expectedTurn ||
+          object(response.metadata).voice_turn !== expectedTurn
+        )
+          break;
+        if (outputResponses.size >= 96) return yield* new VoiceAgentError();
+        outputResponses.set(response.id, {
+          delivery: cancelPending ? "interrupted" : "pending",
+          done: false,
+        });
+        expectedTurn = undefined;
         activeResponse = response.id;
         playingResponse = response.id;
         lastResponse = response.id;
@@ -350,11 +465,17 @@ export const makeVoiceAgentSession = Effect.fn("voice.makeAgentSession")(functio
         cancelPending = false;
         responsePending = false;
         const turn = object(response.metadata).voice_turn;
-        latestItem = typeof turn === "string" ? turn : "";
-        if (utterances.has(latestItem)) responses.set(response.id, latestItem);
+        if (typeof turn === "string" && utterances.has(turn)) responses.set(response.id, turn);
         break;
       }
       case "response.done": {
+        if (
+          !key(response.id) ||
+          !outputResponses.has(response.id) ||
+          outputResponses.get(response.id)!.done
+        )
+          break;
+        outputResponses.get(response.id)!.done = true;
         if (response.id === activeResponse) activeResponse = null;
         const itemId = typeof response.id === "string" ? responses.get(response.id) : undefined;
         if (
@@ -370,9 +491,81 @@ export const makeVoiceAgentSession = Effect.fn("voice.makeAgentSession")(functio
         break;
       }
       case "relay.playback.done":
-        if (raw.response_id === playingResponse) playingResponse = null;
+        if (
+          playingResponse &&
+          raw.response_id === playingResponse &&
+          outputResponses.get(playingResponse)?.done
+        ) {
+          yield* disposition(
+            playingResponse,
+            cancelledResponses.has(playingResponse) ? "interrupted" : "drained",
+          );
+          playingResponse = null;
+        }
         yield* speak();
         break;
+      case "response.content_part.added":
+      case "response.audio.delta":
+      case "response.output_audio.delta":
+      case "response.audio_transcript.done":
+      case "response.output_audio_transcript.done": {
+        if (
+          !key(raw.response_id) ||
+          !key(raw.item_id) ||
+          !Number.isInteger(raw.content_index) ||
+          Number(raw.content_index) < 0 ||
+          Number(raw.content_index) >= 16
+        )
+          break;
+        const owner = outputResponses.get(raw.response_id);
+        if (!owner) break;
+        const outputKey = `${raw.item_id}:${raw.content_index}`;
+        let output = outputs.get(outputKey);
+        if (output && output.voice.responseId !== raw.response_id)
+          return yield* new VoiceAgentError();
+        if (!output) {
+          if (outputs.size >= 192) return yield* new VoiceAgentError();
+          output = {
+            voice: {
+              sessionId,
+              itemId: raw.item_id,
+              responseId: raw.response_id,
+              contentIndex: Number(raw.content_index),
+              sequence: sequence++,
+              textKind: "generated_voice_reply",
+              delivery: owner.delivery,
+            },
+          };
+          outputs.set(outputKey, output);
+        }
+        if (String(raw.type).endsWith("transcript.done")) {
+          if (
+            typeof raw.transcript !== "string" ||
+            raw.transcript.length > 16000 ||
+            !raw.transcript.trim()
+          )
+            break;
+          if (output.text !== undefined && output.text !== raw.transcript)
+            return yield* new VoiceAgentError();
+          output.text = raw.transcript;
+          yield* saveOutput(output);
+        }
+        break;
+      }
+      case "conversation.item.truncate": {
+        const output = outputs.get(`${raw.item_id}:${raw.content_index}`);
+        if (
+          !output ||
+          !Number.isInteger(raw.audio_end_ms) ||
+          Number(raw.audio_end_ms) < 0 ||
+          Number(raw.audio_end_ms) > 120000
+        )
+          break;
+        yield* disposition(output.voice.responseId!, "interrupted");
+        output.voice = { ...output.voice, playedAudioMs: Number(raw.audio_end_ms) };
+        yield* saveOutput(output);
+        break;
+      }
       case "response.function_call_arguments.done":
         yield* submit(raw);
         break;
@@ -385,6 +578,7 @@ export const makeVoiceAgentSession = Effect.fn("voice.makeAgentSession")(functio
     }
   });
   const run = Effect.gen(function* () {
+    if (stopped) return yield* new VoiceAgentError();
     if (threadId) {
       yield* watch(threadId);
       // Seed bounded status, not the environment, tools, filesystem, or private instructions.
@@ -413,7 +607,19 @@ export const makeVoiceAgentSession = Effect.fn("voice.makeAgentSession")(functio
                   messages: context.messages
                     .filter((message) => !message.streaming)
                     .slice(-4)
-                    .map((message) => ({ role: message.role, text: message.text.slice(-1000) })),
+                    .map((message) => ({
+                      role: message.role,
+                      text: message.text.slice(-1000),
+                      ...(message.voice
+                        ? {
+                            voice: message.voice,
+                            note:
+                              message.voice.textKind === "generated_voice_reply"
+                                ? "Generated voice is conversational text, not verified tool execution or exact heard words."
+                                : "Final user transcript, not a permission answer.",
+                          }
+                        : {}),
+                    })),
                 })),
             },
           ],
@@ -423,12 +629,21 @@ export const makeVoiceAgentSession = Effect.fn("voice.makeAgentSession")(functio
     }
     while (true) yield* handle(yield* Queue.take(events));
   }).pipe(
+    Effect.ensuring(
+      Effect.gen(function* () {
+        stopped = true;
+        for (const [id, response] of outputResponses) {
+          if (response.delivery === "pending") yield* disposition(id, "unknown");
+        }
+      }).pipe(Effect.ignoreCause),
+    ),
     Effect.scoped,
     Effect.mapError(() => new VoiceAgentError()),
   );
   // Audio packets never wait behind a coding launch or occupy the agent event queue.
   return {
-    receive: (event) => (agentEvents.has(String(event.type)) ? enqueue(event) : Effect.void),
+    receive: (event) =>
+      !stopped && agentEvents.has(String(event.type)) ? enqueue(event) : Effect.void,
     run,
   } satisfies VoiceAgentConnection;
 });

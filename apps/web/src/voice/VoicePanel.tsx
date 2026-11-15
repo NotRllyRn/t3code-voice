@@ -230,13 +230,23 @@ export function VoicePanel({ live }: { live: LiveVoice }) {
         <div className="max-h-20 overflow-y-auto whitespace-pre-wrap break-words text-muted-foreground">
           {voice.transcript ? (
             <p>
-              <span className="font-medium">You: </span>
+              <span className="font-medium">
+                You
+                {voice.transcriptStatus === "live"
+                  ? " (live, unsaved)"
+                  : voice.transcriptStatus === "saving"
+                    ? " (saving)"
+                    : ""}
+                :{" "}
+              </span>
               {voice.transcript}
             </p>
           ) : null}
           {voice.reply ? (
             <p>
-              <span className="font-medium">Voice: </span>
+              <span className="font-medium">
+                Voice ({voice.replyPartial ? "generating" : "generated"}):{" "}
+              </span>
               {voice.reply}
             </p>
           ) : null}

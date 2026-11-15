@@ -106,6 +106,8 @@ export function sessionUpdate(voice: string, transcriptionModel: string, continu
                 interrupt_response: false,
               }
             : null,
+          // Keep the configured model. whisper-1 can be final-only; delta support here
+          // is not a promise of word streaming from every upstream/model.
           ...(transcriptionModel ? { transcription: { model: transcriptionModel } } : {}),
         },
         output: { format: { type: "audio/pcm", rate: 24000 }, voice },
@@ -126,8 +128,15 @@ export function serverEvent(value: unknown): Record<string, unknown> | null {
     id(e.item_id)
   )
     return { type: e.type, item_id: e.item_id };
-  if (e.type === "input_audio_buffer.committed" && id(e.item_id))
-    return { type: e.type, item_id: e.item_id };
+  if (e.type === "input_audio_buffer.committed" && id(e.item_id)) {
+    if (e.previous_item_id != null && !id(e.previous_item_id))
+      throw Error("Invalid input predecessor");
+    return {
+      type: e.type,
+      item_id: e.item_id,
+      ...(id(e.previous_item_id) ? { previous_item_id: e.previous_item_id } : {}),
+    };
+  }
   if (e.type === "response.created" || e.type === "response.done") {
     if (!id(r.id)) throw Error("Invalid response identity");
     if (r.status === "failed") throw Error("Voice response failed");
@@ -142,6 +151,8 @@ export function serverEvent(value: unknown): Record<string, unknown> | null {
       !id(e.response_id) ||
       !id(e.item_id) ||
       !Number.isInteger(e.content_index) ||
+      Number(e.content_index) < 0 ||
+      Number(e.content_index) >= 16 ||
       typeof e.delta !== "string" ||
       e.delta.length > 96_000
     )
@@ -155,6 +166,14 @@ export function serverEvent(value: unknown): Record<string, unknown> | null {
     };
   }
   if (e.type === "response.content_part.added" && part.type === "audio") {
+    if (
+      !id(e.response_id) ||
+      !id(e.item_id) ||
+      !Number.isInteger(e.content_index) ||
+      Number(e.content_index) < 0 ||
+      Number(e.content_index) >= 16
+    )
+      throw Error("Invalid audio identity");
     return {
       type: e.type,
       response_id: e.response_id,
@@ -163,20 +182,34 @@ export function serverEvent(value: unknown): Record<string, unknown> | null {
       part: { type: "audio" },
     };
   }
+  const inputTranscript = String(e.type).startsWith("conversation.item.input_audio_transcription.");
   if (
     [
+      "conversation.item.input_audio_transcription.delta",
+      "response.output_audio_transcript.delta",
+      "response.audio_transcript.delta",
       "conversation.item.input_audio_transcription.completed",
       "response.output_audio_transcript.done",
       "response.audio_transcript.done",
     ].includes(String(e.type))
   ) {
-    if (typeof e.transcript !== "string" || e.transcript.length > 16_000)
-      throw Error("Invalid voice transcript");
+    if (
+      !id(e.item_id) ||
+      (!inputTranscript &&
+        (!id(e.response_id) ||
+          !Number.isInteger(e.content_index) ||
+          Number(e.content_index) < 0 ||
+          Number(e.content_index) >= 16))
+    )
+      throw Error("Invalid transcript identity");
+    const delta = String(e.type).endsWith(".delta");
+    const text = delta ? e.delta : e.transcript;
+    if (typeof text !== "string" || text.length > 16000) throw Error("Invalid voice transcript");
     return {
       type: e.type,
       item_id: e.item_id,
-      response_id: e.response_id,
-      transcript: e.transcript,
+      ...(!inputTranscript ? { response_id: e.response_id, content_index: e.content_index } : {}),
+      ...(delta ? { delta: text } : { transcript: text }),
     };
   }
   if (e.type === "conversation.item.input_audio_transcription.failed")
