@@ -104,6 +104,8 @@ const makeFixture = Effect.fn("voice.test.agentFixture")(function* (
                 }),
               ),
             ),
+          getTimelinePage: () =>
+            Effect.succeed({ items: [], totalItems: 0, hasMore: false, hasEarlier: false }),
           getThreadRecords: (_id, _include, query) =>
             Effect.sync(() => {
               if (query?.messageRunIds) messageQueries.push([...query.messageRunIds]);
