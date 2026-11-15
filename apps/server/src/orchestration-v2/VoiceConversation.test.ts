@@ -3,86 +3,26 @@ import {
   CommandId,
   MessageId,
   ProjectId,
-  ProviderDriverKind,
-  ProviderInstanceId,
   ThreadId,
   OrchestrationV2Command,
-  type OrchestrationV2VoiceMessage,
 } from "@t3tools/contracts";
-import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Effect from "effect/Effect";
-import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import * as SqlitePersistence from "../persistence/Sqlite.ts";
-import * as ServerSettings from "../serverSettings.ts";
-import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
-import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import { DispatchModeLimit } from "./DispatchModeLimit.ts";
-import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
-import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
-import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import { recordVoiceMessage, sendRecordedVoiceMessage } from "./VoiceConversation.ts";
 import { voiceMessageId } from "./VoiceHistory.ts";
-import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
+import { create, layer, projectId, voice } from "./VoiceConversation.testkit.ts";
 
 const isPublicCommand = Schema.is(OrchestrationV2Command);
-const instanceId = ProviderInstanceId.make("codex");
-const projectId = ProjectId.make("project:voice-history");
-const adapter = {
-  instanceId,
-  driver: ProviderDriverKind.make("codex"),
-  getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
-  planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" as const }),
-  openSession: () => Effect.die("Recording must never open a provider"),
-} as ProviderAdapter.ProviderAdapterV2["Service"];
-const database = SqlitePersistence.layerMemory;
-const foundation = Layer.mergeAll(
-  ProjectionStore.layer.pipe(Layer.provide(database)),
-  ProviderReplayHarness.layerWithRegistry(
-    { name: "voice-history" },
-    ProviderAdapterRegistry.layerFromAdapters([adapter]),
-    { databaseLayer: database, runEffectWorker: false },
-  ),
-);
-const layer = ThreadManagement.layer.pipe(
-  Layer.provideMerge(foundation),
-  Layer.provide(ServerSettings.layerTest()),
-  Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
-  Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(database))),
-);
-const voice: OrchestrationV2VoiceMessage = {
-  sessionId: "voice-session",
-  itemId: "input-one",
-  sequence: 1,
-  textKind: "final_user_transcript",
-  delivery: "unknown",
-};
-const create = (threadId: ThreadId) =>
-  Effect.gen(function* () {
-    const orchestrator = yield* Orchestrator.OrchestratorV2;
-    yield* orchestrator.dispatch({
-      type: "thread.create",
-      commandId: CommandId.make(`create:${threadId}`),
-      threadId,
-      projectId,
-      title: "Voice",
-      modelSelection: { instanceId, model: "gpt-5" },
-      runtimeMode: "full-access",
-      interactionMode: "default",
-      branch: null,
-      worktreePath: null,
-      createdBy: "user",
-      creationSource: "web",
-    });
-  });
 
 it.effect(
   "records != executes; retries reuse the same message/item/run and reject conflicting finals",
   () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("thread:voice-record");
+      const threads = yield* ThreadManagement.ThreadManagementService;
       const store = yield* ProjectionStore.ProjectionStoreV2;
       yield* create(threadId);
       const input = {
@@ -156,6 +96,39 @@ it.effect(
         queued.projection.messages.filter((message) => message.id === second.messageId),
       ).toHaveLength(1);
       expect(queued.run.voiceHistoryCutoffOrdinal).toBe(secondItem.ordinal);
+      const editError = yield* Effect.flip(
+        threads.dispatch({
+          type: "queued-run.edit",
+          runId: queued.run.id,
+          text: "REWRITTEN_NOT_SPOKEN",
+          commandId: CommandId.make("edit-recorded-voice"),
+          threadId,
+        }),
+      );
+      expect(editError._tag).toBe("OrchestratorCommandRejectedError");
+      expect(editError).toMatchObject({
+        cause: "Recorded voice inputs cannot be edited. Send a separate message instead.",
+      });
+      const promoteError = yield* Effect.flip(
+        threads.dispatch({
+          type: "queued-message.promote-to-steer",
+          queuedRunId: queued.run.id,
+          targetRunId: run.run.id,
+          commandId: CommandId.make("promote-recorded-voice"),
+          threadId,
+        }),
+      );
+      expect(promoteError).toMatchObject({
+        cause: "Recorded voice inputs cannot be promoted to Steer.",
+      });
+      const unchanged = yield* store.getThreadRecords(threadId, ["messages", "turnItems"]);
+      expect(unchanged.messages.find((message) => message.id === second.messageId)?.text).toBe(
+        "Then run the checks",
+      );
+      expect(unchanged.turnItems.find((item) => item.id === secondItem.id)).toMatchObject({
+        text: "Then run the checks",
+        voice: queuedVoice,
+      });
     }).pipe(Effect.provide(layer)),
 );
 

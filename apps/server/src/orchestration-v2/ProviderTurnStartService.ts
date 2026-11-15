@@ -46,7 +46,11 @@ import {
   latestNativeContextUsage,
 } from "@t3tools/provider-core/server/handoffBudget";
 import { deliverContextHandoffs, withInlineContext } from "./ContextHandoffDelivery.ts";
-import { voiceHistoryHandoff } from "./VoiceHistory.ts";
+import {
+  voiceHistoryBoundaryOrdinal,
+  voiceHistoryHandoff,
+  voiceHistoryItemFilter,
+} from "./VoiceHistory.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -840,6 +844,7 @@ export const layer: Layer.Layer<
         return undefined;
       });
       let effectiveHandoffs = handoffs;
+      const eligibleVoiceHistoryItem = voiceHistoryItemFilter(run, projection.runs);
       let resumeFellBack = false;
       const userText = projectComposerContextForProvider({
         text: message.text,
@@ -1044,6 +1049,7 @@ export const layer: Layer.Layer<
                   ...missedRunIds,
                 ])).filter(
                   (item) =>
+                    eligibleVoiceHistoryItem(item) &&
                     item.runId !== null &&
                     missedRunIds.has(item.runId) &&
                     !coveredItemIds.has(item.id) &&
@@ -1095,10 +1101,12 @@ export const layer: Layer.Layer<
             runs: projection.runs,
             items: (yield* projectionStore.getTurnStartHistory(input.threadId)).filter(
               (item) =>
-                item.runId === null ||
-                projection.runs.some(
-                  (source) => source.id === item.runId && source.ordinal < run.ordinal,
-                ),
+                eligibleVoiceHistoryItem(item) &&
+                (item.voice !== undefined ||
+                  item.runId === null ||
+                  projection.runs.some(
+                    (source) => source.id === item.runId && source.ordinal < run.ordinal,
+                  )),
             ),
             createdAt,
           });
@@ -1590,8 +1598,15 @@ export const layer: Layer.Layer<
               providerThread: runningProviderThread,
               runs: projection.runs,
               alreadyDeliveredItemIds: deliveredItemIds,
+              nativeInputRunIds: new Set([
+                ...handoffContext.nativeInputRunIds,
+                ...(handoffContext.sameNativeThread ? handoffContext.legacyInputRunIds : []),
+              ]),
               items: (yield* projectionStore.getThreadRecords(input.threadId, ["turnItems"], {
-                turnItemRunIds: [null],
+                voiceHistory: {
+                  throughOrdinal: run.voiceHistoryCutoffOrdinal,
+                  afterOrdinal: voiceHistoryBoundaryOrdinal(run, projection.runs),
+                },
                 turnItemTypes: ["user_message", "assistant_message"],
               })).turnItems,
             });

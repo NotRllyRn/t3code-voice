@@ -22,6 +22,8 @@ export interface TurnItemPositionStoreV2Shape {
     readonly turnItemId: TurnItemId;
     readonly runId: RunId | null;
     readonly runOrdinal?: number;
+    // Voice conversation appends across run ranges, then keeps its position when associated with a run.
+    readonly placement?: "append" | "conversation";
   }) => Effect.Effect<number, TurnItemPositionStoreError>;
   readonly normalize: (
     item: OrchestrationV2TurnItem,
@@ -42,7 +44,7 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
     const allocate: TurnItemPositionStoreV2Shape["allocate"] =
       /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
       Effect.fnUntraced(
-        function* ({ threadId, turnItemId, runId, runOrdinal: suppliedRunOrdinal }) {
+        function* ({ threadId, turnItemId, runId, runOrdinal: suppliedRunOrdinal, placement }) {
           const existing = yield* sql<{ readonly ordinal: number }>`
           SELECT ordinal
           FROM orchestration_v2_turn_item_positions
@@ -71,8 +73,7 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
             COALESCE(MAX(ordinal), ${lowerBound}) + 1
           FROM orchestration_v2_turn_item_positions
           WHERE thread_id = ${threadId}
-            AND ordinal >= ${lowerBound}
-            AND ordinal <= ${upperBound}
+            ${placement === "conversation" ? sql`` : sql`AND ordinal >= ${lowerBound} AND ordinal <= ${upperBound}`}
           ON CONFLICT(thread_id, turn_item_id) DO NOTHING
         `;
           const rows = yield* sql<{ readonly ordinal: number }>`
@@ -110,6 +111,7 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
           turnItemId: item.id,
           runId: item.runId,
           ...(runOrdinal === undefined ? {} : { runOrdinal }),
+          ...(item.voice === undefined ? {} : { placement: "conversation" }),
         }).pipe(Effect.map((ordinal) => (item.ordinal === ordinal ? item : { ...item, ordinal })));
       }),
     });

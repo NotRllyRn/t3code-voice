@@ -35,33 +35,68 @@ export function voiceTurnItemId(messageId: MessageId): TurnItemId {
   return TurnItemId.make(`turn-item:voice:${messageId}`);
 }
 
+export function voiceHistoryBoundaryOrdinal(
+  run: OrchestrationV2Run,
+  runs: ReadonlyArray<OrchestrationV2Run>,
+): number {
+  return (
+    runs.findLast((source) => source.freshContext === true && source.ordinal <= run.ordinal)
+      ?.voiceHistoryCutoffOrdinal ?? 0
+  );
+}
+
+/** Shares voice boundaries across normal, retry and recovery paths without changing nonvoice history. */
+export function voiceHistoryItemFilter(
+  run: OrchestrationV2Run,
+  runs: ReadonlyArray<OrchestrationV2Run>,
+): (item: OrchestrationV2TurnItem) => boolean {
+  const cutoff = run.voiceHistoryCutoffOrdinal;
+  const boundary = voiceHistoryBoundaryOrdinal(run, runs);
+  const rolledBack = new Set(
+    runs.filter((source) => source.status === "rolled_back").map((source) => source.id),
+  );
+  return (item) =>
+    item.voice === undefined ||
+    (cutoff !== undefined &&
+      run.freshContext !== true &&
+      (item.type === "user_message" || item.type === "assistant_message") &&
+      item.messageId !== run.userMessageId &&
+      (item.runId === null || !rolledBack.has(item.runId)) &&
+      item.ordinal <= cutoff &&
+      item.ordinal > boundary);
+}
+
 export function voiceHistoryHandoff(input: {
   readonly run: OrchestrationV2Run;
   readonly providerThread: OrchestrationV2ProviderThread;
   readonly items: ReadonlyArray<OrchestrationV2TurnItem>;
   readonly runs: ReadonlyArray<OrchestrationV2Run>;
   readonly alreadyDeliveredItemIds?: ReadonlySet<string>;
+  readonly nativeInputRunIds?: ReadonlySet<string>;
 }): OrchestrationV2ContextHandoff | null {
   const { run, providerThread } = input;
-  if (run.voiceHistoryCutoffOrdinal === undefined || run.freshContext === true) return null;
-  const boundaryOrdinal =
-    input.runs.findLast((source) => source.freshContext === true && source.ordinal <= run.ordinal)
-      ?.voiceHistoryCutoffOrdinal ?? 0;
+  const eligible = voiceHistoryItemFilter(run, input.runs);
+  const runStatuses = new Map(input.runs.map((source) => [source.id, source.status]));
   const messages = input.items
+    .filter(eligible)
     .filter(
       (item) =>
         (item.type === "user_message" || item.type === "assistant_message") &&
         item.voice !== undefined &&
         !input.alreadyDeliveredItemIds?.has(item.id) &&
-        item.runId === null &&
-        item.messageId !== run.userMessageId &&
-        item.ordinal <= run.voiceHistoryCutoffOrdinal! &&
-        item.ordinal > boundaryOrdinal,
+        (item.runId === null || !input.nativeInputRunIds?.has(item.runId)),
     )
     .toSorted((a, b) => a.ordinal - b.ordinal)
     .flatMap((item) => {
       const message = historicalMessage(item);
-      return message === null ? [] : [message];
+      return message === null
+        ? []
+        : [
+            {
+              ...message,
+              ...(item.runId === null ? {} : { runStatus: runStatuses.get(item.runId) }),
+            },
+          ];
     });
   if (messages.length === 0) return null;
   return {
@@ -77,7 +112,7 @@ export function voiceHistoryHandoff(input: {
     summaryText: "",
     history: {
       messages,
-      coverage: `Conversation-only voice history through item ordinal ${run.voiceHistoryCutoffOrdinal}; source item IDs retain their null run IDs. This is conversation, not verified execution.`,
+      coverage: `Recorded voice history through item ordinal ${run.voiceHistoryCutoffOrdinal}; source item and execution identities are preserved. This is conversation, not verified execution.`,
       omittedItems: 0,
     },
     createdByProviderInstanceId: null,

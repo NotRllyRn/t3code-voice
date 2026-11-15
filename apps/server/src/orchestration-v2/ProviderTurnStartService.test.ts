@@ -55,6 +55,8 @@ import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as ProviderUsageAnalytics from "../telemetry/ProviderUsageAnalytics.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
+import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
+import { seedCancelledVoiceHistory, seedLateVoiceHistory } from "./VoiceConversation.testkit.ts";
 
 const isDomainEvent = Schema.is(OrchestrationV2DomainEvent);
 
@@ -814,7 +816,10 @@ function makeLocalCommandHarness(input: {
     driver: providerThread.driver,
     providerSession,
     ensureThread: () => Effect.succeed(sideChatThread),
-    resumeThread: () => Effect.succeed(sideChatThread),
+    resumeThread: () =>
+      input.resumeFailure === undefined
+        ? Effect.succeed(sideChatThread)
+        : Effect.fail(input.resumeFailure),
     forkThread,
     startTurn,
   };
@@ -914,8 +919,24 @@ function makeLocalCommandHarness(input: {
   const createWorktree = vi.fn<GitWorkflow.GitWorkflowService["Service"]["createWorktree"]>(() =>
     Effect.succeed({} as never),
   );
-  const getThreadRecords = vi.fn<ProjectionStore.ProjectionStoreV2Shape["getThreadRecords"]>((id) =>
-    Effect.succeed(id === parentThreadId ? parentRecords : projection),
+  const getThreadRecords = vi.fn<ProjectionStore.ProjectionStoreV2Shape["getThreadRecords"]>(
+    (id, _fields, filter) => {
+      const source = id === parentThreadId ? parentRecords : projection;
+      return Effect.succeed({
+        ...source,
+        turnItems: source.turnItems.filter(
+          (item) =>
+            (filter?.turnItemRunIds === undefined || filter.turnItemRunIds.includes(item.runId)) &&
+            (filter?.turnItemTypes === undefined || filter.turnItemTypes.includes(item.type)) &&
+            (filter?.voiceHistory === undefined ||
+              (item.voice !== undefined &&
+                (filter.voiceHistory.throughOrdinal === undefined ||
+                  item.ordinal <= filter.voiceHistory.throughOrdinal) &&
+                (filter.voiceHistory.afterOrdinal === undefined ||
+                  item.ordinal > filter.voiceHistory.afterOrdinal))),
+        ),
+      });
+    },
   );
   const getTurnStartContext = vi.fn(() =>
     Effect.succeed({
@@ -942,20 +963,22 @@ function makeLocalCommandHarness(input: {
   const layer = ProviderTurnStart.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
-        Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({
-          prepareProviderHandoff: (handoff) =>
-            input.sideChat?.nativeForkFrom === undefined
-              ? Effect.die("history read must fail first")
-              : Effect.succeed({
-                  ...handoff,
-                  id: ContextHandoffId.make("side-chat-fork-context"),
-                  createdByProviderInstanceId: handoff.toProviderInstanceId,
-                  status: "ready",
-                  summaryMessageId: null,
-                  summaryText: "PARENT_HISTORY",
-                  updatedAt: handoff.createdAt,
-                }),
-        }),
+        input.voiceHistory !== undefined
+          ? ContextHandoffService.layer.pipe(Layer.provide(IdAllocator.layer))
+          : Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({
+              prepareProviderHandoff: (handoff) =>
+                input.sideChat?.nativeForkFrom === undefined
+                  ? Effect.die("history read must fail first")
+                  : Effect.succeed({
+                      ...handoff,
+                      id: ContextHandoffId.make("side-chat-fork-context"),
+                      createdByProviderInstanceId: handoff.toProviderInstanceId,
+                      status: "ready",
+                      summaryMessageId: null,
+                      summaryText: "PARENT_HISTORY",
+                      updatedAt: handoff.createdAt,
+                    }),
+            }),
         Layer.mock(EventSink.EventSinkV2)({
           writeIfRunCurrent,
           write: ({ events: incoming }) =>
@@ -968,6 +991,9 @@ function makeLocalCommandHarness(input: {
             }),
         }),
         IdAllocator.layer,
+        Layer.mock(TurnItemPositionStore.TurnItemPositionStoreV2)({
+          allocate: () => Effect.succeed(99),
+        }),
         layerWorktreeLocation(input.worktreesDir),
         input.fileSystem === undefined
           ? FileSystem.layerNoop({ exists: () => Effect.succeed(true) })
@@ -995,14 +1021,16 @@ function makeLocalCommandHarness(input: {
               projection.runs.find((candidate) => candidate.id === id),
             ),
           getTurnStartHistory: () =>
-            input.sideChat !== undefined
-              ? Effect.succeed([])
-              : Effect.fail(
-                  new ProjectionStore.ProjectionStoreReadError({
-                    threadId,
-                    cause: input.historyReadFailureAfterFallback,
-                  }),
-                ),
+            input.voiceHistory !== undefined
+              ? Effect.succeed(projection.turnItems)
+              : input.sideChat !== undefined
+                ? Effect.succeed([])
+                : Effect.fail(
+                    new ProjectionStore.ProjectionStoreReadError({
+                      threadId,
+                      cause: input.historyReadFailureAfterFallback,
+                    }),
+                  ),
         }),
         Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
           open,
@@ -2118,4 +2146,194 @@ for (const mode of ["native", "unsupported", "inline"] as const) {
       }
     }),
   );
+}
+
+for (const mode of ["native", "inline"] as const) {
+  effectIt.effect(
+    `persisted mixed voice chronology freezes queued provider context via ${mode}`,
+    () =>
+      Effect.gen(function* () {
+        const harness = makeLocalCommandHarness({
+          text: "CURRENT_EXECUTION_INPUT",
+          voiceHistory: mode,
+        });
+        const projection = harness.projection();
+        const { normal, queued, after } = yield* seedLateVoiceHistory(projection.thread.id);
+        const prior = after.turnItems.find((item) => item.voice?.itemId === "input-one")!;
+        const later = after.turnItems.find((item) => item.voice?.itemId === "later")!;
+        const normalItem = after.turnItems.find((item) => item.runId === normal.run.id)!;
+        harness.setProjection({
+          ...projection,
+          turnItems: after.turnItems,
+          runs: projection.runs.map((run) => ({
+            ...run,
+            voiceHistoryCutoffOrdinal: queued.run.voiceHistoryCutoffOrdinal,
+          })),
+        });
+        yield* harness.start;
+        expect(harness.startTurn).toHaveBeenCalledOnce();
+        const prompt = harness.startTurn.mock.calls[0]![0].message.text;
+        const history = harness.injectHistory.mock.calls
+          .flatMap(([context]) => context.messages.map((message) => message.text))
+          .join("\n");
+        expect(mode === "native" ? history : prompt).toContain("VOICE_BEFORE_DISPATCH");
+        expect(`${history}\n${prompt}`).not.toContain("VOICE_AFTER_DISPATCH");
+        expect(`${history}\n${prompt}`.match(/CURRENT_EXECUTION_INPUT/g)).toHaveLength(1);
+        expect(prior.ordinal).toBeGreaterThan(normalItem.ordinal);
+        expect(later.ordinal).toBeGreaterThan(queued.run.voiceHistoryCutoffOrdinal!);
+        expect(queued.run.voiceHistoryCutoffOrdinal).toBe(prior.ordinal);
+      }),
+  );
+
+  effectIt.effect(
+    `cancelled undelivered voice remains conversation without restarting its task via ${mode}`,
+    () =>
+      Effect.gen(function* () {
+        const harness = makeLocalCommandHarness({
+          text: "CURRENT_EXECUTION_INPUT",
+          voiceHistory: mode,
+        });
+        const projection = harness.projection();
+        const { queuedVoice, next, after } = yield* seedCancelledVoiceHistory(projection.thread.id);
+        const cancelled = after.runs.find((run) => run.id === queuedVoice.run.id)!;
+        expect(cancelled.status).toBe("cancelled");
+        expect(after.messages.find((message) => message.id === cancelled.userMessageId)?.text).toBe(
+          "CANCELLED_EXECUTION_CONVERSATION",
+        );
+        harness.setProjection({
+          ...projection,
+          turnItems: after.turnItems,
+          runs: [
+            cancelled,
+            {
+              ...projection.runs.at(-1)!,
+              ordinal: next.run.ordinal,
+              voiceHistoryCutoffOrdinal: next.run.voiceHistoryCutoffOrdinal,
+            },
+          ],
+        });
+        yield* harness.start;
+        expect(harness.startTurn).toHaveBeenCalledOnce();
+        const prompt = harness.startTurn.mock.calls[0]![0].message.text;
+        const history = harness.injectHistory.mock.calls
+          .flatMap(([context]) => context.messages.map((message) => message.text))
+          .join("\n");
+        expect(mode === "native" ? history : prompt).toContain("CANCELLED_EXECUTION_CONVERSATION");
+        if (mode === "native") {
+          expect(harness.injectHistory.mock.calls[0]![0].messages[0]?.runStatus).toBe("cancelled");
+        } else {
+          expect(prompt).toContain("run-status=cancelled");
+        }
+        expect(`${history}\n${prompt}`.match(/CURRENT_EXECUTION_INPUT/g)).toHaveLength(1);
+        expect(harness.projection().runs.find((run) => run.id === cancelled.id)?.status).toBe(
+          "cancelled",
+        );
+      }),
+  );
+
+  for (const boundary of ["cutoff", "clear", "fresh"] as const) {
+    effectIt.effect(`native recovery respects voice ${boundary} boundary via ${mode}`, () =>
+      Effect.gen(function* () {
+        const harness = makeLocalCommandHarness({
+          text: "CURRENT_EXECUTION_INPUT",
+          voiceHistory: mode,
+          resumeFailure: new ProviderAdapter.ProviderAdapterEventStreamError({
+            driver: ProviderDriverKind.make("codex"),
+            providerSessionId: ProviderSessionId.make("lost-voice-session"),
+            cause: "native thread lost",
+          }),
+        });
+        const projection = harness.projection();
+        const run = projection.runs.at(-1)!;
+        const items = [1, 3].map((ordinal) => ({
+          id: TurnItemId.make(`recovery-voice-${ordinal}`),
+          ordinal,
+          threadId: projection.thread.id,
+          runId: null,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          status: "completed" as const,
+          title: null,
+          startedAt: run.requestedAt,
+          completedAt: run.requestedAt,
+          updatedAt: run.requestedAt,
+          type: "user_message" as const,
+          messageId: MessageId.make(`recovery-voice-${ordinal}`),
+          text: ordinal === 1 ? "VOICE_BEFORE_BOUNDARY" : "VOICE_AFTER_BOUNDARY",
+          inputIntent: "conversation_only" as const,
+          createdBy: "user" as const,
+          creationSource: "web" as const,
+          attachments: [],
+          voice: {
+            sessionId: "recovery",
+            itemId: `item-${ordinal}`,
+            sequence: ordinal,
+            textKind: "final_user_transcript" as const,
+            delivery: "unknown" as const,
+          },
+        }));
+        harness.setProjection({
+          ...projection,
+          runs: [
+            ...(boundary === "clear"
+              ? [
+                  {
+                    ...run,
+                    id: RunId.make("cleared-run"),
+                    ordinal: 1,
+                    status: "completed" as const,
+                    freshContext: true,
+                    voiceHistoryCutoffOrdinal: 1,
+                  },
+                ]
+              : []),
+            {
+              ...run,
+              ordinal: 2,
+              voiceHistoryCutoffOrdinal: boundary === "cutoff" ? 2 : 3,
+              ...(boundary === "fresh" ? { freshContext: true } : {}),
+            },
+          ],
+          turnItems: [
+            ...items,
+            {
+              ...items[0]!,
+              id: TurnItemId.make("current-voice"),
+              ordinal: 2,
+              voice: { ...items[0]!.voice, itemId: "current-input", sequence: 2 },
+              messageId: run.userMessageId,
+              runId: run.id,
+              text: "CURRENT_EXECUTION_INPUT",
+              inputIntent: "turn_start" as const,
+            },
+          ].toSorted((a, b) => a.ordinal - b.ordinal),
+        });
+        yield* harness.start;
+        expect(harness.startTurn).toHaveBeenCalledOnce();
+        const prompt = harness.startTurn.mock.calls[0]![0].message.text;
+        const messages = harness.injectHistory.mock.calls.flatMap(([context]) => context.messages);
+        const history = messages.map((message) => message.text).join("\n");
+        const delivered = `${history}\n${prompt}`;
+        expect(delivered.match(/CURRENT_EXECUTION_INPUT/g)).toHaveLength(1);
+        expect(messages.some((message) => message.itemId === "current-voice")).toBe(false);
+        if (boundary === "cutoff") {
+          expect(delivered).toContain("VOICE_BEFORE_BOUNDARY");
+          expect(delivered).not.toContain("VOICE_AFTER_BOUNDARY");
+        } else {
+          expect(delivered).not.toContain("VOICE_BEFORE_BOUNDARY");
+          if (boundary === "clear") expect(delivered).toContain("VOICE_AFTER_BOUNDARY");
+          else expect(delivered).not.toContain("VOICE_AFTER_BOUNDARY");
+        }
+        if (boundary !== "fresh")
+          expect(
+            harness
+              .projection()
+              .contextHandoffs.some((handoff) => handoff.strategy === "full_thread_summary"),
+          ).toBe(true);
+      }),
+    );
+  }
 }
