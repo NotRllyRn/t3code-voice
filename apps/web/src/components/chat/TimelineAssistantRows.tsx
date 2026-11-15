@@ -38,6 +38,8 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
     row.message.streaming ? ctx.threadRef : null,
     row.projectedItem?.item.id,
   );
+  const voice =
+    row.projectedItem?.item.type === "assistant_message" ? row.projectedItem.item.voice : undefined;
   const text = liveText ?? row.message.text;
   const messageText =
     text || (row.message.streaming || row.suppressEmptyResponse ? "" : "(empty response)");
@@ -46,6 +48,17 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
     <>
       <div className="relative min-w-0 px-1 py-0.5">
         <MessageAuthorHeading>T3 Code</MessageAuthorHeading>
+        {voice ? (
+          <Tooltip>
+            <TooltipTrigger render={<p className="mb-1 text-xs text-muted-foreground" />}>
+              Generated voice ·{" "}
+              {voice.delivery === "drained" ? "audio drained" : `playback ${voice.delivery}`}
+            </TooltipTrigger>
+            <TooltipPopup>
+              Full generated text, not an exact record of words heard or verified coding output.
+            </TooltipPopup>
+          </Tooltip>
+        ) : null}
         <div data-thread-find-text="true">
           <AssistantCitationSource
             messageId={row.message.id}

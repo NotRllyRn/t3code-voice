@@ -63,6 +63,7 @@ export const relayVoiceSockets = Effect.fn("voice.relay")(function* <E, R = neve
   const budget = new VoiceBudget(!!agent);
   let ready = false;
   let responseId: unknown;
+  const audioIdentities = new Set<string>();
   const diagnostics = {
     upstreamFailureEvent: "none",
     upstreamErrorCode: "none",
@@ -102,7 +103,10 @@ export const relayVoiceSockets = Effect.fn("voice.relay")(function* <E, R = neve
         if (!diagnostics.responseGenerating || e.response_id !== responseId)
           diagnostics.cancelWithoutObservedActiveResponse++;
       }
-      if (e.type === "conversation.item.truncate") diagnostics.truncateRequests++;
+      if (e.type === "conversation.item.truncate") {
+        diagnostics.truncateRequests++;
+        if (agent) yield* agent.receive(e);
+      }
       yield* toUpstream.write(yield* encodeVoiceFrame(e));
     }),
   );
@@ -137,6 +141,24 @@ export const relayVoiceSockets = Effect.fn("voice.relay")(function* <E, R = neve
         catch: () => new VoiceRelayError(),
       });
       if (event?.type === "relay.ready") ready = true;
+      // Queue owner identities/completion before exposing events that can trigger a
+      // browser truncate/drain receipt. Only the first audio identity is queued.
+      if (agent) {
+        if (raw.type === "input_audio_buffer.committed") budget.committed();
+        if (raw.type === "response.function_call_arguments.done") yield* agent.receive(raw);
+        else if (event) {
+          if (
+            ["response.audio.delta", "response.output_audio.delta"].includes(String(event.type))
+          ) {
+            const identity = `${event.response_id}:${event.item_id}:${event.content_index}`;
+            if (!audioIdentities.has(identity)) {
+              if (audioIdentities.size >= 192) return yield* new VoiceRelayError();
+              audioIdentities.add(identity);
+              yield* agent.receive({ ...event, delta: undefined });
+            }
+          } else yield* agent.receive(event);
+        }
+      }
       if (event) {
         diagnostics.lastServerEvent = String(event.type);
         if (event.type === "response.created") {
@@ -150,10 +172,6 @@ export const relayVoiceSockets = Effect.fn("voice.relay")(function* <E, R = neve
           if (object(event.response).id === responseId) diagnostics.responseGenerating = false;
         }
         yield* toClient.write(yield* encodeVoiceFrame(event));
-      }
-      if (agent) {
-        if (raw.type === "input_audio_buffer.committed") budget.committed();
-        yield* agent.receive(raw);
       }
     }),
   );

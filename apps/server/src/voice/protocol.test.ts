@@ -115,3 +115,63 @@ test("command flood is bounded independently of audio clears", () => {
   NodeAssert.throws(() => budget.accept({ type: "input_audio_buffer.clear" }, 0), /rate limit/);
   NodeAssert.doesNotThrow(() => budget.accept({ type: "input_audio_buffer.clear" }, 1000));
 });
+
+test("transcript deltas and authoritative finals carry only bounded owner identities", () => {
+  for (const type of [
+    "conversation.item.input_audio_transcription.delta",
+    "response.audio_transcript.delta",
+    "response.output_audio_transcript.delta",
+  ]) {
+    const source = {
+      type,
+      item_id: "item",
+      response_id: "response",
+      content_index: 0,
+      delta: "word ",
+      secret: "PRIVATE",
+      transcript: "not a final",
+    };
+    const event = serverEvent(source)!;
+    NodeAssert.equal(event.delta, "word ");
+    NodeAssert.equal(event.item_id, "item");
+    NodeAssert.equal("secret" in event, false);
+    NodeAssert.equal("transcript" in event, false);
+    NodeAssert.throws(() => serverEvent({ ...source, item_id: "bad id" }));
+    NodeAssert.throws(() => serverEvent({ ...source, delta: "a".repeat(16001) }));
+    if (!type.startsWith("conversation")) {
+      NodeAssert.throws(() => serverEvent({ ...source, content_index: -1 }));
+      NodeAssert.throws(() => serverEvent({ ...source, content_index: 16 }));
+      NodeAssert.throws(() => serverEvent({ ...source, response_id: undefined }));
+    }
+  }
+  NodeAssert.deepEqual(
+    serverEvent({
+      type: "input_audio_buffer.committed",
+      item_id: "two",
+      previous_item_id: "one",
+      private: true,
+    }),
+    {
+      type: "input_audio_buffer.committed",
+      item_id: "two",
+      previous_item_id: "one",
+    },
+  );
+  NodeAssert.deepEqual(
+    serverEvent({
+      type: "response.output_audio_transcript.done",
+      item_id: "item",
+      response_id: "response",
+      content_index: 1,
+      transcript: "Authoritative final",
+      delta: "not authoritative",
+    }),
+    {
+      type: "response.output_audio_transcript.done",
+      item_id: "item",
+      response_id: "response",
+      content_index: 1,
+      transcript: "Authoritative final",
+    },
+  );
+});

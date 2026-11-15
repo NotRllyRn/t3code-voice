@@ -280,6 +280,35 @@ test.effect(
           type: "relay.playback.done",
           response_id: "resp_1",
         });
+        const truncate = {
+          type: "conversation.item.truncate",
+          item_id: "reply_item",
+          content_index: 0,
+          audio_end_ms: 125,
+        };
+        yield* Queue.offer(down.input, JSON.stringify(truncate));
+        NodeAssert.deepEqual(yield* Queue.take(received), truncate);
+        NodeAssert.deepEqual(JSON.parse(yield* Queue.take(up.output)), truncate);
+        for (let index = 0; index < 2; index++) {
+          yield* Queue.offer(
+            up.input,
+            JSON.stringify({
+              type: "response.output_audio.delta",
+              response_id: "resp_1",
+              item_id: "reply_item",
+              content_index: 0,
+              delta: "AAAAAA==",
+            }),
+          );
+          NodeAssert.equal(
+            JSON.parse(yield* Queue.take(down.output)).type,
+            "response.output_audio.delta",
+          );
+        }
+        const audioIdentity = yield* Queue.take(received);
+        NodeAssert.equal(audioIdentity.item_id, "reply_item");
+        NodeAssert.equal(audioIdentity.delta, undefined);
+        NodeAssert.equal(yield* Queue.size(received), 0);
         yield* Queue.offer(down.input, JSON.stringify({ type: "input_audio_buffer.clear" }));
         NodeAssert.deepEqual(JSON.parse(yield* Queue.take(up.output)), {
           type: "input_audio_buffer.clear",

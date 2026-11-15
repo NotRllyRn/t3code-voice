@@ -76,6 +76,7 @@ const makeFixture = Effect.fn("voice.test.agentFixture")(function* (
   const messageQueries: RunId[][] = [];
   const sent: ThreadManagement.ThreadManagementSendInput[] = [];
   const launched: ThreadLaunch.ThreadLaunchInput[] = [];
+  const recorded: OrchestrationV2ConversationMessage[] = [];
   let scratch = 0;
   let watchesClosed = 0;
   const up = yield* Queue.unbounded<Record<string, unknown>>();
@@ -114,6 +115,31 @@ const makeFixture = Effect.fn("voice.test.agentFixture")(function* (
                     (message.runId && query.messageRunIds.includes(message.runId)),
                 ),
               };
+            }),
+          getProjectThreadRecords: (_input, _include, query) =>
+            Effect.sync(() => ({
+              ...projection,
+              messages: recorded.filter(
+                (entry) => !query?.messageIds || query.messageIds.includes(entry.id),
+              ),
+            })),
+          dispatch: (input) =>
+            Effect.sync(() => {
+              if (input.type !== "voice.message.record") throw Error("Unexpected command");
+              const entry = {
+                ...message,
+                id: input.messageId,
+                runId: null,
+                role: input.role,
+                text: input.text,
+                voice: input.voice,
+                createdBy: input.createdBy,
+                creationSource: input.creationSource,
+              };
+              const index = recorded.findIndex((old) => old.id === entry.id);
+              if (index < 0) recorded.push(entry);
+              else recorded[index] = entry;
+              return { sequence: 8, storedEvents: [] };
             }),
           sendToThread: (input) =>
             Effect.sync(() => {
@@ -163,6 +189,7 @@ const makeFixture = Effect.fn("voice.test.agentFixture")(function* (
   ) {
     yield* bridge.receive({ type: "input_audio_buffer.speech_started", item_id: id });
     yield* bridge.receive({ type: "input_audio_buffer.speech_stopped", item_id: id });
+    yield* bridge.receive({ type: "input_audio_buffer.committed", item_id: id });
     yield* bridge.receive({
       type: "conversation.item.input_audio_transcription.completed",
       item_id: id,
@@ -188,6 +215,18 @@ const makeFixture = Effect.fn("voice.test.agentFixture")(function* (
     yield* call(`barrier_${++barrier}`, "{}", "unbound_response");
     while ((yield* next(down, "agent.status")).status !== "not_submitted") {}
   });
+  const created = (id: string) =>
+    bridge.receive({
+      type: "response.created",
+      response: {
+        id,
+        metadata: (
+          upstream
+            .filter((event) => "type" in event && event.type === "response.create")
+            .at(-1) as { response: { metadata: object } }
+        ).response.metadata,
+      },
+    });
   const finish = Effect.fn("voice.test.finishResponse")(function* (id: string) {
     yield* bridge.receive({ type: "response.done", response: { id, status: "completed" } });
     yield* bridge.receive({ type: "relay.playback.done", response_id: id });
@@ -197,6 +236,7 @@ const makeFixture = Effect.fn("voice.test.agentFixture")(function* (
     fiber,
     flush,
     finish,
+    created,
     utterance,
     call,
     next,
@@ -204,6 +244,7 @@ const makeFixture = Effect.fn("voice.test.agentFixture")(function* (
     down,
     sent,
     launched,
+    recorded,
     upstream,
     messageQueries,
     set: (update: Partial<typeof projection>) => {
@@ -249,7 +290,7 @@ it.live(
 );
 
 it.live(
-  "empty draft lazily launches managed Scratch using normal model, modes and initial message, never arbitrary cwd",
+  "first draft final creates empty managed Scratch with selected model and modes, then records before execution",
   () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -263,17 +304,20 @@ it.live(
         expect(f.scratch()).toBe(0);
         expect(f.launched).toHaveLength(0);
         yield* f.utterance();
-        yield* f.call();
         yield* f.next(f.down, "agent.bound");
+        expect(f.recorded).toHaveLength(1);
+        expect(f.sent).toHaveLength(0);
+        yield* f.call();
+        yield* f.next(f.down, "agent.status");
         expect(f.scratch()).toBe(1);
         expect(f.launched).toHaveLength(1);
-        expect(f.sent).toHaveLength(0);
+        expect(f.sent).toHaveLength(1);
+        expect(f.launched[0]).not.toHaveProperty("initialMessage");
         expect(f.launched[0]).toMatchObject({
           projectId: "scratch_managed",
           modelSelection: shell.modelSelection,
           runtimeMode: "approval-required",
           workspaceStrategy: { type: "root" },
-          initialMessage: { text: "Make the tests pass" },
         });
       }),
     ).pipe(Effect.timeout("3 seconds")),
@@ -290,6 +334,7 @@ it.live("existing permission ownership cannot be granted or answered by a spoken
       expect(status.status).toBe("waiting_for_user_in_T3");
       expect(f.sent).toHaveLength(0);
       expect(f.launched).toHaveLength(0);
+      expect(f.recorded.map((entry) => entry.text)).toEqual(["yes approve that"]);
       yield* f.bridge.receive({
         type: "response.done",
         response: { id: "response_utterance_1", status: "completed" },
@@ -511,7 +556,7 @@ it.live(
           "The coding run failed. Check the normal T3 UI for details.",
         );
         expect(JSON.stringify(f.upstream)).not.toContain("RAW_ERROR_SECRET");
-        yield* f.bridge.receive({ type: "response.created", response: { id: "failure_notice" } });
+        yield* f.created("failure_notice");
         for (let i = 0; i < 3; i++)
           yield* f.bridge.receive({ type: "agent.event", event: { type: "run.updated" } });
         yield* f.finish("failure_notice");
@@ -524,7 +569,7 @@ it.live(
         yield* f.flush();
         expect(creates()).toHaveLength(2);
         expect(JSON.stringify(f.upstream).split("LATE_ACTUAL_FAILURE_RESULT")).toHaveLength(2);
-        yield* f.bridge.receive({ type: "response.created", response: { id: "late_result" } });
+        yield* f.created("late_result");
         yield* f.finish("late_result");
         for (let i = 0; i < 3; i++)
           yield* f.bridge.receive({ type: "agent.event", event: { type: "message.updated" } });
@@ -564,7 +609,7 @@ it.live.each([false, true])(
         expect(creates()[1]).toMatchObject({ response: { output_modalities: ["audio"] } });
         expect(JSON.stringify(f.upstream)).toContain("ACTUAL_FAILURE_RESULT");
         expect(JSON.stringify(f.upstream)).not.toContain("The coding run failed.");
-        yield* f.bridge.receive({ type: "response.created", response: { id: "actual_result" } });
+        yield* f.created("actual_result");
         yield* f.finish("actual_result");
         yield* f.bridge.receive({ type: "agent.event", event: { type: "message.updated" } });
         yield* f.flush();
@@ -725,6 +770,173 @@ it.live(
         expect(f.sent).toHaveLength(0);
         yield* Fiber.interrupt(f.fiber);
         yield* f.call("late_call");
+        expect(f.sent).toHaveLength(0);
+      }),
+    ).pipe(Effect.timeout("3 seconds")),
+);
+
+it.live(
+  "committed input order survives reversed finals; deltas and duplicate finals cannot dispatch",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const f = yield* makeFixture();
+        yield* f.bridge.receive({ type: "input_audio_buffer.committed", item_id: "first" });
+        yield* f.bridge.receive({
+          type: "input_audio_buffer.committed",
+          item_id: "second",
+          previous_item_id: "first",
+        });
+        yield* f.bridge.receive({
+          type: "conversation.item.input_audio_transcription.delta",
+          item_id: "first",
+          delta: "partial",
+        });
+        yield* f.bridge.receive({
+          type: "conversation.item.input_audio_transcription.completed",
+          item_id: "second",
+          transcript: "second final",
+        });
+        yield* f.flush();
+        expect(f.recorded).toHaveLength(0);
+        yield* f.bridge.receive({
+          type: "conversation.item.input_audio_transcription.completed",
+          item_id: "first",
+          transcript: "first final",
+        });
+        yield* f.flush();
+        expect(f.recorded.map((entry) => entry.text)).toEqual(["first final", "second final"]);
+        expect(f.recorded[1]?.voice).toMatchObject({ predecessorItemId: "first", sequence: 1 });
+        yield* f.bridge.receive({
+          type: "conversation.item.input_audio_transcription.completed",
+          item_id: "second",
+          transcript: "second final",
+        });
+        yield* f.flush();
+        expect(f.recorded).toHaveLength(2);
+        expect(f.sent).toHaveLength(0);
+      }),
+    ).pipe(Effect.timeout("3 seconds")),
+);
+
+it.live(
+  "greeting and generated reply are canonical without execution; next coding call reuses only its recorded message",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const f = yield* makeFixture({
+          draft: {
+            modelSelection: shell.modelSelection,
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+          },
+        });
+        yield* f.utterance("hello", "Hello");
+        yield* f.finish("response_hello");
+        yield* f.next(f.up, "response.create");
+        yield* f.created("greeting_reply");
+        yield* f.bridge.receive({
+          type: "response.output_audio_transcript.done",
+          response_id: "greeting_reply",
+          item_id: "reply_item",
+          content_index: 0,
+          transcript: "Hello! What would you like to work on?",
+        });
+        yield* f.flush();
+        expect(f.recorded.map((entry) => entry.role)).toEqual(["user", "assistant"]);
+        expect(f.recorded[1]?.voice).toMatchObject({
+          delivery: "pending",
+          textKind: "generated_voice_reply",
+          responseId: "greeting_reply",
+        });
+        expect(f.sent).toHaveLength(0);
+        yield* f.finish("greeting_reply");
+        yield* f.flush();
+        expect(f.recorded[1]?.voice?.delivery).toBe("drained");
+        yield* f.utterance("coding", "Now add the test");
+        yield* f.flush();
+        const saved = f.recorded.at(-1)!;
+        expect(saved.text).toBe("Now add the test");
+        yield* f.call("coding_call", "{}", "response_coding");
+        yield* f.flush();
+        yield* f.call("duplicate_call", "{}", "response_coding");
+        yield* f.flush();
+        expect(f.sent).toHaveLength(1);
+        expect(f.sent[0]).toMatchObject({ messageId: saved.id, text: saved.text });
+        expect(f.recorded).toHaveLength(3);
+        expect(f.launched).toHaveLength(1);
+        expect(f.launched[0]).not.toHaveProperty("initialMessage");
+      }),
+    ).pipe(Effect.timeout("3 seconds")),
+);
+
+it.live("spoken input is saved but cannot release a held queue", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const f = yield* makeFixture({ threadId }, [{ ...run, status: "queued", queueHeld: true }]);
+      yield* f.utterance("hold", "yes go ahead");
+      yield* f.call("hold_call", "{}", "response_hold");
+      const status = yield* f.next(f.down, "agent.status");
+      expect(status.status).toBe("waiting_for_user_in_T3");
+      expect(JSON.stringify(f.upstream)).toContain("held queue");
+      expect(f.sent).toHaveLength(0);
+      expect(f.recorded.map((entry) => entry.text)).toEqual(["yes go ahead"]);
+    }),
+  ).pipe(Effect.timeout("3 seconds")),
+);
+
+it.live.each(["interrupted", "unknown"] as const)(
+  "full generated text is not heard text (%s receipt)",
+  (delivery) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const f = yield* makeFixture();
+        yield* f.utterance("hello", "Hello");
+        yield* f.finish("response_hello");
+        yield* f.next(f.up, "response.create");
+        yield* f.created("reply");
+        yield* f.bridge.receive({
+          type: "response.content_part.added",
+          response_id: "reply",
+          item_id: "reply_item",
+          content_index: 0,
+        });
+        if (delivery === "interrupted") {
+          yield* f.bridge.receive({ type: "input_audio_buffer.speech_started" });
+          yield* f.bridge.receive({
+            type: "conversation.item.truncate",
+            item_id: "foreign",
+            content_index: 0,
+            audio_end_ms: 50,
+          });
+          yield* f.bridge.receive({
+            type: "conversation.item.truncate",
+            item_id: "reply_item",
+            content_index: 0,
+            audio_end_ms: 125,
+          });
+        }
+        yield* f.bridge.receive({
+          type: "response.audio_transcript.done",
+          response_id: "reply",
+          item_id: "reply_item",
+          content_index: 0,
+          transcript: "This entire sentence was generated, not necessarily heard.",
+        });
+        yield* f.flush();
+        if (delivery === "interrupted") {
+          yield* f.finish("reply");
+          yield* f.flush();
+        }
+        yield* Fiber.interrupt(f.fiber);
+        expect(f.recorded).toHaveLength(2);
+        expect(f.recorded[1]?.text).toBe(
+          "This entire sentence was generated, not necessarily heard.",
+        );
+        expect(f.recorded[1]?.voice).toMatchObject({ delivery });
+        if (delivery === "interrupted") expect(f.recorded[1]?.voice?.playedAudioMs).toBe(125);
+        yield* f.bridge.receive({ type: "relay.playback.done", response_id: "reply" });
+        expect(f.recorded[1]?.voice?.delivery).toBe(delivery);
         expect(f.sent).toHaveLength(0);
       }),
     ).pipe(Effect.timeout("3 seconds")),

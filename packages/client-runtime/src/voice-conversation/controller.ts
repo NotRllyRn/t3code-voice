@@ -1,5 +1,6 @@
 // @effect-diagnostics globalTimers:off - Push-to-talk deadlines run outside an Effect runtime.
 import { Conversation, type RealtimeEvent } from "./conversation.ts";
+import { LiveTranscripts } from "./transcripts.ts";
 import { deadline, Lifecycle, type VoiceLifetime } from "./lifecycle.js";
 import type { VoiceMedia, VoiceMediaFactory, VoiceSocket } from "./media.ts";
 export interface VoiceState {
@@ -11,6 +12,8 @@ export interface VoiceState {
   transcript: string;
   reply: string;
   agentStatus?: string;
+  transcriptStatus?: string;
+  replyPartial?: boolean;
   threadId?: string;
 }
 export const INITIAL_VOICE_STATE: VoiceState = {
@@ -103,6 +106,7 @@ export class VoiceController {
       });
       this.conversation = new Conversation((event) => this.send(event), media, fail);
       own(() => this.conversation?.close());
+      const transcripts = new LiveTranscripts();
       let received = Promise.resolve();
       const message = (event: { data: unknown }) => {
         if (!this.alive(session)) return;
@@ -144,19 +148,24 @@ export class VoiceController {
                 if (data.type === "agent.status" && data.status)
                   this.update({ agentStatus: data.status });
                 if (
-                  data.type === "conversation.item.input_audio_transcription.completed" &&
-                  data.transcript
+                  [
+                    "input_audio_buffer.committed",
+                    "agent.recorded",
+                    "conversation.item.input_audio_transcription.delta",
+                    "conversation.item.input_audio_transcription.completed",
+                  ].includes(data.type)
                 )
-                  this.update({ transcript: data.transcript.slice(0, 16000) });
+                  this.update(transcripts.input(data) ?? {});
                 if (
                   [
+                    "response.audio_transcript.delta",
+                    "response.output_audio_transcript.delta",
                     "response.audio_transcript.done",
                     "response.output_audio_transcript.done",
                   ].includes(data.type) &&
-                  data.transcript &&
                   this.conversation?.accepts(data.response_id)
                 )
-                  this.update({ reply: data.transcript.slice(0, 16000) });
+                  this.update(transcripts.reply(data) ?? {});
               })
               .catch(() => fail("Voice synchronization failed; conversation stopped"));
             return;
