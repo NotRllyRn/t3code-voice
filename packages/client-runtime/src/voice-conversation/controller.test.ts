@@ -405,6 +405,79 @@ test("continuous VAD barge-in flushes immediately, truncates played position and
   NodeAssert.equal(h.states.length, states);
 });
 
+test.each([false, true])(
+  "speech during response preparation blocks stale audio and preserves the next turn (flush started: %s)",
+  async (flushStarted) => {
+    const flushing = Promise.withResolvers<Awaited<ReturnType<VoiceMedia["silence"]>>>();
+    const beganFlush = Promise.withResolvers<void>();
+    const h = harness(undefined, true);
+    using allow = vi.spyOn(h.media, "allow");
+    vi.spyOn(h.media, "silence").mockImplementationOnce(() => {
+      beganFlush.resolve();
+      return flushing.promise;
+    });
+    await active(h);
+    h.socket.event({ type: "relay.response", voice_turn: "old_turn" });
+    if (flushStarted) await beganFlush.promise;
+    h.socket.event({ type: "input_audio_buffer.speech_started", item_id: "new_input" });
+    h.socket.event({
+      type: "response.created",
+      response: { id: "stale", metadata: { voice_turn: "old_turn" } },
+    });
+    h.socket.event({
+      type: "response.output_audio.delta",
+      response_id: "stale",
+      item_id: "old_audio",
+      content_index: 0,
+      delta: "AAAAAA==",
+    });
+    h.socket.event({ type: "response.done", response: { id: "stale", status: "cancelled" } });
+    flushing.resolve(null);
+    await vi.waitFor(() =>
+      NodeAssert.equal(
+        h.socket.sent.some(
+          (event) => event.type === "relay.playback.done" && event.response_id === "stale",
+        ),
+        true,
+      ),
+    );
+    NodeAssert.equal(h.counts().played, 0);
+    NodeAssert.equal(allow.mock.calls.length, 0);
+    NodeAssert.equal(
+      h.socket.sent.some(
+        (event) => event.type === "response.cancel" && event.response_id === "stale",
+      ),
+      true,
+    );
+    h.socket.event({ type: "relay.response", voice_turn: "next_turn" });
+    h.socket.event({
+      type: "response.created",
+      response: { id: "next", metadata: { voice_turn: "next_turn" } },
+    });
+    h.socket.event({
+      type: "response.output_audio.delta",
+      response_id: "next",
+      item_id: "next_audio",
+      content_index: 0,
+      delta: "AAAAAA==",
+    });
+    h.socket.event({ type: "response.done", response: { id: "next", status: "completed" } });
+    await vi.waitFor(() =>
+      NodeAssert.equal(
+        h.socket.sent.some(
+          (event) => event.type === "relay.playback.done" && event.response_id === "next",
+        ),
+        true,
+      ),
+    );
+    NodeAssert.equal(h.counts().played, 1);
+    NodeAssert.equal(allow.mock.calls.length, 1);
+    NodeAssert.equal(h.controller.state.phase, "active");
+    NodeAssert.equal(h.controller.state.recording, true);
+    await h.controller.stop();
+  },
+);
+
 test("continuous playback ACK waits for actual media drain, not generation done", async () => {
   let resolveDrain: () => void = () => {};
   const drained = new Promise<void>((resolve) => {
