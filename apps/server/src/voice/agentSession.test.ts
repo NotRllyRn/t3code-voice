@@ -8,6 +8,7 @@ import {
   ThreadId,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2Run,
+  type OrchestrationV2RuntimeRequest,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -55,9 +56,21 @@ const message: OrchestrationV2ConversationMessage = {
   createdBy: "user",
   creationSource: "web",
 };
+const permission: OrchestrationV2RuntimeRequest = {
+  id: RuntimeRequestId.make("approval_1"),
+  nodeId: NodeId.make("node_1"),
+  providerTurnId: null,
+  nativeRequestRef: null,
+  kind: "command",
+  status: "pending",
+  responseCapability: { type: "message" },
+  createdAt: now,
+  resolvedAt: null,
+};
 const makeFixture = Effect.fn("voice.test.agentFixture")(function* (
   binding: VoiceBinding = { threadId },
   initialRuns: OrchestrationV2Run[] = [],
+  delivery: "started" | "queued" = "started",
 ) {
   let projection = { ...idleThreadProjection(shell), runs: initialRuns };
   const messageQueries: RunId[][] = [];
@@ -113,7 +126,7 @@ const makeFixture = Effect.fn("voice.test.agentFixture")(function* (
                 message: createdMessage,
                 run,
                 turnItem: null,
-                delivery: "started",
+                delivery,
               };
             }),
         }),
@@ -258,72 +271,208 @@ it.live("existing permission ownership cannot be granted or answered by a spoken
   Effect.scoped(
     Effect.gen(function* () {
       const f = yield* makeFixture();
-      f.set({
-        runtimeRequests: [
-          {
-            id: RuntimeRequestId.make("approval_1"),
-            nodeId: NodeId.make("node_1"),
-            providerTurnId: null,
-            nativeRequestRef: null,
-            kind: "command",
-            status: "pending",
-            responseCapability: { type: "message" },
-            createdAt: now,
-            resolvedAt: null,
-          },
-        ],
-      });
+      f.set({ runtimeRequests: [permission] });
       yield* f.utterance("utterance_1", "yes approve that");
       yield* f.call();
       const status = yield* f.next(f.down, "agent.status");
       expect(status.status).toBe("waiting_for_user_in_T3");
       expect(f.sent).toHaveLength(0);
       expect(f.launched).toHaveLength(0);
+      yield* f.bridge.receive({
+        type: "response.done",
+        response: { id: "response_utterance_1", status: "completed" },
+      });
+      yield* f.bridge.receive({ type: "relay.playback.done", response_id: "response_utterance_1" });
+      const notice = yield* f.next(f.up, "response.create");
+      expect(notice.response).toMatchObject({ output_modalities: ["audio"], tool_choice: "none" });
+      yield* f.bridge.receive({
+        type: "response.created",
+        response: {
+          id: "permission_notice",
+          metadata: (notice.response as { metadata: object }).metadata,
+        },
+      });
+      for (let i = 0; i < 20; i++)
+        yield* f.bridge.receive({
+          type: "agent.event",
+          event: { type: "runtime-request.updated" },
+        });
+      yield* f.bridge.receive({ type: "response.done", response: { id: "permission_notice" } });
+      yield* f.bridge.receive({ type: "relay.playback.done", response_id: "permission_notice" });
+      yield* f.utterance("next_utterance", "What is blocking this?");
+      const creates = f.upstream.filter(
+        (event) => "type" in event && event.type === "response.create",
+      );
+      expect(creates).toHaveLength(3);
+      expect(creates[2]).toMatchObject({ response: { output_modalities: ["text"] } });
     }),
   ).pipe(Effect.timeout("3 seconds")),
 );
 
 it.live(
-  "only actual terminal T3 assistant text is fed back; accepted does not pretend to finish",
+  "resolved permission notices are dropped before speech, leaving only the actual result",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const f = yield* makeFixture({ threadId }, [run]);
+        f.set({ runtimeRequests: [permission] });
+        yield* f.utterance("utterance_1", "What is happening?");
+        yield* f.call();
+        yield* f.next(f.down, "agent.status");
+        f.set({
+          runtimeRequests: [],
+          runs: [{ ...run, status: "completed" }],
+          messages: [
+            { ...message, role: "assistant", text: "The checks passed.", streaming: false },
+          ],
+        });
+        yield* f.bridge.receive({ type: "agent.event", event: { type: "run.updated" } });
+        yield* f.next(f.down, "agent.status");
+        yield* f.bridge.receive({
+          type: "response.done",
+          response: { id: "response_utterance_1", status: "completed" },
+        });
+        yield* f.bridge.receive({
+          type: "relay.playback.done",
+          response_id: "response_utterance_1",
+        });
+        const result = yield* f.next(f.up, "response.create");
+        expect(result.response).toMatchObject({
+          output_modalities: ["audio"],
+          tool_choice: "none",
+        });
+        const messages = f.upstream.filter(
+          (event) => "item" in event && (event.item as { type: string }).type === "message",
+        );
+        expect(JSON.stringify(messages)).toContain("The checks passed.");
+        expect(JSON.stringify(messages)).not.toContain("voice cannot approve");
+        expect(
+          f.upstream.filter((event) => "type" in event && event.type === "response.create"),
+        ).toHaveLength(2);
+        expect(f.sent).toHaveLength(0);
+      }),
+    ),
+);
+
+it.live(
+  "conversational utterances get one audible reply after silent routing, not repeated acknowledgements",
   () =>
     Effect.scoped(
       Effect.gen(function* () {
         const f = yield* makeFixture();
+        yield* f.utterance("hello", "Hello");
+        yield* f.bridge.receive({
+          type: "response.done",
+          response: { id: "response_hello", status: "completed" },
+        });
+        yield* f.bridge.receive({ type: "relay.playback.done", response_id: "response_hello" });
+        const reply = yield* f.next(f.up, "response.create");
+        expect(reply.response).toMatchObject({ output_modalities: ["audio"], tool_choice: "none" });
+        expect(JSON.stringify(f.upstream)).toContain("replyToUtterance");
+        yield* f.bridge.receive({
+          type: "response.done",
+          response: { id: "response_hello", status: "completed" },
+        });
+        yield* f.bridge.receive({
+          type: "response.created",
+          response: {
+            id: "hello_reply",
+            metadata: (reply.response as { metadata: object }).metadata,
+          },
+        });
+        yield* f.bridge.receive({
+          type: "response.done",
+          response: { id: "hello_reply", status: "completed" },
+        });
+        yield* f.bridge.receive({ type: "relay.playback.done", response_id: "hello_reply" });
+        yield* f.utterance("next_utterance", "Thank you");
+        const creates = f.upstream.filter(
+          (event) => "type" in event && event.type === "response.create",
+        );
+        expect(creates).toHaveLength(3);
+        expect(creates[2]).toMatchObject({ response: { output_modalities: ["text"] } });
+        expect(f.sent).toHaveLength(0);
+      }),
+    ),
+);
+
+it.live.each(["started", "queued"] as const)(
+  "a short result after a status storm speaks once, without acceptance or completion announcements (delivery: %s)",
+  (delivery) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const f = yield* makeFixture({ threadId }, [], delivery);
         yield* f.utterance();
         yield* f.call();
         yield* f.next(f.down, "agent.status");
         expect(JSON.stringify(f.upstream)).not.toContain("actualAgentResult");
+        yield* f.next(f.down, "agent.status");
+        const outputs = f.upstream.filter(
+          (event) =>
+            "item" in event && (event.item as { type: string }).type === "function_call_output",
+        );
+        expect(outputs).toHaveLength(1);
+        expect(outputs[0]).toMatchObject({
+          item: { call_id: "call_1", type: "function_call_output" },
+        });
+        expect(JSON.parse((outputs[0] as { item: { output: string } }).item.output)).toMatchObject({
+          status: delivery,
+          runId: run.id,
+        });
+        expect(
+          f.upstream.find((event) => "type" in event && event.type === "response.create"),
+        ).toMatchObject({ response: { output_modalities: ["text"] } });
+        const statusCycle = ["starting", "running", "waiting", "running"] as const;
+        for (let i = 0; i < 20; i++) {
+          const current = statusCycle[i % statusCycle.length]!;
+          f.set({ runs: [{ ...run, status: current }] });
+          yield* f.bridge.receive({ type: "agent.event", event: { type: "run.updated" } });
+          const status = yield* f.next(f.down, "agent.status");
+          expect(status.status).toBe(current);
+        }
         f.set({
           runs: [{ ...run, status: "completed" }],
           messages: [{ ...message, role: "assistant", text: "Actual test run: 12 passed." }],
         });
         yield* f.bridge.receive({ type: "agent.event", event: { type: "run.updated" } });
         yield* f.next(f.down, "agent.status");
-        // Drain response serially: notices cannot race a live response or trigger another coding call.
-        for (let i = 0; i < 5 && !JSON.stringify(f.upstream).includes("actualAgentResult"); i++) {
-          yield* f.bridge.receive({
-            type: "response.done",
-            response: { id: i === 0 ? "response_utterance_1" : `notice_${i - 1}` },
-          });
-          if (i === 0)
-            yield* f.bridge.receive({ type: "relay.playback.done", response_id: "stale_response" });
-          yield* f.bridge.receive({
-            type: "relay.playback.done",
-            response_id: i === 0 ? "response_utterance_1" : `notice_${i - 1}`,
-          });
-          const created = yield* f.next(f.up, "response.create");
-          const response = created.response as {
-            metadata: { voice_turn: string };
-            tool_choice: string;
-          };
-          expect(response.tool_choice).toBe("none");
-          yield* f.bridge.receive({
-            type: "response.created",
-            response: { id: `notice_${i}`, metadata: response.metadata },
-          });
-        }
+        yield* f.bridge.receive({
+          type: "response.done",
+          response: { id: "response_utterance_1", status: "completed" },
+        });
+        yield* f.bridge.receive({ type: "relay.playback.done", response_id: "stale_response" });
+        yield* f.bridge.receive({
+          type: "relay.playback.done",
+          response_id: "response_utterance_1",
+        });
+        const created = yield* f.next(f.up, "response.create");
+        expect(created.response).toMatchObject({
+          output_modalities: ["audio"],
+          tool_choice: "none",
+        });
         expect(JSON.stringify(f.upstream)).toContain("Actual test run: 12 passed.");
-        expect(f.sent).toHaveLength(1);
+        const creates = () =>
+          f.upstream.filter((event) => "type" in event && event.type === "response.create");
+        expect(creates()).toHaveLength(2);
+        expect(creates()[0]).toMatchObject({ response: { output_modalities: ["text"] } });
+        yield* f.bridge.receive({
+          type: "response.created",
+          response: {
+            id: "final_result",
+            metadata: (created.response as { metadata: object }).metadata,
+          },
+        });
+        yield* f.bridge.receive({ type: "response.done", response: { id: "final_result" } });
+        yield* f.bridge.receive({ type: "relay.playback.done", response_id: "final_result" });
+        yield* f.bridge.receive({ type: "agent.event", event: { type: "message.updated" } });
+        yield* f.utterance("utterance_2", "What is the current progress?");
+        expect(creates()).toHaveLength(3);
+        expect(creates()[2]).toMatchObject({ response: { output_modalities: ["text"] } });
+        expect(JSON.stringify(f.upstream).split("Actual test run: 12 passed.")).toHaveLength(2);
+        yield* f.call("progress_call", "{}", "response_utterance_2");
+        yield* f.next(f.down, "agent.status");
+        expect(f.sent).toHaveLength(2);
+        expect(f.sent[1]?.text).toBe("What is the current progress?");
       }),
     ).pipe(Effect.timeout("3 seconds")),
 );
@@ -342,16 +491,9 @@ it.live("binding during a run delivers its late final text, not historical termi
       yield* f.bridge.receive({ type: "agent.event", event: { type: "run.updated" } });
       const status = yield* f.next(f.down, "agent.status");
       expect(status).toMatchObject({ run_id: run.id, status: "completed" });
-      const notice = yield* f.next(f.up, "response.create");
-      yield* f.bridge.receive({
-        type: "response.created",
-        response: {
-          id: "completion_notice",
-          metadata: (notice.response as { metadata: object }).metadata,
-        },
-      });
-      yield* f.bridge.receive({ type: "response.done", response: { id: "completion_notice" } });
-      yield* f.bridge.receive({ type: "relay.playback.done", response_id: "completion_notice" });
+      expect(f.upstream.some((event) => "type" in event && event.type === "response.create")).toBe(
+        false,
+      );
       f.set({
         messages: [
           { ...message, role: "assistant", text: "REAL_RESULT_1" },
@@ -390,19 +532,11 @@ it.live.each([false, true])(
           messages: [{ ...message, role: "assistant", text: "OLDEST_REAL_RESULT" }],
         });
         yield* f.bridge.receive({ type: "agent.event", event: { type: "run.updated" } });
-        for (let i = 0; i < 6; i++) {
-          const notice = yield* f.next(f.up, "response.create");
-          const id = `notice_${i}`;
-          yield* f.bridge.receive({
-            type: "response.created",
-            response: {
-              id,
-              metadata: (notice.response as { metadata: object }).metadata,
-            },
-          });
-          yield* f.bridge.receive({ type: "response.done", response: { id } });
-          yield* f.bridge.receive({ type: "relay.playback.done", response_id: id });
-        }
+        const notice = yield* f.next(f.up, "response.create");
+        expect(notice.response).toMatchObject({
+          output_modalities: ["audio"],
+          tool_choice: "none",
+        });
         expect(JSON.stringify(f.upstream)).toContain("OLDEST_REAL_RESULT");
         expect(f.messageQueries.some((ids) => ids.includes(run.id))).toBe(true);
         expect(f.messageQueries.every((ids) => ids.length <= 4)).toBe(true);
@@ -423,6 +557,29 @@ it.live.each(['{"threadId":"other"}', '{"command":"rm -rf x"}', "null", "[]"])(
         expect(f.sent).toHaveLength(0);
       }),
     ).pipe(Effect.timeout("3 seconds")),
+);
+
+it.live("barge-in during silent routing cannot queue a stale conversational reply", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const f = yield* makeFixture();
+      yield* f.utterance("hello", "Hello");
+      yield* f.bridge.receive({ type: "input_audio_buffer.speech_started", item_id: "next" });
+      yield* f.bridge.receive({
+        type: "response.done",
+        response: { id: "response_hello", status: "completed" },
+      });
+      yield* f.bridge.receive({ type: "relay.playback.done", response_id: "response_hello" });
+      yield* f.utterance("next", "Actually, run the tests");
+      const creates = f.upstream.filter(
+        (event) => "type" in event && event.type === "response.create",
+      );
+      expect(creates).toHaveLength(2);
+      expect(creates[1]).toMatchObject({ response: { output_modalities: ["text"] } });
+      expect(JSON.stringify(f.upstream)).not.toContain("replyToUtterance");
+      expect(f.sent).toHaveLength(0);
+    }),
+  ),
 );
 
 it.live(
