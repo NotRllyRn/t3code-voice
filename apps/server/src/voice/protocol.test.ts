@@ -7,6 +7,7 @@ import {
   sessionUpdate,
   upstreamUrl,
   VoiceBudget,
+  voiceFeedbackInstructions,
 } from "./protocol.ts";
 
 test("only fixed audio commands pass; no session changes, tools, text, or endpoint selection", () => {
@@ -68,6 +69,25 @@ test("server owns separate tool-free PCM session and explicit turn detection", (
   NodeAssert.equal(update.session.audio.input.turn_detection, null);
   NodeAssert.equal(update.session.audio.input.format.rate, 24000);
   NodeAssert.equal("transcription" in sessionUpdate("alloy", "").session.audio.input, false);
+});
+
+test("feedback instructions preserve the answer and distinguish acceptance, authored milestones and natural conversation", () => {
+  const instructions = sessionUpdate("alloy", "whisper-1", true).session.instructions;
+  NodeAssert.match(instructions, /Typed requests are already submitted/);
+  NodeAssert.match(instructions, /Greetings remain conversational/);
+  NodeAssert.match(voiceFeedbackInstructions("ack"), /do not claim work has started or finished/);
+  NodeAssert.match(voiceFeedbackInstructions("progress"), /actualAgentCommentary/);
+  NodeAssert.match(
+    voiceFeedbackInstructions("progress"),
+    /do not turn plans into completed actions/,
+  );
+  NodeAssert.match(
+    voiceFeedbackInstructions("final"),
+    /preserving its yes\/no meaning, qualifications, limitations and unresolved points/,
+  );
+  NodeAssert.match(voiceFeedbackInstructions("final"), /not 'sure', 'all set', 'done'/);
+  NodeAssert.match(voiceFeedbackInstructions(), /reply naturally and briefly/);
+  NodeAssert.match(voiceFeedbackInstructions("final"), /Do not read secrets or raw tool output/);
 });
 
 test("outbound whitelist rebuilds events and never returns upstream secrets/errors/tools", () => {

@@ -9,6 +9,8 @@ import {
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2Run,
   type OrchestrationV2RuntimeRequest,
+  type OrchestrationV2TurnItem,
+  TurnItemId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -16,6 +18,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { idleThreadProjection, liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
@@ -67,12 +70,47 @@ const permission: OrchestrationV2RuntimeRequest = {
   createdAt: now,
   resolvedAt: null,
 };
+const assistantItem = (
+  id: string,
+  phase: "commentary" | "final_answer",
+): OrchestrationV2TurnItem => ({
+  id: TurnItemId.make(`item_${id}`),
+  threadId,
+  runId: run.id,
+  nodeId: null,
+  ordinal: 1,
+  type: "assistant_message",
+  status: "completed",
+  startedAt: now,
+  completedAt: now,
+  messageId: MessageId.make(id),
+  phase,
+  text: "",
+  textOmitted: true,
+  streaming: false,
+  providerThreadId: null,
+  providerTurnId: null,
+  nativeItemRef: null,
+  parentItemId: null,
+  title: null,
+  updatedAt: now,
+});
+const feedbackData = (events: object[]) =>
+  events.flatMap((event) => {
+    if (!("item" in event)) return [];
+    const item = event.item as { content?: Array<{ text: string }> };
+    const text = item.content?.[0]?.text;
+    return text?.startsWith("T3 conversation data")
+      ? [JSON.parse(text.slice(text.indexOf("\n") + 1)) as Record<string, unknown>]
+      : [];
+  });
 const makeFixture = Effect.fn("voice.test.agentFixture")(function* (
   binding: VoiceBinding = { threadId },
   initialRuns: OrchestrationV2Run[] = [],
   delivery: "started" | "queued" = "started",
+  initialMessages: OrchestrationV2ConversationMessage[] = [],
 ) {
-  let projection = { ...idleThreadProjection(shell), runs: initialRuns };
+  let projection = { ...idleThreadProjection(shell), runs: initialRuns, messages: initialMessages };
   const messageQueries: RunId[][] = [];
   const sent: ThreadManagement.ThreadManagementSendInput[] = [];
   const launched: ThreadLaunch.ThreadLaunchInput[] = [];
@@ -282,7 +320,10 @@ it.live(
         });
         expect(f.sent[0]).not.toHaveProperty("runtimeMode");
         yield* f.call("call_2");
-        const duplicate = yield* f.next(f.up, "conversation.item.create");
+        yield* f.flush();
+        const duplicate = f.upstream.find(
+          (event) => "item" in event && (event.item as { call_id?: string }).call_id === "call_2",
+        );
         expect(JSON.stringify(duplicate)).toContain("not_submitted");
         expect(f.sent).toHaveLength(1);
         yield* Fiber.interrupt(f.fiber);
@@ -451,6 +492,401 @@ it.live(
         expect(creates).toHaveLength(3);
         expect(creates[2]).toMatchObject({ response: { output_modalities: ["text"] } });
         expect(f.sent).toHaveLength(0);
+      }),
+    ),
+);
+
+it.effect(
+  "a typed question supplies its canonical request and the actual qualified answer, not voice echoes or commentary",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const f = yield* makeFixture();
+        const question = { ...message, text: "Can I type here and have you reply aloud?" };
+        f.set({
+          runs: [{ ...run, status: "completed" }],
+          messages: [
+            question,
+            {
+              ...message,
+              id: MessageId.make("commentary"),
+              role: "assistant",
+              text: "I will check the voice setup.",
+            },
+            {
+              ...message,
+              id: MessageId.make("answer"),
+              role: "assistant",
+              text:
+                "Yes. Type here and I can reply aloud while voice is connected. " +
+                "Useful detail. ".repeat(900) +
+                "I cannot speak after voice disconnects.",
+            },
+            {
+              ...message,
+              id: MessageId.make("child"),
+              role: "assistant",
+              nodeId: NodeId.make("child_node"),
+              text: "CHILD_RESULT_NOT_THE_MAIN_ANSWER",
+            },
+            {
+              ...message,
+              id: MessageId.make("echo"),
+              role: "assistant",
+              text: "Sure, all set now.",
+              voice: {
+                sessionId: "old",
+                itemId: "old",
+                sequence: 1,
+                textKind: "generated_voice_reply",
+                delivery: "drained",
+              },
+            },
+          ],
+          turnItems: [
+            assistantItem("commentary", "commentary"),
+            assistantItem("answer", "final_answer"),
+            { ...assistantItem("child", "final_answer"), nodeId: NodeId.make("child_node") },
+          ],
+        });
+        yield* f.bridge.receive({ type: "agent.event", event: { type: "message.updated" } });
+        const response = yield* f.next(f.up, "response.create");
+        expect(response.response).toMatchObject({
+          output_modalities: ["audio"],
+          tool_choice: "none",
+          instructions: expect.stringContaining("qualifications"),
+        });
+        const data = feedbackData(f.upstream);
+        expect(data).toHaveLength(1);
+        expect(data[0]).toMatchObject({
+          actualAgentResult: expect.stringMatching(/^Yes\. Type here/),
+          requests: [{ messageId: question.id, text: question.text }],
+          sourceMessageIds: ["answer"],
+        });
+        expect(String(data[0]?.actualAgentResult)).toContain(
+          "I cannot speak after voice disconnects.",
+        );
+        expect(JSON.stringify(data)).not.toContain("Sure, all set now.");
+        expect(JSON.stringify(data)).not.toContain("I will check the voice setup.");
+        expect(JSON.stringify(data)).not.toContain("CHILD_RESULT_NOT_THE_MAIN_ANSWER");
+        expect(f.sent).toHaveLength(0);
+        yield* f.created("voiced_final");
+        yield* f.bridge.receive({
+          type: "response.output_audio_transcript.done",
+          response_id: "voiced_final",
+          item_id: "answer_audio",
+          content_index: 0,
+          transcript: "Yes, while voice is connected.",
+        });
+        yield* f.finish("voiced_final");
+        yield* f.flush();
+        expect(f.recorded.find((entry) => entry.role === "assistant")?.voice).toMatchObject({
+          sourceRunId: run.id,
+          sourceMessageIds: ["answer"],
+          delivery: "drained",
+        });
+        expect(feedbackData(f.upstream)).toHaveLength(1);
+      }),
+    ),
+);
+
+it.effect(
+  "typed acceptance is context only, acknowledged once by canonical ID with no execution or status chatter",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const f = yield* makeFixture();
+        const question = { ...message, text: "Can I type a question while voice is connected?" };
+        f.set({ runs: [{ ...run, status: "queued" }], messages: [question] });
+        yield* f.bridge.receive({ type: "agent.event", event: { type: "run.updated" } });
+        const ack = yield* f.next(f.up, "response.create");
+        expect(ack.response).toMatchObject({
+          tool_choice: "none",
+          instructions: expect.stringContaining("do not claim work has started"),
+        });
+        expect(JSON.stringify(f.upstream)).toContain("requestContext");
+        expect(JSON.stringify(f.upstream)).toContain(question.text);
+        yield* f.created("ack");
+        yield* f.finish("ack");
+        for (const status of ["queued", "running", "running"] as const) {
+          f.set({ runs: [{ ...run, status }] });
+          yield* f.bridge.receive({ type: "agent.event", event: { type: "message.updated" } });
+        }
+        yield* f.flush();
+        expect(feedbackData(f.upstream).filter((data) => data.acceptedRequest)).toHaveLength(1);
+        expect(
+          f.upstream.filter((event) => "type" in event && event.type === "response.create"),
+        ).toHaveLength(1);
+        expect(
+          f.upstream.filter((event) => JSON.stringify(event).includes("requestContext")),
+        ).toHaveLength(1);
+        expect(f.sent).toHaveLength(0);
+      }),
+    ),
+);
+
+it.effect(
+  "spoken acceptance and its written projection share one acknowledgement and saved source identity",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const f = yield* makeFixture({ threadId }, [], "queued");
+        yield* f.utterance();
+        yield* f.call();
+        yield* f.finish("response_utterance_1");
+        const ack = yield* f.next(f.up, "response.create");
+        expect(ack.response).toMatchObject({
+          tool_choice: "none",
+          instructions: expect.stringContaining("Acceptance may be queued"),
+        });
+        yield* f.created("ack");
+        yield* f.bridge.receive({
+          type: "response.output_audio_transcript.done",
+          response_id: "ack",
+          item_id: "ack_item",
+          content_index: 0,
+          transcript: "Got it.",
+        });
+        yield* f.finish("ack");
+        yield* f.bridge.receive({ type: "agent.event", event: { type: "message.updated" } });
+        yield* f.flush();
+        expect(feedbackData(f.upstream).filter((data) => data.acceptedRequest)).toHaveLength(1);
+        expect(f.sent).toHaveLength(1);
+        const spoken = f.recorded.find((entry) => entry.role === "assistant");
+        expect(spoken?.voice).toMatchObject({
+          sourceRunId: run.id,
+          sourceMessageIds: [f.sent[0]?.messageId],
+          delivery: "drained",
+        });
+      }),
+    ),
+);
+
+it.effect(
+  "only completed authored commentary gives an occasional milestone, never tools, reasoning or repeated updates",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const f = yield* makeFixture();
+        const question = { ...message, text: "Find why the typed and spoken answers differ." };
+        f.set({ runs: [run], messages: [question] });
+        yield* f.bridge.receive({ type: "agent.event", event: { type: "run.updated" } });
+        yield* f.next(f.up, "response.create");
+        yield* f.created("ack");
+        yield* f.finish("ack");
+        yield* f.flush();
+        yield* TestClock.adjust("21 seconds");
+        const text =
+          "I found that the result selector included earlier commentary. I am narrowing it to the final answer.";
+        f.set({
+          messages: [
+            question,
+            { ...message, id: MessageId.make("milestone"), role: "assistant", text },
+          ],
+          turnItems: [assistantItem("milestone", "commentary")],
+        });
+        yield* f.bridge.receive({ type: "agent.event", event: { type: "turn-item.updated" } });
+        const progress = yield* f.next(f.up, "response.create");
+        expect(progress.response).toMatchObject({
+          instructions: expect.stringContaining("do not turn plans into completed actions"),
+        });
+        expect(feedbackData(f.upstream).at(-1)).toMatchObject({
+          actualAgentCommentary: text,
+          sourceMessageIds: ["milestone"],
+        });
+        yield* f.created("progress");
+        yield* f.finish("progress");
+        yield* TestClock.adjust("30 seconds");
+        yield* f.bridge.receive({ type: "agent.event", event: { type: "message.updated" } });
+        yield* f.flush();
+        expect(feedbackData(f.upstream).filter((data) => data.actualAgentCommentary)).toHaveLength(
+          1,
+        );
+        expect(f.messageQueries.every((ids) => ids.length <= 4)).toBe(true);
+        for (let index = 0; index < 4; index++) {
+          yield* TestClock.adjust("21 seconds");
+          const id = `more_${index}`;
+          f.set({
+            messages: [
+              question,
+              {
+                ...message,
+                id: MessageId.make(id),
+                role: "assistant",
+                text: `I found useful evidence ${index} in the authored message selector.`,
+              },
+            ],
+            turnItems: [assistantItem(id, "commentary")],
+          });
+          yield* f.bridge.receive({ type: "agent.event", event: { type: "message.updated" } });
+          yield* f.flush();
+          if (index < 2) {
+            yield* f.next(f.up, "response.create");
+            yield* f.created(id);
+            yield* f.finish(id);
+          }
+        }
+        yield* f.flush();
+        expect(feedbackData(f.upstream).filter((data) => data.actualAgentCommentary)).toHaveLength(
+          3,
+        );
+      }),
+    ),
+);
+
+it.effect(
+  "canonical request order wins when a spoken submission beats its written projection",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const f = yield* makeFixture();
+        yield* f.utterance("voice_question", "What about offline use?");
+        yield* f.call("call_1", "{}", "response_voice_question");
+        yield* f.next(f.up, "conversation.item.create");
+        const earlier = {
+          ...message,
+          id: MessageId.make("typed_first"),
+          text: "Can I type and hear replies?",
+        };
+        const spoken = { ...message, id: f.sent[0]!.messageId, text: "What about offline use?" };
+        f.set({
+          runs: [{ ...run, status: "completed" }],
+          messages: [
+            earlier,
+            spoken,
+            {
+              ...message,
+              id: MessageId.make("ordered_final"),
+              role: "assistant",
+              text: "You can type and hear replies while connected; offline voice is not available.",
+            },
+          ],
+        });
+        yield* f.bridge.receive({ type: "agent.event", event: { type: "run.updated" } });
+        yield* f.finish("response_voice_question");
+        yield* f.next(f.up, "response.create");
+        expect(feedbackData(f.upstream).at(-1)).toMatchObject({
+          requests: [
+            { messageId: earlier.id, text: earlier.text },
+            { messageId: spoken.id, text: spoken.text },
+          ],
+        });
+        expect(feedbackData(f.upstream).filter((data) => data.acceptedRequest)).toHaveLength(0);
+        expect(f.sent).toHaveLength(1);
+      }),
+    ),
+);
+
+it.effect(
+  "queued commentary is coalesced to its latest evidence; a final removes stale commentary and acknowledgement",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const f = yield* makeFixture();
+        const question = { ...message, text: "Explain the result selection bug." };
+        f.set({ runs: [run], messages: [question] });
+        yield* f.bridge.receive({ type: "agent.event", event: { type: "run.updated" } });
+        yield* f.next(f.up, "response.create");
+        yield* f.created("ack"); // Hold audio so successive actual messages coalesce behind it.
+        yield* f.flush();
+        yield* TestClock.adjust("21 seconds");
+        for (const id of ["old", "latest"]) {
+          f.set({
+            messages: [
+              question,
+              {
+                ...message,
+                id: MessageId.make(id),
+                role: "assistant",
+                text: `I found the ${id} evidence for the selection bug.`,
+              },
+            ],
+            turnItems: [assistantItem(id, "commentary")],
+          });
+          yield* f.bridge.receive({ type: "agent.event", event: { type: "message.updated" } });
+        }
+        yield* f.flush();
+        yield* f.finish("ack");
+        yield* f.next(f.up, "response.create");
+        expect(feedbackData(f.upstream).filter((data) => data.actualAgentCommentary)).toEqual([
+          expect.objectContaining({
+            actualAgentCommentary: "I found the latest evidence for the selection bug.",
+          }),
+        ]);
+        yield* f.created("progress");
+        yield* TestClock.adjust("21 seconds");
+        f.set({
+          messages: [
+            question,
+            {
+              ...message,
+              id: MessageId.make("stale"),
+              role: "assistant",
+              text: "I have more evidence, but have not finished the fix.",
+            },
+          ],
+          turnItems: [assistantItem("stale", "commentary")],
+        });
+        yield* f.bridge.receive({ type: "agent.event", event: { type: "message.updated" } });
+        yield* f.flush();
+        f.set({
+          runs: [{ ...run, status: "completed" }],
+          messages: [
+            question,
+            {
+              ...message,
+              id: MessageId.make("final"),
+              role: "assistant",
+              text: "The selector read commentary as a result. It now selects the final answer.",
+            },
+          ],
+          turnItems: [assistantItem("final", "final_answer")],
+        });
+        yield* f.bridge.receive({ type: "agent.event", event: { type: "run.updated" } });
+        yield* f.finish("progress");
+        yield* f.next(f.up, "response.create");
+        yield* f.created("final");
+        yield* f.finish("final");
+        yield* f.bridge.receive({ type: "agent.event", event: { type: "message.updated" } });
+        yield* f.flush();
+        expect(feedbackData(f.upstream).filter((data) => data.actualAgentCommentary)).toHaveLength(
+          1,
+        );
+        expect(feedbackData(f.upstream).filter((data) => data.actualAgentResult)).toHaveLength(1);
+        expect(JSON.stringify(feedbackData(f.upstream))).not.toContain("have not finished the fix");
+      }),
+    ),
+);
+
+it.effect(
+  "joining an active run preserves the accepted question without reacknowledging history; over-budget answers are not clipped",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const question = { ...message, text: "Does this work offline?" };
+        const f = yield* makeFixture({ threadId }, [run], "started", [question]);
+        f.set({
+          runs: [{ ...run, status: "completed" }],
+          messages: [
+            question,
+            {
+              ...message,
+              id: MessageId.make("long"),
+              role: "assistant",
+              text:
+                "No, it needs a connection. " +
+                "Context. ".repeat(13000) +
+                "Only the local editor works offline.",
+            },
+          ],
+        });
+        yield* f.bridge.receive({ type: "agent.event", event: { type: "run.updated" } });
+        yield* f.next(f.up, "response.create");
+        expect(feedbackData(f.upstream)).toEqual([
+          expect.objectContaining({ note: expect.stringContaining("too long for voice") }),
+        ]);
+        expect(JSON.stringify(f.upstream)).not.toContain("Only the local editor");
+        expect(feedbackData(f.upstream).some((data) => data.acceptedRequest)).toBe(false);
       }),
     ),
 );
