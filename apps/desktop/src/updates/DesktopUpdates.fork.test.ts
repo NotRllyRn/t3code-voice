@@ -1,10 +1,8 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
-import * as Ref from "effect/Ref";
 import * as TestClock from "effect/testing/TestClock";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
-import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopUpdates from "./DesktopUpdates.ts";
 import { flushCallbacks, makeHarness } from "./updatesTestHarness.ts";
 
@@ -38,7 +36,6 @@ it.effect.each([false, true])("keeps mock and managed feeds disabled (managed=%s
       (yield* (yield* DesktopAppSettings.DesktopAppSettings).get).updateChannel,
       initialChannel,
     );
-    assert.isFalse(yield* Ref.get((yield* DesktopState.DesktopState).canInstallUpdates));
     assert.equal(harness.checkCount(), 0);
     assert.equal(harness.downloadCount(), 0);
     assert.equal(harness.quitAndInstalls(), 0);

@@ -1123,7 +1123,6 @@ export const make = Effect.gen(function* () {
       if (FORK_DESKTOP.manualUpdatesOnly) {
         yield* electronUpdater.setAutoDownload(false);
         yield* electronUpdater.setAutoInstallOnAppQuit(false);
-        yield* Ref.set(desktopState.canInstallUpdates, false);
         const settings = yield* desktopSettings.get;
         yield* setState(
           createBaseUpdateState(
