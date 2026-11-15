@@ -110,6 +110,7 @@ export class VoiceController {
           if (typeof event.data !== "string" || event.data.length > 128 * 1024)
             throw Error("Invalid voice message");
           const data = JSON.parse(event.data) as RealtimeEvent;
+          const interruptionEpoch = this.conversation?.interruptionEpoch;
           if (data.type === "relay.ready") {
             ready();
             return;
@@ -124,7 +125,7 @@ export class VoiceController {
               .then(async () => {
                 if (!this.alive(session)) return;
                 if (data.type === "relay.response" && data.voice_turn)
-                  await this.conversation?.expect(data.voice_turn);
+                  await this.conversation?.expect(data.voice_turn, interruptionEpoch);
                 if (!this.alive(session)) return;
                 this.conversation?.event(data);
                 if (data.type === "response.done" && data.response?.id) {

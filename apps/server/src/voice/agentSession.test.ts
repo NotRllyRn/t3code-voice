@@ -57,8 +57,10 @@ const message: OrchestrationV2ConversationMessage = {
 };
 const makeFixture = Effect.fn("voice.test.agentFixture")(function* (
   binding: VoiceBinding = { threadId },
+  initialRuns: OrchestrationV2Run[] = [],
 ) {
-  let projection = idleThreadProjection(shell);
+  let projection = { ...idleThreadProjection(shell), runs: initialRuns };
+  const messageQueries: RunId[][] = [];
   const sent: ThreadManagement.ThreadManagementSendInput[] = [];
   const launched: ThreadLaunch.ThreadLaunchInput[] = [];
   let scratch = 0;
@@ -88,7 +90,18 @@ const makeFixture = Effect.fn("voice.test.agentFixture")(function* (
                 }),
               ),
             ),
-          getThreadRecords: () => Effect.succeed(projection),
+          getThreadRecords: (_id, _include, query) =>
+            Effect.sync(() => {
+              if (query?.messageRunIds) messageQueries.push([...query.messageRunIds]);
+              return {
+                ...projection,
+                messages: projection.messages.filter(
+                  (message) =>
+                    !query?.messageRunIds ||
+                    (message.runId && query.messageRunIds.includes(message.runId)),
+                ),
+              };
+            }),
           sendToThread: (input) =>
             Effect.sync(() => {
               sent.push(input);
@@ -167,6 +180,7 @@ const makeFixture = Effect.fn("voice.test.agentFixture")(function* (
     sent,
     launched,
     upstream,
+    messageQueries,
     set: (update: Partial<typeof projection>) => {
       projection = { ...projection, ...update };
     },
@@ -312,6 +326,89 @@ it.live(
         expect(f.sent).toHaveLength(1);
       }),
     ).pipe(Effect.timeout("3 seconds")),
+);
+
+it.live("binding during a run delivers its late final text, not historical terminal results", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const historical = {
+        ...run,
+        id: RunId.make("historical"),
+        ordinal: 0,
+        status: "completed" as const,
+      };
+      const f = yield* makeFixture({ threadId }, [historical, run]);
+      f.set({ runs: [historical, { ...run, status: "completed" }] });
+      yield* f.bridge.receive({ type: "agent.event", event: { type: "run.updated" } });
+      const status = yield* f.next(f.down, "agent.status");
+      expect(status).toMatchObject({ run_id: run.id, status: "completed" });
+      const notice = yield* f.next(f.up, "response.create");
+      yield* f.bridge.receive({
+        type: "response.created",
+        response: {
+          id: "completion_notice",
+          metadata: (notice.response as { metadata: object }).metadata,
+        },
+      });
+      yield* f.bridge.receive({ type: "response.done", response: { id: "completion_notice" } });
+      yield* f.bridge.receive({ type: "relay.playback.done", response_id: "completion_notice" });
+      f.set({
+        messages: [
+          { ...message, role: "assistant", text: "REAL_RESULT_1" },
+          {
+            ...message,
+            id: MessageId.make("old_message"),
+            runId: historical.id,
+            role: "assistant",
+            text: "HISTORICAL_RESULT",
+          },
+        ],
+      });
+      yield* f.bridge.receive({ type: "agent.event", event: { type: "message.updated" } });
+      yield* f.next(f.up, "response.create");
+      expect(JSON.stringify(f.upstream)).toContain("REAL_RESULT_1");
+      expect(JSON.stringify(f.upstream)).not.toContain("HISTORICAL_RESULT");
+      expect(f.sent).toHaveLength(0);
+    }),
+  ),
+);
+
+it.live.each([false, true])(
+  "four newer queued runs cannot hide the oldest result (observed running: %s)",
+  (observedRunning) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const f = yield* makeFixture({ threadId }, observedRunning ? [run] : []);
+        const queued = Array.from({ length: 4 }, (_, i) => ({
+          ...run,
+          id: RunId.make(`queued_${i}`),
+          ordinal: i + 2,
+          status: "queued" as const,
+        }));
+        f.set({
+          runs: [{ ...run, status: "completed" }, ...queued],
+          messages: [{ ...message, role: "assistant", text: "OLDEST_REAL_RESULT" }],
+        });
+        yield* f.bridge.receive({ type: "agent.event", event: { type: "run.updated" } });
+        for (let i = 0; i < 6; i++) {
+          const notice = yield* f.next(f.up, "response.create");
+          const id = `notice_${i}`;
+          yield* f.bridge.receive({
+            type: "response.created",
+            response: {
+              id,
+              metadata: (notice.response as { metadata: object }).metadata,
+            },
+          });
+          yield* f.bridge.receive({ type: "response.done", response: { id } });
+          yield* f.bridge.receive({ type: "relay.playback.done", response_id: id });
+        }
+        expect(JSON.stringify(f.upstream)).toContain("OLDEST_REAL_RESULT");
+        expect(f.messageQueries.some((ids) => ids.includes(run.id))).toBe(true);
+        expect(f.messageQueries.every((ids) => ids.length <= 4)).toBe(true);
+        expect(f.sent).toHaveLength(0);
+      }),
+    ),
 );
 
 it.live.each(['{"threadId":"other"}', '{"command":"rm -rf x"}', "null", "[]"])(

@@ -27,6 +27,7 @@ export class Conversation {
   private closed = false;
   private count = 0;
   private playbackEpoch = 0;
+  private interruptionGeneration = 0;
   private blocked = new Set<string>();
   private waiters = new Set<() => void>();
   private audioItems = new Map<string, PlayedAudio>();
@@ -62,7 +63,15 @@ export class Conversation {
       this.waiters.delete(notify),
     );
   }
+  get interruptionEpoch() {
+    return this.interruptionGeneration;
+  }
   interrupt(): Promise<void> {
+    ++this.interruptionGeneration;
+    this.turn = null;
+    return this.startInterrupt();
+  }
+  private startInterrupt(): Promise<void> {
     if (this.interrupting) return this.interrupting;
     this.interrupting = deadline(this.runInterrupt(), 2000, "Interruption barrier timed out")
       .catch((error) => {
@@ -143,12 +152,14 @@ export class Conversation {
     // Flush rejects a drain normally on barge-in. Wait for cancel/truncate before permitting another response.
     if (!this.closed && epoch !== this.playbackEpoch) await this.interrupting;
   }
-  async expect(turn: string) {
-    await this.interrupt();
+  async expect(turn: string, epoch = this.interruptionEpoch) {
+    // The relay must finish the previous response first; waiting here would deadlock its events.
+    if (this.pending || this.generating) throw Error("Previous voice response is still active");
+    await this.startInterrupt();
     if (this.closed) return;
-    this.turn = turn;
+    this.turn = epoch === this.interruptionEpoch ? turn : null;
     this.pending = true;
-    this.cut = null;
+    if (this.turn) this.cut = null;
   }
   createResponse() {
     if (this.closed || this.pending || this.generating || this.interrupting)

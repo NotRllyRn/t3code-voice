@@ -63,8 +63,9 @@ export const makeVoiceAgentSession = Effect.fn("voice.makeAgentSession")(functio
   const calls = new Set<string>();
   const cancelledResponses = new Set<string>();
   let cancelPending = false;
+  // Only outstanding session runs are retained; the ordinal baseline excludes historical results.
   const statuses = new Map<string, string>();
-  const results = new Set<string>();
+  let observedOrdinal = 0;
   const pending: Array<{ turn: string; data?: object; delegate: boolean }> = [];
   let activeResponse: string | null = null;
   let playingResponse: string | null = null;
@@ -137,22 +138,27 @@ export const makeVoiceAgentSession = Effect.fn("voice.makeAgentSession")(functio
     const state = yield* threads.getThreadRecords(threadId, ["runs", "runtimeRequests"], {
       runtimeRequestStatuses: ["pending"],
     });
-    const records = {
-      ...state,
-      ...(yield* threads.getThreadRecords(threadId, ["messages"], {
-        messageRoles: ["assistant"],
-        messageRunIds: state.runs.slice(-4).map((run) => run.id),
-      })),
-    };
-    const waiting = records.runtimeRequests.some((request) => request.status === "pending");
-    for (const run of records.runs.slice(-4)) {
+    const outstanding = state.runs.filter(
+      (run) => statuses.has(run.id) || run.ordinal > observedOrdinal,
+    );
+    for (const run of state.runs) observedOrdinal = Math.max(observedOrdinal, run.ordinal);
+    const waiting = state.runtimeRequests.some((request) => request.status === "pending");
+    for (const run of outstanding) {
       const status = waiting && !terminal.has(run.status) ? "waiting_for_user_in_T3" : run.status;
       if (statuses.get(run.id) !== status) {
         statuses.set(run.id, status);
         yield* sendClient({ type: "agent.status", thread_id: threadId, run_id: run.id, status });
         yield* narrate({ runId: run.id, status, currentTurnOnly: true });
       }
-      if (terminal.has(run.status) && !results.has(run.id)) {
+    }
+    const completed = outstanding.filter((run) => terminal.has(run.status));
+    for (let offset = 0; offset < completed.length; offset += 4) {
+      const batch = completed.slice(offset, offset + 4);
+      const records = yield* threads.getThreadRecords(threadId, ["messages"], {
+        messageRoles: ["assistant"],
+        messageRunIds: batch.map((run) => run.id),
+      });
+      for (const run of batch) {
         const messages = records.messages.filter(
           (message) => message.runId === run.id && message.role === "assistant",
         );
@@ -161,7 +167,7 @@ export const makeVoiceAgentSession = Effect.fn("voice.makeAgentSession")(functio
           .join("\n")
           .slice(-8000);
         if (text && !messages.some((message) => message.streaming)) {
-          results.add(run.id);
+          statuses.delete(run.id);
           yield* narrate({
             runId: run.id,
             status: run.status,
@@ -326,8 +332,8 @@ export const makeVoiceAgentSession = Effect.fn("voice.makeAgentSession")(functio
       // Seed bounded status, not the environment, tools, filesystem, or private instructions.
       const recent = yield* threads.getThreadRecords(threadId, ["runs"]);
       for (const run of recent.runs) {
-        statuses.set(run.id, run.status);
-        results.add(run.id);
+        observedOrdinal = Math.max(observedOrdinal, run.ordinal);
+        if (!terminal.has(run.status)) statuses.set(run.id, run.status);
       }
       const context = yield* threads.getThreadRecords(threadId, ["messages"], {
         messageRoles: ["user", "assistant"],
