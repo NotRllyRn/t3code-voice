@@ -31,6 +31,7 @@ interface PendingActionState {
 interface ComposerPrimaryActionsProps {
   /** Footer controls (dictation) that always sit right before the primary button. */
   children?: ReactNode;
+  liveVoice?: { active: boolean; controls: ReactNode } | undefined;
   compact: boolean;
   canOperateThread: boolean;
   pendingAction: PendingActionState | null;
@@ -85,6 +86,7 @@ const preventPointerFocus: PointerEventHandler<HTMLElement> = (event) => {
 
 export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   children,
+  liveVoice,
   compact,
   canOperateThread,
   pendingAction,
@@ -183,6 +185,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           )
         ) : null}
         {children}
+        {liveVoice?.active ? liveVoice.controls : null}
         <button
           type="submit"
           className={cn(messageActionPillClassName, "h-8 sm:h-7", compact ? "px-3" : "px-4")}
@@ -213,12 +216,30 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     return (
       <>
         {children}
+        {liveVoice?.active ? liveVoice.controls : null}
         {renderStopGenerationButton(false)}
       </>
     );
   }
 
   const showResume = canResume && !hasSendableContent && !isEditingQueuedMessage;
+  const showLiveVoice =
+    liveVoice &&
+    !hasSendableContent &&
+    !showResume &&
+    !isEditingQueuedMessage &&
+    !isRunning &&
+    !isSendBusy &&
+    !isPreparingWorktree &&
+    !voiceInputActive;
+  if (showLiveVoice) {
+    return (
+      <>
+        {children}
+        {liveVoice.controls}
+      </>
+    );
+  }
 
   const compactTokens =
     compactBeforeSendTokens !== null && !showResume && !isEditingQueuedMessage
@@ -313,6 +334,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     return (
       <>
         {children}
+        {liveVoice?.active ? liveVoice.controls : null}
         {submit}
       </>
     );
@@ -350,6 +372,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
         </TooltipPopup>
       </Tooltip>
       {children}
+      {liveVoice?.active ? liveVoice.controls : null}
       {submit}
     </div>
   );

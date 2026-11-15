@@ -187,6 +187,7 @@ export function ComposerPermissionsSection(props: {
 
 export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(props: {
   children?: React.ReactNode;
+  liveVoice?: { active: boolean; controls: React.ReactNode } | undefined;
   compact: boolean;
   canOperateThread: boolean;
   isPreparingWorktree: boolean;
@@ -221,6 +222,7 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
   return (
     <>
       <ComposerPrimaryActions
+        liveVoice={props.liveVoice}
         compact={props.compact}
         canOperateThread={props.canOperateThread}
         pendingAction={props.pendingAction}
