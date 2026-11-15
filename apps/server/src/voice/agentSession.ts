@@ -66,6 +66,7 @@ export const makeVoiceAgentSession = Effect.fn("voice.makeAgentSession")(functio
   let cancelPending = false;
   // Only outstanding session runs are retained; the ordinal baseline excludes historical results.
   const statuses = new Map<string, string>();
+  const failureNotices = new Set<string>();
   let observedOrdinal = 0;
   const pending: Array<{ turn: string; data?: object; delegate: boolean; key?: string }> = [];
   let statusContext: object | undefined;
@@ -194,7 +195,10 @@ export const makeVoiceAgentSession = Effect.fn("voice.makeAgentSession")(functio
           .map((message) => message.text)
           .join("\n")
           .slice(-8000);
+        const failureKey = `failure_${run.id}`;
         if (text && !messages.some((message) => message.streaming)) {
+          removeNotice(failureKey);
+          failureNotices.delete(run.id);
           statuses.delete(run.id);
           yield* narrate({
             runId: run.id,
@@ -202,6 +206,17 @@ export const makeVoiceAgentSession = Effect.fn("voice.makeAgentSession")(functio
             actualAgentResult: text,
             scope: "This result does not prove any other work has finished.",
           });
+        } else if (run.status === "failed" && !failureNotices.has(run.id)) {
+          // Keep the run outstanding for a late final, even if barge-in drops this notice.
+          failureNotices.add(run.id);
+          yield* narrate(
+            {
+              runId: run.id,
+              status: "failed",
+              note: "The coding run failed. Check the normal T3 UI for details.",
+            },
+            failureKey,
+          );
         }
       }
     }
