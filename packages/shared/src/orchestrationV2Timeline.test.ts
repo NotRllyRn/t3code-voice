@@ -97,7 +97,17 @@ describe.each([
     { status: "cancelled", hidden: ["queued"] },
     {
       status: "rolled_back",
-      hidden: ["queued", "start", "steer", "promoted", "legacy", "assistant", "request", "result"],
+      hidden: [
+        "queued",
+        "voice",
+        "start",
+        "steer",
+        "promoted",
+        "legacy",
+        "assistant",
+        "request",
+        "result",
+      ],
     },
   ] satisfies ReadonlyArray<{
     status: VisibilityInput["runs"][number]["status"];
@@ -105,6 +115,20 @@ describe.each([
   }>)("keeps the correct transcript rows for $status runs", ({ status, hidden }) => {
     const rows = [
       { id: "queued", type: "user_message", inputIntent: "queued_turn", runId, nodeId },
+      {
+        id: "voice",
+        type: "user_message",
+        inputIntent: "queued_turn",
+        runId,
+        nodeId,
+        voice: {
+          sessionId: "voice",
+          itemId: "input",
+          sequence: 1,
+          textKind: "final_user_transcript",
+          delivery: "unknown",
+        },
+      },
       { id: "start", type: "user_message", inputIntent: "turn_start", runId, nodeId },
       { id: "steer", type: "user_message", inputIntent: "steer", runId, nodeId },
       {
@@ -135,6 +159,7 @@ describe.each([
     expect(rows.filter((item) => isVisible({ ...input, item })).map((item) => item.id)).toEqual(
       [
         "queued",
+        "voice",
         "start",
         "steer",
         "promoted",

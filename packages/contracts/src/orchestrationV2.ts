@@ -704,6 +704,8 @@ export type OrchestrationV2ThreadLaunchWorkspaceStrategy =
 export const ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE = "workspace_preparation_failed";
 
 export const OrchestrationV2Run = Schema.Struct({
+  /** Frozen at dispatch, not at the eventual queued provider start. */
+  voiceHistoryCutoffOrdinal: Schema.optional(NonNegativeInt),
   id: RunId,
   threadId: ThreadId,
   ordinal: PositiveInt,
@@ -1348,7 +1350,23 @@ export type OrchestrationV2Notification = typeof OrchestrationV2Notification.Typ
 export const OrchestrationV2IdleCompaction = Schema.Literals(["beforeCacheExpires", "onReturn"]);
 export type OrchestrationV2IdleCompaction = typeof OrchestrationV2IdleCompaction.Type;
 
+export const OrchestrationV2VoiceMessage = Schema.Struct({
+  sessionId: TrimmedNonEmptyString,
+  itemId: TrimmedNonEmptyString,
+  sequence: NonNegativeInt,
+  responseId: Schema.optional(TrimmedNonEmptyString),
+  contentIndex: Schema.optional(NonNegativeInt),
+  predecessorItemId: Schema.optional(TrimmedNonEmptyString),
+  textKind: Schema.Literals(["final_user_transcript", "generated_voice_reply"]),
+  delivery: Schema.Literals(["pending", "drained", "interrupted", "unknown"]),
+  playedAudioMs: Schema.optional(NonNegativeInt),
+  sourceRunId: Schema.optional(RunId),
+  sourceMessageIds: Schema.optional(Schema.Array(MessageId)),
+});
+export type OrchestrationV2VoiceMessage = typeof OrchestrationV2VoiceMessage.Type;
+
 export const OrchestrationV2ConversationMessage = Schema.Struct({
+  voice: Schema.optional(OrchestrationV2VoiceMessage),
   notification: Schema.optional(OrchestrationV2Notification),
   ...OrchestrationV2CreationFields,
   scheduledTaskId: Schema.optional(ScheduledTaskId),
@@ -1541,6 +1559,7 @@ export const OrchestrationV2ProviderRetry = Schema.Struct({
 export type OrchestrationV2ProviderRetry = typeof OrchestrationV2ProviderRetry.Type;
 
 export const OrchestrationV2UserMessageInputIntent = Schema.Literals([
+  "conversation_only",
   "turn_start",
   "queued_turn",
   "steer",
@@ -1559,6 +1578,7 @@ export type OrchestrationV2ModelSwitch = typeof OrchestrationV2ModelSwitch.Type;
 const AssistantMessagePhase = Schema.Literals(["commentary", "partial_answer", "final_answer"]);
 
 const OrchestrationV2TurnItemBaseFields = {
+  voice: Schema.optional(OrchestrationV2VoiceMessage),
   /** Wire-only cursor for collapsed work; persisted items keep their complete history. */
   deferredWork: Schema.optionalKey(
     Schema.Struct({
@@ -3503,6 +3523,16 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
 
 // Excluded from dispatchCommand so only the server can send these.
 const OrchestrationV2InternalCommand = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("voice.message.record"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    messageId: MessageId,
+    role: Schema.Literals(["user", "assistant"]),
+    text: TrimmedNonEmptyString,
+    voice: OrchestrationV2VoiceMessage,
+    ...OrchestrationV2CreationFields,
+  }),
   // Guest share commands the server issues after checking T3 Connect and the guest token.
   Schema.Struct({
     type: Schema.Literal("thread.guest-share.open"),
