@@ -25,6 +25,7 @@ import {
   nativeLiveCallUrls,
   NATIVE_LIVE_MAX_FRAME_BYTES,
 } from "./liveProtocol.ts";
+import { MAX_BUFFER_BYTES, MAX_BUFFER_FRAMES } from "./transport.ts";
 
 export interface LiveHttpResponse {
   readonly status: number;
@@ -102,10 +103,15 @@ export function liveRetryAt(
 ): number | undefined {
   let delay = LIVE_VOICE_REFRESH_WAIT_MS;
   if (header !== null) {
-    const seconds = /^\d{1,9}$/.test(header) ? Number(header) : undefined;
-    const date = seconds === undefined ? Date.parse(header) : undefined;
-    if (seconds !== undefined) delay = Math.max(delay, seconds * 1000);
-    else if (date !== undefined && Number.isFinite(date)) delay = Math.max(delay, date - now);
+    if (/^\d+$/.test(header)) {
+      const seconds = Number(header);
+      if (!Number.isSafeInteger(seconds)) return undefined;
+      delay = Math.max(delay, seconds * 1000);
+    } else {
+      const date = Date.parse(header);
+      // Invalid headers keep the 90-second floor; numeric overflow must not reach this fallback.
+      if (Number.isFinite(date)) delay = Math.max(delay, date - now);
+    }
   }
   const at = now + delay;
   return Number.isSafeInteger(at) &&
@@ -262,8 +268,47 @@ export const liveNetworkLayer = Layer.effect(
           yield* Effect.promise(() => web.value.body?.cancel() ?? Promise.resolve());
         if (response.status !== 200) return yield* safeFailure();
       }),
-      sideband: Effect.fn("LiveNetwork.sideband")((connection, url) =>
-        Socket.fromWebSocket(
+      sideband: Effect.fn("LiveNetwork.sideband")(function* (connection, url) {
+        let wire: NodeWS.WebSocket | undefined;
+        let pendingBytes = 0;
+        let pendingFrames = 0;
+        let failed = false;
+        const fail = () => {
+          failed = true;
+          wire?.terminate();
+        };
+        const writeError = () =>
+          new Socket.SocketError({ reason: new Socket.SocketWriteError({ cause: safeFailure() }) });
+        const reserve = (bytes: number) => {
+          const ws = wire;
+          const cost = bytes + 14;
+          // Reserve both masked wire bytes and callback retention; these can overlap in ws.
+          if (
+            !ws ||
+            failed ||
+            ws.readyState !== NodeWS.WebSocket.OPEN ||
+            bytes > NATIVE_LIVE_MAX_FRAME_BYTES ||
+            ws.bufferedAmount + pendingBytes + 2 * cost > MAX_BUFFER_BYTES ||
+            pendingFrames >= MAX_BUFFER_FRAMES
+          ) {
+            fail();
+            throw safeFailure();
+          }
+          pendingBytes += cost;
+          pendingFrames++;
+          let completed = false;
+          return {
+            ws,
+            complete: (error?: Error) => {
+              if (completed) return;
+              completed = true;
+              pendingBytes -= cost;
+              pendingFrames--;
+              if (error) fail();
+            },
+          };
+        };
+        const socket = yield* Socket.fromWebSocket(
           Effect.acquireRelease(
             Effect.sync(() => {
               const ws = new NodeWS.WebSocket(url, {
@@ -271,15 +316,56 @@ export const liveNetworkLayer = Layer.effect(
                 maxPayload: NATIVE_LIVE_MAX_FRAME_BYTES,
                 perMessageDeflate: false,
                 followRedirects: false,
+                autoPong: false,
               });
+              wire = ws;
               ws.on("error", () => undefined);
+              ws.on("ping", (data: Buffer) => {
+                try {
+                  const { complete } = reserve(data.byteLength);
+                  ws.pong(data, true, complete);
+                } catch {
+                  fail();
+                }
+              });
               return ws;
             }),
-            (ws) => Effect.sync(() => ws.terminate()),
+            () => Effect.sync(fail),
           ),
           { openTimeout: "10 seconds", highWaterMark: 131072 },
-        ).pipe(Effect.mapError(safeFailure)),
-      ),
+        ).pipe(Effect.mapError(safeFailure));
+        const write: Socket.Writer["write"] = (frame) =>
+          Effect.try({
+            try: () => {
+              if (Socket.isCloseEvent(frame)) {
+                const { ws } = reserve(125);
+                failed = true;
+                ws.close(frame.code);
+              } else {
+                const { ws, complete } = reserve(
+                  typeof frame === "string" ? Buffer.byteLength(frame) : frame.byteLength,
+                );
+                ws.send(frame, { compress: false }, complete);
+              }
+            },
+            catch: () => {
+              fail();
+              return writeError();
+            },
+          });
+        return Socket.make({
+          reader: socket.reader.pipe(
+            Effect.map((reader) => ({
+              ...reader,
+              pull: Effect.suspend(() => (failed ? Effect.fail(writeError()) : reader.pull)),
+            })),
+          ),
+          writer: Effect.succeed({
+            write,
+            writeAll: (frames) => Effect.forEach(frames, write, { discard: true }),
+          }),
+        });
+      }),
     });
   }),
 );

@@ -1,4 +1,8 @@
-import { expect, it } from "@effect/vitest";
+import * as NodeWS from "@effect/platform-node/NodeWS";
+import { expect, it, vi } from "@effect/vitest";
+import * as Context from "effect/Context";
+import * as Layer from "effect/Layer";
+import { FetchHttpClient } from "effect/http";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -8,10 +12,12 @@ import {
   acquireLiveCall,
   LiveNetwork,
   liveFailure,
+  liveNetworkLayer,
   liveRetryAt,
   type LiveHttpResponse,
 } from "./liveTransport.ts";
 import { connection, peer, sdp } from "./liveTestkit.ts";
+import { MAX_BUFFER_BYTES, MAX_BUFFER_FRAMES } from "./transport.ts";
 
 it("allows only structured definitive refresh failures, not quota/auth/arbitrary/ambiguous errors", () => {
   for (const [status, body, retry] of [
@@ -33,10 +39,6 @@ it("allows only structured definitive refresh failures, not quota/auth/arbitrary
   expect(liveFailure(503, JSON.stringify({ error: { code: "insufficient_quota" } })).reason).toBe(
     "quota",
   );
-  expect(liveRetryAt(0, 180000, null)).toBe(90000);
-  expect(liveRetryAt(0, 180000, "91")).toBe(91000);
-  expect(liveRetryAt(0, 180000, "999999999")).toBeUndefined();
-  expect(liveRetryAt(46000, 180000, null)).toBeUndefined();
 });
 
 it.effect.each(["valid", "body", "sideband", "type", "identity", "no-location"] as const)(
@@ -161,4 +163,164 @@ it.effect("Location or non-JSON failures and ambiguous POST losses cannot author
         expect(hangups).toBe(location ? 1 : 0);
       }
   }),
+);
+
+it.each([
+  [0, null, 90000],
+  [0, "91", 91000],
+  [0, "0", 90000],
+  [0, "000000000000000000000000000000000000000000000000000000", 90000],
+  [0, "0000000000100", 100000],
+  [0, "135", 135000],
+  [0, "136", undefined],
+  [0, "999999999", undefined],
+  [0, "1000000000", undefined],
+  [0, "9007199254740992", undefined],
+  [0, "9".repeat(400), undefined],
+  [0, "Thu, 01 Jan 1970 00:01:40 GMT", 100000],
+  [0, "Thu, 01 Jan 1970 00:03:00 GMT", undefined],
+  [0, "Wed, 31 Dec 1969 23:59:59 GMT", 90000],
+  [0, "invalid", 90000],
+  [46000, null, undefined],
+  [46000, "Thu, 01 Jan 1970 00:01:40 GMT", undefined],
+] as const)("respects Retry-After and the remaining startup budget (%s, %s)", (now, header, at) => {
+  expect(liveRetryAt(now, 180000, header)).toBe(at);
+});
+
+const loopbackServer = Effect.acquireRelease(
+  Effect.sync(() => new NodeWS.WebSocketServer({ port: 0, host: "127.0.0.1" })),
+  (server) =>
+    Effect.promise(
+      () =>
+        new Promise<void>((resolve) => {
+          for (const client of server.clients) client.terminate();
+          server.close(() => resolve());
+        }),
+    ),
+).pipe(
+  Effect.tap((server) =>
+    Effect.promise(() => new Promise<void>((resolve) => server.once("listening", resolve))),
+  ),
+);
+
+it.live.each(["bytes", "frames", "callback-error"] as const)(
+  "native sideband bounds %s without waiting for writes and reaps its allocation",
+  (mode) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* loopbackServer;
+        const address = server.address();
+        if (!address || typeof address === "string") throw new Error("Expected loopback port");
+        let wire: NodeWS.WebSocket | undefined;
+        let buffered = 0;
+        let peakBytes = 0;
+        const callbacks: Array<(error?: Error) => void> = [];
+        using _buffered = vi
+          .spyOn(NodeWS.WebSocket.prototype, "bufferedAmount", "get")
+          .mockImplementation(() => buffered);
+        using _send = vi.spyOn(NodeWS.WebSocket.prototype, "send").mockImplementation(function (
+          this: NodeWS.WebSocket,
+          ...args: Parameters<NodeWS.WebSocket["send"]>
+        ) {
+          wire = this;
+          const [data, , callback] = args;
+          if (callback) callbacks.push(callback);
+          if (mode === "bytes") {
+            buffered += Buffer.byteLength(String(data)) + 14;
+            peakBytes = Math.max(peakBytes, 2 * buffered);
+          }
+        });
+        const context = yield* Layer.build(
+          liveNetworkLayer.pipe(Layer.provide(FetchHttpClient.layer)),
+        );
+        const network = Context.get(context, LiveNetwork);
+        let creates = 0;
+        let hangups = 0;
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const call = yield* acquireLiveCall(connection, sdp);
+            if (call.type !== "created") throw new Error("Expected allocation");
+            const reader = yield* call.socket.reader;
+            const writer = yield* call.socket.writer;
+            if (mode === "callback-error") {
+              yield* writer.write("queued");
+              expect(callbacks[0]).toBeTypeOf("function");
+              callbacks[0]?.(new Error("fictional write failure"));
+              expect((yield* writer.write("must fail").pipe(Effect.result))._tag).toBe("Failure");
+            } else {
+              const frame = mode === "bytes" ? "x".repeat(8192) : "";
+              const result = yield* writer
+                .writeAll(Array.from({ length: 1024 }, () => frame) as [string, ...string[]])
+                .pipe(Effect.result);
+              expect(result._tag).toBe("Failure");
+            }
+            expect(callbacks.length).toBeGreaterThan(0);
+            expect(callbacks.length).toBeLessThanOrEqual(MAX_BUFFER_FRAMES);
+            expect(peakBytes).toBeLessThanOrEqual(MAX_BUFFER_BYTES);
+            const writes = callbacks.length;
+            expect((yield* writer.write("after failure").pipe(Effect.result))._tag).toBe("Failure");
+            expect(callbacks).toHaveLength(writes);
+            expect((yield* reader.pull.pipe(Effect.result))._tag).toBe("Failure");
+            yield* Effect.promise(
+              () =>
+                new Promise<void>((resolve) => {
+                  if (!wire || wire.readyState === NodeWS.WebSocket.CLOSED) resolve();
+                  else wire.once("close", () => resolve());
+                }),
+            );
+            expect(wire?.readyState).toBe(NodeWS.WebSocket.CLOSED);
+          }),
+        ).pipe(
+          Effect.provideService(LiveNetwork, {
+            ...network,
+            create: () =>
+              Effect.sync(() => {
+                creates++;
+                return {
+                  status: 201,
+                  contentType: "application/sdp",
+                  location: "/v1/live/owned",
+                  retryAfter: null,
+                  body: Effect.succeed(sdp),
+                };
+              }),
+            sideband: (selected) =>
+              network.sideband(selected, `ws://127.0.0.1:${address.port}/v1/live/owned`),
+            hangup: () =>
+              Effect.sync(() => {
+                hangups++;
+              }),
+          }),
+        );
+        expect(creates).toBe(1);
+        expect(hangups).toBe(1);
+        // Completion may arrive after termination; it must not revive the writer or retain a queue.
+        buffered = 0;
+        for (const callback of callbacks) callback();
+      }),
+    ),
+);
+
+it.live("native sideband releases send reservations for an ordinary reading peer", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const server = yield* loopbackServer;
+      server.on("connection", (ws) => ws.on("message", (data) => ws.send(data.toString())));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Expected loopback port");
+      const context = yield* Layer.build(
+        liveNetworkLayer.pipe(Layer.provide(FetchHttpClient.layer)),
+      );
+      const socket = yield* Context.get(context, LiveNetwork).sideband(
+        connection,
+        `ws://127.0.0.1:${address.port}/v1/live/reading`,
+      );
+      const reader = yield* socket.reader;
+      const writer = yield* socket.writer;
+      for (let index = 0; index <= MAX_BUFFER_FRAMES; index++) {
+        yield* writer.write(`fixture-${index}`);
+        expect(yield* reader.pull).toEqual([`fixture-${index}`]);
+      }
+    }),
+  ),
 );
