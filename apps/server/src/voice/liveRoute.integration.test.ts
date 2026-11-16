@@ -15,6 +15,7 @@ import {
   ProviderDriverKind,
   type LiveVoiceServerEvent,
 } from "@t3tools/contracts";
+import { LiveConnectionError } from "@t3tools/provider-core/server/liveConnection";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -47,6 +48,14 @@ import { connection, sdp } from "./liveTestkit.ts";
 import createFixture from "./fixtures/live-create-http.json" with { type: "json" };
 
 const responses = [
+  ...(
+    [
+      "auth-required",
+      "unsupported-provider",
+      "unsupported-endpoint",
+      "temporarily-unavailable",
+    ] as const
+  ).map((startupReason) => ({ name: `startup ${startupReason}`, phase: null, startupReason })),
   { name: "source SDP", phase: null },
   { name: "MIME case and parameters", contentType: "Application/SDP; charset=utf-8", phase: null },
   { name: "source plain text", contentType: createFixture.cases[1]!.contentType, phase: null },
@@ -193,13 +202,22 @@ it.live.each([...responses, ...plainResponses])(
         const provider: ProviderInstance = {
           instanceId: ProviderInstanceId.make("selected-instance"),
           enabled: true,
-          driverKind: ProviderDriverKind.make("codex"),
+          driverKind: ProviderDriverKind.make(
+            "startupReason" in variant && variant.startupReason === "unsupported-provider"
+              ? "claudeCode"
+              : "codex",
+          ),
           displayName: undefined,
           continuationIdentity: {
             driverKind: ProviderDriverKind.make("codex"),
             continuationKey: "fixture-selected",
           },
-          liveConnection: { resolveLiveConnection: () => Effect.succeed(selected) },
+          liveConnection: {
+            resolveLiveConnection: () =>
+              "startupReason" in variant
+                ? Effect.fail(new LiveConnectionError({ reason: variant.startupReason }))
+                : Effect.succeed(selected),
+          },
           get snapshot(): never {
             throw new Error("Live route must not inspect the public snapshot");
           },
@@ -279,11 +297,14 @@ it.live.each([...responses, ...plainResponses])(
         const origin = HttpServer.formatAddress(
           Context.get(services, HttpServer.HttpServer).address,
         ).replace(/^http/, "ws");
+        const revoked = yield* sessions.issue({ scopes: [AuthOrchestrationOperateScope] });
+        yield* sessions.revoke(revoked.sessionId);
         const readOnly = yield* sessions.issue({ scopes: [AuthOrchestrationReadScope] });
         const http = yield* HttpClient.HttpClient.pipe(Effect.provide(FetchHttpClient.layer));
         const base = origin.replace(/^ws/, "http") + LIVE_VOICE_PATH;
         for (const [url, token, expected] of [
           [base, undefined, 401],
+          [base, revoked.token, 401],
           [base, readOnly.token, 403],
           [base + "?apiKey=poison", session.token, 400],
         ] as const) {
@@ -354,6 +375,23 @@ it.live.each([...responses, ...plainResponses])(
               browser.on("close", () => resolve());
             }),
         );
+        if ("startupReason" in variant) {
+          expect(seen).toEqual([
+            expect.objectContaining({
+              type: "live.status",
+              phase: "error",
+              reason: variant.startupReason,
+            }),
+            expect.objectContaining({ type: "live.cleanup", result: "unknown" }),
+          ]);
+          expect(up.requests).toHaveLength(0);
+          expect(owners.size).toBe(0);
+          expect(launches).toBe(0);
+          expect(JSON.stringify({ seen, logs })).not.toMatch(
+            /fictional-selected-key|127\.0\.0\.1|fake-owned/,
+          );
+          return;
+        }
         const rejected = variant.phase !== null || "rejected" in variant;
         expect(up.requests.map((request) => request.url)).toEqual([
           "/prefix/v1/live",

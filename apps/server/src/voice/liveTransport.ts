@@ -44,7 +44,7 @@ export class LiveNetwork extends Context.Service<
     readonly create: (
       connection: ResolvedLiveConnection,
       body: string,
-    ) => Effect.Effect<LiveHttpResponse, LiveConnectionError>;
+    ) => Effect.Effect<LiveHttpResponse, LiveConnectionError, Scope.Scope>;
     readonly hangup: (
       connection: ResolvedLiveConnection,
       url: string,
@@ -67,6 +67,9 @@ const Refresh = Schema.Struct({
   }),
 });
 const refresh = Schema.decodeUnknownOption(Refresh, { onExcessProperty: "error" });
+const failureCode = Schema.decodeUnknownOption(
+  Schema.Struct({ error: Schema.Struct({ code: Schema.String }) }),
+);
 
 export function liveFailure(
   status: number,
@@ -74,15 +77,17 @@ export function liveFailure(
 ): { reason: LiveVoiceReason; refresh: boolean } {
   if (status === 401) return { reason: "auth-required", refresh: false };
   if (status === 403) return { reason: "forbidden", refresh: false };
-  if (status === 429) return { reason: "rate-limited", refresh: false };
+
   if (status === 400) return { reason: "invalid-offer", refresh: false };
   if (status === 404 || status === 405) return { reason: "unsupported-endpoint", refresh: false };
   try {
-    const value = refresh(parse(body));
+    const parsed = parse(body);
+    const code = failureCode(parsed);
+    const value = refresh(parsed);
     if (
-      value._tag === "Some" &&
+      code._tag === "Some" &&
       ["insufficient_quota", "quota_exceeded", "billing_hard_limit_reached"].includes(
-        value.value.error.code,
+        code.value.error.code,
       )
     )
       return { reason: "quota", refresh: false };
@@ -94,10 +99,12 @@ export function liveFailure(
           value.value.error.refresh_pending === true))
     )
       return { reason: "refresh-pending", refresh: true };
+    if (status === 503 && code._tag === "Some" && code.value.error.code === "auth_unavailable")
+      return { reason: "auth-required", refresh: false };
   } catch {
     /* Only structured, bounded no-session failures authorize retry. */
   }
-  return { reason: "temporarily-unavailable", refresh: false };
+  return { reason: status === 429 ? "rate-limited" : "temporarily-unavailable", refresh: false };
 }
 
 export function liveRetryAt(
@@ -266,29 +273,42 @@ export const liveNetworkLayer = Layer.effect(
   Effect.gen(function* () {
     const client = yield* HttpClient.HttpClient;
     const fetchImpl = yield* FetchHttpClient.Fetch;
-    const execute = (request: HttpClientRequest.HttpClientRequest, timeout: number) =>
+    const execute = (
+      request: HttpClientRequest.HttpClientRequest,
+      timeout: number,
+      deadlineSignal?: AbortSignal,
+    ) =>
       client.execute(request).pipe(
         // This private call capability must not enter HTTP tracing (URLs, Location, or selected headers).
         Effect.provideService(HttpClient.TracerDisabledWhen, () => true),
         Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
-        Effect.provideService(FetchHttpClient.Fetch, (url, options) =>
-          fetchImpl(url, {
+        Effect.provideService(FetchHttpClient.Fetch, (url, options) => {
+          const deadline = deadlineSignal ?? AbortSignal.timeout(timeout);
+          return fetchImpl(url, {
             ...options,
-            signal: options?.signal
-              ? AbortSignal.any([options.signal, AbortSignal.timeout(timeout)])
-              : AbortSignal.timeout(timeout),
-          }),
-        ),
+            signal: options?.signal ? AbortSignal.any([options.signal, deadline]) : deadline,
+          });
+        }),
         Effect.mapError(safeFailure),
       );
     return LiveNetwork.of({
       create: Effect.fn("LiveNetwork.create")(function* (connection, body) {
+        // Keep the deadline through response-body consumption, including an interrupted create.
+        // @effect-diagnostics-next-line abortControllerInEffect:off -- The call scope owns this deadline, independently of Stop interrupting its request fiber.
+        const deadline = new AbortController();
+        yield* Effect.addFinalizer(() => Effect.sync(() => deadline.abort()));
+        yield* Effect.sleep(LIVE_VOICE_CREATE_TIMEOUT_MS).pipe(
+          Effect.andThen(Effect.sync(() => deadline.abort())),
+          Effect.interruptible,
+          Effect.forkScoped,
+        );
         const response = yield* execute(
           HttpClientRequest.post(connection.createUrl).pipe(
             HttpClientRequest.setHeaders(Redacted.value(connection.headers)),
             HttpClientRequest.bodyText(body, "application/json"),
           ),
           LIVE_VOICE_CREATE_TIMEOUT_MS,
+          deadline.signal,
         );
         const web = HttpClientResponse.toWeb(response);
         if (Option.isNone(web)) return yield* safeFailure();

@@ -18,6 +18,7 @@ import { useEnvironmentScope, usePreparedConnection } from "../state/session";
 import { runEnvironmentSpeech } from "../speech/runEnvironmentSpeech";
 import {
   MicIcon,
+  LoaderCircleIcon,
   MicOffIcon,
   XIcon,
   AudioLinesIcon,
@@ -207,32 +208,30 @@ export function ComposerLiveVoiceControls({ live }: { live: LiveVoice }) {
     icon: ReactNode,
     props: {
       disabled?: boolean;
-      pressed?: boolean;
+      pressed?: boolean | undefined;
       muted?: boolean;
       busy?: boolean;
       tooltip?: string | null;
     } = {},
   ) => (
     <Tooltip>
-      <TooltipTrigger
-        render={
-          <button
-            type="button"
-            aria-label={label}
-            aria-pressed={props.pressed}
-            aria-busy={props.busy || undefined}
-            disabled={props.disabled}
-            onClick={action}
-            className={cn(
-              voiceButtonClassName,
-              props.muted
-                ? "bg-destructive/15 text-destructive hover:bg-destructive/25"
-                : "bg-message-action text-message-action-foreground hover:bg-message-action-hover",
-            )}
-          />
-        }
-      >
-        {icon}
+      <TooltipTrigger render={<span className="inline-flex" />}>
+        <button
+          type="button"
+          aria-label={label}
+          aria-pressed={props.pressed}
+          aria-busy={props.busy || undefined}
+          disabled={props.disabled}
+          onClick={action}
+          className={cn(
+            voiceButtonClassName,
+            props.muted
+              ? "bg-destructive/15 text-destructive hover:bg-destructive/25"
+              : "bg-message-action text-message-action-foreground hover:bg-message-action-hover",
+          )}
+        >
+          {icon}
+        </button>
       </TooltipTrigger>
       <TooltipPopup>{props.tooltip ?? label}</TooltipPopup>
     </Tooltip>
@@ -244,23 +243,54 @@ export function ComposerLiveVoiceControls({ live }: { live: LiveVoice }) {
       <AudioLinesIcon aria-hidden="true" />,
       { disabled: !allowed, tooltip: unavailableReason },
     );
+  const waiting = voice.phase === "connecting" || voice.phase === "refresh_wait";
+  const microphoneLabel =
+    voice.phase === "connecting"
+      ? "Connecting live voice"
+      : voice.phase === "refresh_wait"
+        ? "Waiting for provider refresh"
+        : voice.phase === "stopping"
+          ? "Live microphone off"
+          : voice.muted
+            ? "Unmute live microphone"
+            : "Mute live microphone";
+  const busyIcon = (
+    <LoaderCircleIcon aria-hidden="true" className="animate-spin motion-reduce:animate-none" />
+  );
   return (
     <>
       {button(
-        voice.muted ? "Unmute live microphone" : "Mute live microphone",
+        microphoneLabel,
         () => void controller?.mute(),
-        voice.muted ? <MicOffIcon aria-hidden="true" /> : <MicIcon aria-hidden="true" />,
+        waiting ? (
+          busyIcon
+        ) : voice.muted ? (
+          <MicOffIcon aria-hidden="true" />
+        ) : (
+          <MicIcon aria-hidden="true" />
+        ),
         {
-          disabled: voice.phase === "stopping",
-          pressed: voice.muted,
-          muted: voice.muted,
+          disabled: voice.phase !== "connected",
+          busy: waiting,
+          pressed: voice.phase === "connected" ? voice.muted : undefined,
+          muted: voice.phase === "connected" && voice.muted,
+          tooltip: waiting
+            ? `${microphoneLabel}. Microphone is off; Stop is available.`
+            : microphoneLabel,
         },
       )}
       {button(
         voice.phase === "stopping" ? "Stopping live voice" : "Stop live voice",
         () => void controller?.stop(),
-        <XIcon aria-hidden="true" />,
-        { disabled: voice.phase === "stopping", busy: voice.phase === "stopping" },
+        voice.phase === "stopping" ? busyIcon : <XIcon aria-hidden="true" />,
+        {
+          disabled: voice.phase === "stopping",
+          busy: voice.phase === "stopping",
+          tooltip:
+            voice.phase === "stopping"
+              ? "Finishing voice cleanup. Microphone and playback are off."
+              : "Stop live voice",
+        },
       )}
     </>
   );

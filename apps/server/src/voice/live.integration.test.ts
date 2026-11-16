@@ -1,14 +1,17 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Scoped fictional loopback CPA; no external provider calls.
 import * as NodeHttp from "node:http";
+// @effect-diagnostics globalTimers:off -- Drive the browser controller deadline separately; HTTP cancellation uses the Effect TestClock.
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeWS from "@effect/platform-node/NodeWS";
-import { expect, it } from "@effect/vitest";
+import { expect, it, vi } from "@effect/vitest";
 import {
   AuthOrchestrationOperateScope,
   CommandId,
   LIVE_VOICE_PATH,
+  LIVE_VOICE_CREATE_TIMEOUT_MS,
+  LIVE_VOICE_STOP_TIMEOUT_MS,
   MessageId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -84,7 +87,16 @@ const agentServices = Layer.mergeAll(
 );
 
 const setup = Effect.fn("LiveIntegration.setup")(function* (
-  mode: "refresh" | "terminal" | "cleanup" | "cleanup-failed" | "cleanup-stalled",
+  mode:
+    | "refresh"
+    | "terminal"
+    | "cleanup"
+    | "cleanup-failed"
+    | "cleanup-stalled"
+    | "create-late"
+    | "create-timeout"
+    | "create-allocated"
+    | "create-hangup-stalled",
 ) {
   const browserEvents = yield* Queue.unbounded<LiveVoiceServerEvent>();
   const nativeFrames = yield* Queue.unbounded<Record<string, unknown>>();
@@ -93,6 +105,10 @@ const setup = Effect.fn("LiveIntegration.setup")(function* (
   const hangups = yield* Queue.unbounded<void>();
   const hangupStatuses = yield* Queue.unbounded<number>();
   let mapped = false;
+  let mediaClosed = false;
+  const pendingCreates = yield* Queue.unbounded<NodeHttp.ServerResponse>();
+  const createClosed = yield* Queue.unbounded<void>();
+  const owners = new Set<string>();
   const requests: string[] = [];
   const offers: string[] = [];
   let allocations = 0;
@@ -110,12 +126,26 @@ const setup = Effect.fn("LiveIntegration.setup")(function* (
           if (request.url?.endsWith("/hangup")) {
             const status = !mapped || mode === "cleanup-failed" ? 404 : 200;
             Queue.offerUnsafe(hangupStatuses, status);
-            if (mode === "cleanup-stalled") return;
+            if (mode === "cleanup-stalled" || mode === "create-hangup-stalled") return;
             if (status === 200) mapped = false;
             response.writeHead(status).end();
             Queue.offerUnsafe(hangups, undefined);
           } else {
             offers.push(JSON.parse(body).sdp);
+            if (
+              mode === "create-late" ||
+              mode === "create-timeout" ||
+              mode === "create-allocated" ||
+              mode === "create-hangup-stalled"
+            ) {
+              if (mode === "create-allocated") {
+                allocations++;
+                mapped = true;
+              }
+              response.once("close", () => Queue.offerUnsafe(createClosed, undefined));
+              Queue.offerUnsafe(pendingCreates, response);
+              return;
+            }
             if ((offers.length === 1 && mode === "refresh") || mode === "terminal") {
               response.writeHead(mode === "terminal" ? 401 : 503, {
                 "Content-Type": "application/json",
@@ -269,7 +299,7 @@ const setup = Effect.fn("LiveIntegration.setup")(function* (
             getInstance: () => Effect.succeed(provider),
           }),
         ),
-        Layer.provide(Layer.succeed(VoiceOwners, new Set<string>())),
+        Layer.provide(Layer.succeed(VoiceOwners, owners)),
       ),
       { disableListenLog: true },
     ).pipe(
@@ -326,6 +356,7 @@ const setup = Effect.fn("LiveIntegration.setup")(function* (
         return browser;
       },
       media: async (options) => {
+        mediaClosed = false;
         const current = {
           options,
           disposed: false,
@@ -349,6 +380,7 @@ const setup = Effect.fn("LiveIntegration.setup")(function* (
             current.mic = false;
           },
           dispose: () => {
+            mediaClosed = true;
             mapped = false;
             current.captureStopped = true;
             current.playback = false;
@@ -384,6 +416,19 @@ const setup = Effect.fn("LiveIntegration.setup")(function* (
     orchestrator,
     worker,
     allocationCount: () => allocations,
+    owners,
+    pendingCreates,
+    createClosed,
+    completeCreate: (response: NodeHttp.ServerResponse) => {
+      expect(response.destroyed).toBe(false);
+      if (mode !== "create-allocated") allocations++;
+      mapped = !mediaClosed;
+      response.writeHead(201, {
+        "Content-Type": "application/sdp",
+        Location: "/v1/live/fictional-owned",
+      });
+      response.end(sdp);
+    },
     native: (event: unknown) => native!.send(JSON.stringify(event)),
     heartbeat: () => browser!.send('{"type":"live.heartbeat"}'),
   };
@@ -644,6 +689,99 @@ it.effect.each(["cleanup", "cleanup-failed", "cleanup-stalled"] as const)(
         );
       }),
     ),
+);
+
+it.effect.each([
+  13_000,
+  LIVE_VOICE_CREATE_TIMEOUT_MS - 1,
+  "allocated",
+  "hangup-timeout",
+  "timeout",
+] as const)("Stop during real HTTP create (%s) retains owner/peer until bounded cleanup", (delay) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const f = yield* setup(
+        delay === "timeout"
+          ? "create-timeout"
+          : delay === "allocated"
+            ? "create-allocated"
+            : delay === "hangup-timeout"
+              ? "create-hangup-stalled"
+              : "create-late",
+      );
+      yield* Effect.promise(() => f.controller.start());
+      const response = yield* Queue.take(f.pendingCreates);
+      let stopAt = 0;
+      let stopDeadline: (() => void) | undefined;
+      const realTimeout = globalThis.setTimeout;
+      const timer = vi
+        .spyOn(globalThis, "setTimeout")
+        .mockImplementation((callback, delay, ...args) => {
+          if (
+            delay === LIVE_VOICE_STOP_TIMEOUT_MS ||
+            delay === LIVE_VOICE_CREATE_TIMEOUT_MS + LIVE_VOICE_STOP_TIMEOUT_MS
+          ) {
+            stopAt = delay;
+            stopDeadline = () => callback(...args);
+            const handle = realTimeout(() => {}, delay);
+            clearTimeout(handle);
+            return handle;
+          }
+          return realTimeout(callback, delay, ...args);
+        });
+      yield* Effect.addFinalizer(() => Effect.sync(() => timer.mockRestore()));
+      yield* Effect.addFinalizer(() => Effect.sync(() => response.destroy()));
+      const media = f.media[0]!;
+      f.controller.stop();
+      expect(media.captureStopped).toBe(true);
+      expect(media.mic).toBe(false);
+      expect(media.playback).toBe(false);
+      if (stopAt <= 13_000) stopDeadline?.();
+      yield* TestClock.adjust(13_000);
+      expect(media.disposed).toBe(false);
+      expect(f.controller.state.phase).toBe("stopping");
+      expect(f.owners.size).toBe(1);
+      yield* Effect.promise(() => f.controller.start());
+      expect(f.offers).toHaveLength(1);
+      if (delay === "timeout") {
+        yield* TestClock.adjust(LIVE_VOICE_CREATE_TIMEOUT_MS - 13_001);
+        expect(response.destroyed).toBe(false);
+        expect(f.owners.size).toBe(1);
+        yield* TestClock.adjust(1);
+        yield* Queue.take(f.createClosed);
+      } else {
+        yield* TestClock.adjust(
+          (typeof delay === "number"
+            ? delay
+            : delay === "allocated"
+              ? 13_000
+              : LIVE_VOICE_CREATE_TIMEOUT_MS - 1) - 13_000,
+        );
+        expect(f.allocationCount()).toBe(delay === "allocated" ? 1 : 0);
+        f.completeCreate(response);
+        if (delay === "hangup-timeout") {
+          expect(yield* Queue.take(f.hangupStatuses)).toBe(200);
+          yield* TestClock.adjust(4_999);
+          expect(media.disposed).toBe(false);
+          expect(f.owners.size).toBe(1);
+          yield* TestClock.adjust(1);
+        }
+      }
+      const cleanup = yield* take(f.browserEvents, (event) => event.type === "live.cleanup");
+      expect(cleanup).toMatchObject({
+        result: delay === "timeout" || delay === "hangup-timeout" ? "unknown" : "acknowledged",
+      });
+      expect(f.owners.size).toBe(0);
+      expect(media.disposed).toBe(true);
+      expect(f.controller.state.phase).toBe("idle");
+      expect(f.requests).toEqual([
+        "/v1/live",
+        ...(delay === "timeout" ? [] : ["/v1/realtime/calls/fictional-owned/hangup"]),
+      ]);
+      expect(f.allocationCount()).toBe(delay === "timeout" ? 0 : 1);
+      expect((yield* f.management.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(0);
+    }),
+  ),
 );
 
 it.effect.each(["terminal", "stop-wait"] as const)("%s never retries or admits coding", (mode) =>

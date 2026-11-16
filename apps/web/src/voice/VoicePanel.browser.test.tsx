@@ -462,9 +462,13 @@ it.each(["ready", "muted", "blocked"] as const)(
     expect(h.attempts[0]!.value.microphone).toHaveBeenLastCalledWith(false);
     await expect.element(screen.getByRole("status")).toHaveTextContent("Connecting voice…");
     if (outcome !== "blocked") {
+      await expect
+        .element(screen.getByRole("button", { name: "Connecting live voice" }))
+        .toBeDisabled();
+      await act(() => playback.resolve());
+      await expect.element(screen.getByRole("status")).toHaveTextContent("Listening");
       if (outcome === "muted")
         await userEvent.click(screen.getByRole("button", { name: "Mute live microphone" }));
-      await act(() => playback.resolve());
       await expect
         .element(screen.getByRole("status"))
         .toHaveTextContent(outcome === "muted" ? "Mic muted" : "Listening");
@@ -502,8 +506,31 @@ it("keeps Send, mic mute, original coding Stop; accessible refresh and playback 
       element: screen.container,
       path: `../../../../.t3/t3voice-live-client-${state}.png`,
     });
-  await capture("empty");
   await userEvent.click(screen.getByRole("button", { name: "Start live voice" }));
+  await expect
+    .element(screen.getByRole("button", { name: "Connecting live voice" }))
+    .toBeDisabled();
+  await expect
+    .element(screen.getByRole("button", { name: "Connecting live voice" }))
+    .toHaveAttribute("aria-busy", "true");
+  await expect.element(screen.getByRole("button", { name: "Stop live voice" })).toBeEnabled();
+  await userEvent.hover(screen.getByRole("button", { name: "Connecting live voice" }));
+  await expect
+    .element(
+      page.getByText("Connecting live voice. Microphone is off; Stop is available.", {
+        exact: true,
+      }),
+    )
+    .toBeVisible();
+  await userEvent.hover(screen.getByRole("textbox"));
+  await expect
+    .element(
+      page.getByText("Connecting live voice. Microphone is off; Stop is available.", {
+        exact: true,
+      }),
+    )
+    .not.toBeInTheDocument();
+  await capture("connecting");
   await h.connect();
   await act(() => {
     h.sockets[0]!.event({
@@ -548,7 +575,6 @@ it("keeps Send, mic mute, original coding Stop; accessible refresh and playback 
   await userEvent.clear(screen.getByRole("textbox"));
   await expect.element(screen.getByRole("button", { name: "Stop generation" })).toBeVisible();
   await expect.element(screen.getByRole("button", { name: "Stop live voice" })).toBeVisible();
-  await capture("coding-stop");
   await userEvent.click(screen.getByRole("button", { name: "Stop live voice" }));
   await expect
     .element(screen.getByRole("status"))
@@ -580,6 +606,12 @@ it("keeps Send, mic mute, original coding Stop; accessible refresh and playback 
       "Waiting for the selected provider to refresh. You can stop voice at any time.",
     );
   await expect.element(screen.getByRole("button", { name: "Stop live voice" })).toBeEnabled();
+  await expect
+    .element(screen.getByRole("button", { name: "Waiting for provider refresh" }))
+    .toBeDisabled();
+  await expect
+    .element(screen.getByRole("button", { name: "Waiting for provider refresh" }))
+    .toHaveAttribute("aria-busy", "true");
   await capture("refresh");
   await act(() =>
     h.sockets[1]!.event({

@@ -5,6 +5,7 @@ import * as Schema from "effect/Schema";
 import {
   CloudSpeechError,
   LIVE_VOICE_PATH,
+  LiveVoiceStartupError,
   REALTIME_VOICE_PATH,
   SPEECH_STREAM_PATH,
 } from "@t3tools/contracts";
@@ -195,7 +196,20 @@ export const getEnvironmentRealtimeVoiceUrl = (prepared: PreparedConnection) =>
   getEnvironmentMediaStreamUrl(prepared, REALTIME_VOICE_PATH);
 
 export const getEnvironmentLiveVoiceUrl = (prepared: PreparedConnection) =>
-  getEnvironmentMediaStreamUrl(prepared, LIVE_VOICE_PATH);
+  getEnvironmentMediaStreamUrl(prepared, LIVE_VOICE_PATH).pipe(
+    Effect.mapError(
+      (error) =>
+        new LiveVoiceStartupError({
+          reason:
+            error._tag === "EnvironmentAuthInvalidError"
+              ? "environment-auth-required"
+              : error._tag === "EnvironmentScopeRequiredError" ||
+                  error._tag === "EnvironmentOperationForbiddenError"
+                ? "forbidden"
+                : "temporarily-unavailable",
+        }),
+    ),
+  );
 
 export const getEnvironmentSpeechModels = (
   prepared: PreparedConnection,

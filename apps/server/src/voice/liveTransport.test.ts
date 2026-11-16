@@ -116,6 +116,22 @@ it("allows only structured definitive refresh failures, not quota/auth/arbitrary
     ]),
   ] as const)
     expect(liveFailure(Number(status), JSON.stringify(body)).refresh).toBe(retry);
+  for (const code of ["insufficient_quota", "quota_exceeded", "billing_hard_limit_reached"])
+    expect(
+      liveFailure(429, JSON.stringify({ error: { code, message: "fictional-private" } })),
+    ).toEqual({ reason: "quota", refresh: false });
+  expect(liveFailure(429, '{"error":{"code":"too_many_requests"}}')).toEqual({
+    reason: "rate-limited",
+    refresh: false,
+  });
+  expect(liveFailure(503, '{"error":{"code":"auth_unavailable"}}')).toEqual({
+    reason: "auth-required",
+    refresh: false,
+  });
+  expect(liveFailure(503, '{"error":{"code":"overloaded"}}')).toEqual({
+    reason: "temporarily-unavailable",
+    refresh: false,
+  });
   expect(liveFailure(401, "private-key").reason).toBe("auth-required");
   expect(liveFailure(403, "private-key").reason).toBe("forbidden");
   expect(liveFailure(503, JSON.stringify({ error: { code: "insufficient_quota" } })).reason).toBe(

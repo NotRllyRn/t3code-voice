@@ -1,6 +1,8 @@
 import { expect, test, vi } from "vite-plus/test";
 import {
   LIVE_VOICE_CONNECT_BUDGET_MS,
+  LIVE_VOICE_CREATE_TIMEOUT_MS,
+  LiveVoiceStartupError,
   LIVE_VOICE_STOP_TIMEOUT_MS,
   type LiveVoiceClientEvent,
   type LiveVoiceServerEvent,
@@ -448,12 +450,25 @@ test("Stop cancels refresh immediately and the absolute startup budget bounds a 
   }
 });
 
-test.each(["acknowledged", "failed", "unknown", "deadline", "socket", "peer", "dispose"] as const)(
+test.each([
+  "acknowledged",
+  "failed",
+  "unknown",
+  "deadline",
+  "socket",
+  "peer",
+  "dispose",
+  "answer-pending",
+] as const)(
   "Stop finishes on %s without resuming capture or retaining ownership",
   async (outcome) => {
     vi.useFakeTimers();
     try {
-      using h = harness();
+      const pendingAnswer = deferred<void>();
+      using h = harness(async (media) => {
+        if (outcome === "answer-pending") media.answer = vi.fn(() => pendingAnswer.promise);
+        return media;
+      });
       await h.controller.start();
       h.authorize();
       await vi.advanceTimersByTimeAsync(0);
@@ -472,7 +487,7 @@ test.each(["acknowledged", "failed", "unknown", "deadline", "socket", "peer", "d
         expect(old.media.dispose).toHaveBeenCalledTimes(1);
         expect(h.socket.close).not.toHaveBeenCalled();
         h.cleanup();
-      } else if (outcome === "deadline" || outcome === "dispose") {
+      } else if (outcome === "deadline" || outcome === "dispose" || outcome === "answer-pending") {
         if (outcome === "dispose") h.controller.dispose();
         await vi.advanceTimersByTimeAsync(LIVE_VOICE_STOP_TIMEOUT_MS - 1);
         expect(old.media.dispose).not.toHaveBeenCalled();
@@ -502,5 +517,58 @@ test.each(["acknowledged", "failed", "unknown", "deadline", "socket", "peer", "d
     } finally {
       vi.useRealTimers();
     }
+  },
+);
+
+test("Stop during create retains the peer past 12s, rejects Start, and bounds missing cleanup", async () => {
+  vi.useFakeTimers();
+  try {
+    using h = harness();
+    await h.controller.start();
+    h.authorize();
+    await vi.advanceTimersByTimeAsync(0);
+    const old = h.attempts[0]!;
+    h.controller.stop();
+    expect(old.media.stopAudio).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(13_000);
+    expect(h.controller.state.phase).toBe("stopping");
+    expect(old.media.dispose).not.toHaveBeenCalled();
+    await h.controller.start();
+    expect(h.mediaFactory).toHaveBeenCalledTimes(1);
+    h.answer();
+    h.connected();
+    old.options.peer("connected");
+    expect(old.enabled).toBe(false);
+    await vi.advanceTimersByTimeAsync(
+      LIVE_VOICE_CREATE_TIMEOUT_MS + LIVE_VOICE_STOP_TIMEOUT_MS - 13_001,
+    );
+    expect(old.media.dispose).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(old.media.dispose).toHaveBeenCalledTimes(1);
+    expect(h.controller.state.cleanupResult).toBe("unknown");
+    expect(h.controller.state.error).toContain("not acknowledged");
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test.each(["forbidden", "environment-auth-required", "temporarily-unavailable"] as const)(
+  "safe %s startup failures do not acquire media or retry",
+  async (reason) => {
+    const media = vi.fn();
+    const socket = vi.fn();
+    const url = vi.fn(async () => {
+      throw new LiveVoiceStartupError({ reason });
+    });
+    const controller = new LiveVoiceController({ media, socket, url }, () => {});
+    await controller.start();
+    expect(controller.state.reason).toBe(reason);
+    expect(controller.state.phase).toBe("error");
+    expect(controller.state.error).not.toContain("disconnected");
+    expect(media).not.toHaveBeenCalled();
+    expect(socket).not.toHaveBeenCalled();
+    expect(url).toHaveBeenCalledTimes(1);
+    controller.dispose();
   },
 );

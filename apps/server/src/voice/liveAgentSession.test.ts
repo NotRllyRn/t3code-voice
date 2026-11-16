@@ -1109,44 +1109,61 @@ it.live.each([
   ).pipe(Effect.provide(services)),
 );
 
-it.live.each(["Read the file.", "Read the blue file only. Do not edit."])(
-  "late final %s cannot reauthorize a partial delegation",
-  (finalText) =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const threadId = ThreadId.make("thread:late-corrected-final");
-        yield* VoiceFixture.create(threadId);
-        const threads = yield* ThreadManagement.ThreadManagementService;
-        const agent = yield* makeLiveAgentSession({
-          binding: { threadId },
-          sessionId: "late-final",
-          onBound: () => {},
-          send: () => Effect.void,
-          append: () => Effect.void,
-        });
-        yield* agent.seed;
+it.live.each([
+  "Read the file.",
+  "Read the blue file only. Do not edit.",
+  "Actually only inspect it; do not edit.",
+])("late final %s cannot reauthorize a partial delegation", (finalText) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread:late-corrected-final");
+      yield* VoiceFixture.create(threadId);
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const agent = yield* makeLiveAgentSession({
+        binding: { threadId },
+        sessionId: "late-final",
+        onBound: () => {},
+        send: () => Effect.void,
+        append: () => Effect.void,
+      });
+      yield* agent.seed;
+      yield* agent.receive({
+        type: "transcript",
+        role: "user",
+        itemId: "chunk",
+        text: "Read the file",
+      });
+      const delegation = {
+        type: "delegation",
+        provenance: "native_live_delegation",
+        delegationId: "early",
+        userTurnId: "final",
+        instructions: "Edit the file.",
+      } as const;
+      if (finalText.startsWith("Actually"))
         yield* agent.receive({
-          type: "transcript",
+          type: "turn_created",
           role: "user",
-          itemId: "chunk",
-          text: "Read the file",
+          turnId: "final",
+          text: "Edit the file.",
         });
-        const delegation = {
-          type: "delegation",
-          provenance: "native_live_delegation",
-          delegationId: "early",
-          userTurnId: "final",
-          instructions: "Read the file.",
-        } as const;
-        yield* agent.receive(delegation);
-        yield* agent.receive({ type: "turn_done", role: "user", turnId: "final", text: finalText });
-        yield* agent.receive({ ...delegation, delegationId: "late" });
-        const records = yield* threads.getThreadRecords(threadId, ["runs", "messages"]);
-        expect(records.runs).toHaveLength(1);
-        expect(records.messages.find((message) => message.voice)?.text).toBe(finalText);
-        expect(records.messages.find((message) => message.runId)?.text).toContain(finalText);
-      }),
-    ).pipe(Effect.provide(services)),
+      yield* agent.receive(delegation);
+      expect((yield* threads.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(0);
+      yield* agent.receive({ type: "turn_done", role: "user", turnId: "final", text: finalText });
+      yield* agent.receive({ ...delegation, delegationId: "late" });
+      const records = yield* threads.getThreadRecords(threadId, ["runs", "messages"]);
+      expect(records.runs).toHaveLength(1);
+      expect(records.messages.find((message) => message.voice)?.text).toBe(finalText);
+      const task = records.messages.find((message) => message.runId)?.text;
+      expect(task).toContain(finalText);
+      expect(task).toContain("Edit the file.");
+      if (finalText.startsWith("Actually")) expect(task).toContain('"delegationId":"early"');
+      expect(task).toContain("The finalized human userTranscript controls the task");
+      expect(task).toContain(
+        "corrections and constraints override conflicting generated instructions",
+      );
+    }),
+  ).pipe(Effect.provide(services)),
 );
 
 it.effect.each(["reordered", "interleaved", "unassociated", "handoff-replay"] as const)(

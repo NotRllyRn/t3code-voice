@@ -69,6 +69,7 @@ export const LiveVoicePhase = Schema.Literals([
 export type LiveVoicePhase = typeof LiveVoicePhase.Type;
 export const LiveVoiceReason = Schema.Literals([
   "auth-required",
+  "environment-auth-required",
   "forbidden",
   "quota",
   "rate-limited",
@@ -86,6 +87,14 @@ export const LiveVoiceReason = Schema.Literals([
   "disconnected",
 ]);
 export type LiveVoiceReason = typeof LiveVoiceReason.Type;
+export class LiveVoiceStartupError extends Schema.TaggedError<LiveVoiceStartupError>()(
+  "LiveVoiceStartupError",
+  { reason: LiveVoiceReason },
+) {
+  override get message() {
+    return "Live voice could not start.";
+  }
+}
 export const LiveVoiceCapability = Schema.Struct({
   environmentId: EnvironmentId,
   providerInstanceId: ProviderInstanceId,

@@ -54,10 +54,10 @@
     }
   ],
   "unproven": [
-    "No native end-to-end delegation frame capture; no trustworthy transcript time domain, cutoff association, reorder rules or original-user command selection. Normalized delegation always has association=unsupported-native-cutoff and MUST NOT execute. Delegation content is only a hint, not canonical task text.",
+    "Historical seed policy (superseded): no native delegation capture was available, so the seed rejected every generated delegation. Current code requires an observed exact user_bidi_turn_id, matching finalized user turn, one parent claim and normal T3 admission. Captured parent relations support this experimental adapter, not an upstream guarantee or proof of semantic faithfulness. The finalized human transcript controls conflicting derived instructions.",
     "Native transcript timestamps are not inferred from current public session.* delta events. Native turn.done is not itself delegation authority. Unknown public dialect events cannot be treated as native equivalents.",
     "Closed is synthesized by transport; session.closed is not claimed as an evidenced native event. Output item IDs are optional because parser requires only item.text.",
     "201 transport, requested alias, sideband and hangup success from user handoff do not prove audible duplex, effective model, supported voice, final transcript accuracy or general entitlement.",
-    "No retry classifier is implemented in this seed. A 90-second wait is policy, not a Broker guarantee. Two creates within 180 seconds maximum; only definitive no-session allowlisted refresh errors may qualify later, never arbitrary 503/auth/quota errors or ambiguous POST loss."
+    "Current retry policy allows only bounded, definitive no-call refresh failures: at most two creates within 180 seconds, with a 90-second minimum wait. This is UX policy, not a Broker guarantee. Arbitrary 503, auth, quota and ambiguous POST loss never authorize automatic retry."
   ]
 }

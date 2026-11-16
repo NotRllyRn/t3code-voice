@@ -5,11 +5,13 @@ import {
   LIVE_VOICE_PROTOCOL,
   LIVE_VOICE_REQUESTED_MODEL,
   LiveVoiceBinding,
+  type LiveVoiceReason,
   type ThreadId,
 } from "@t3tools/contracts";
 import { LiveConnectionError } from "@t3tools/provider-core/server/liveConnection";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Clock from "effect/Clock";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -30,6 +32,27 @@ const decodeBinding = Schema.decodeUnknownEffect(Schema.fromJsonString(LiveVoice
 });
 const encodeSelection = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const changed = () => new LiveConnectionError({ reason: "connection-changed" });
+
+// Only called after upgrade authentication, operate scope and binding validation.
+const startupFailure = Effect.fn("LiveRoute.startupFailure")(
+  function* (request: HttpServerRequest.HttpServerRequest, reason: LiveVoiceReason) {
+    const claim = yield* Effect.acquireRelease(
+      Effect.sync(() => claimVoiceUpgrade(NodeHttpServerRequest.toIncomingMessage(request).socket)),
+      (claim) => Effect.sync(claim.close),
+    );
+    const socket = boundedVoiceSocket(yield* request.upgrade, claim.wire);
+    yield* socket.reader;
+    const writer = yield* socket.writer;
+    const sessionId = SecureRandom.uuidV4Unsafe();
+    yield* writer.write(
+      encodeSelection({ type: "live.status", sessionId, phase: "error", reason }),
+    );
+    yield* writer.write(encodeSelection({ type: "live.cleanup", sessionId, result: "unknown" }));
+    return HttpServerResponse.empty();
+  },
+  Effect.scoped,
+  Effect.timeout("2 seconds"),
+);
 
 export const liveVoiceRouteLayer = Layer.unwrap(
   Effect.gen(function* () {
@@ -68,16 +91,18 @@ export const liveVoiceRouteLayer = Layer.unwrap(
         let threadId: ThreadId | undefined = "threadId" in binding ? binding.threadId : undefined;
         const thread = threadId ? yield* threads.getThreadShell(threadId) : undefined;
         if (threadId && (!thread || thread.archivedAt || thread.deletedAt))
-          return HttpServerResponse.empty({ status: 404 });
+          return yield* startupFailure(request, "connection-changed");
         const selection =
           thread?.modelSelection ?? ("draft" in binding ? binding.draft.modelSelection : undefined);
-        if (!selection) return HttpServerResponse.empty({ status: 400 });
+        if (!selection) return yield* startupFailure(request, "connection-changed");
         const provider = yield* providers.getInstance(selection.instanceId);
         if (!provider?.enabled || provider.driverKind !== "codex" || !provider.liveConnection)
-          return HttpServerResponse.empty({ status: 422 });
-        if (active.has(session.sessionId)) return HttpServerResponse.empty({ status: 409 });
+          return yield* startupFailure(request, "unsupported-provider");
+        if (active.has(session.sessionId))
+          return yield* startupFailure(request, "connection-changed");
         const resolved = yield* provider.liveConnection.resolveLiveConnection().pipe(Effect.result);
-        if (resolved._tag === "Failure") return HttpServerResponse.empty({ status: 503 });
+        if (resolved._tag === "Failure")
+          return yield* startupFailure(request, resolved.failure.reason);
         const connection = resolved.success;
         const selectionIdentity = encodeSelection(selection);
         const validateOwner = Effect.gen(function* () {

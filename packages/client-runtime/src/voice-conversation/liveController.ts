@@ -3,10 +3,12 @@ import {
   decodeLiveVoiceClientEvent,
   decodeLiveVoiceServerEvent,
   LIVE_VOICE_CONNECT_BUDGET_MS,
+  LIVE_VOICE_CREATE_TIMEOUT_MS,
   LIVE_VOICE_HEARTBEAT_INTERVAL_MS,
   LIVE_VOICE_MAX_CREATE_ATTEMPTS,
   LIVE_VOICE_MAX_FRAME_BYTES,
   LIVE_VOICE_STOP_TIMEOUT_MS,
+  LiveVoiceStartupError,
   type LiveVoiceCleanupResult,
   type LiveVoiceClientEvent,
   type LiveVoicePhase,
@@ -14,8 +16,11 @@ import {
   type LiveVoiceServerEvent,
   type ThreadId,
 } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import type { VoiceSocket } from "./media.ts";
 import type { LiveMedia, LiveMediaFactory } from "./liveMedia.ts";
+
+const isStartupError = Schema.is(LiveVoiceStartupError);
 
 export interface LiveVoiceState {
   phase: LiveVoicePhase;
@@ -35,7 +40,9 @@ export const INITIAL_LIVE_VOICE_STATE: LiveVoiceState = {
 };
 
 const reasons: Record<LiveVoiceReason, string> = {
-  "auth-required": "Sign in to the selected voice provider, then try again.",
+  "environment-auth-required": "Reconnect to this T3 environment, then start voice again.",
+  "auth-required":
+    "Check the selected Codex provider’s credential in this environment, then try again.",
   forbidden: "Live voice is not allowed by this connection or provider.",
   quota: "The selected voice provider has no available quota.",
   "rate-limited": "The selected voice provider is rate limited. Try again later.",
@@ -194,7 +201,11 @@ export class LiveVoiceController {
       this.finish(session, "unknown");
       return;
     }
-    const deadline = setTimeout(() => this.finish(session, "unknown"), LIVE_VOICE_STOP_TIMEOUT_MS);
+    // A server answer settles create, even while the browser is still applying that answer.
+    const wait =
+      LIVE_VOICE_STOP_TIMEOUT_MS +
+      (session.attempt.answerPending ? 0 : LIVE_VOICE_CREATE_TIMEOUT_MS);
+    const deadline = setTimeout(() => this.finish(session, "unknown"), wait);
     session.finalizers.push(() => clearTimeout(deadline));
   }
   async start() {
@@ -249,8 +260,9 @@ export class LiveVoiceController {
         }
       }, LIVE_VOICE_HEARTBEAT_INTERVAL_MS);
       session.finalizers.push(() => clearInterval(heartbeat));
-    } catch {
-      if (this.alive(session)) this.end("auth-required");
+    } catch (error) {
+      if (this.alive(session))
+        this.end(isStartupError(error) ? error.reason : "temporarily-unavailable");
     }
   }
   private receive(session: Session, event: LiveVoiceServerEvent) {
