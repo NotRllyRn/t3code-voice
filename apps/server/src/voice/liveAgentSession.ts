@@ -1,6 +1,7 @@
 import {
   CommandId,
   MessageId,
+  latestProviderTurnForAttempt,
   type LiveVoiceBinding,
   type LiveVoiceServerEvent,
   type RunId,
@@ -519,7 +520,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       const generation = narrationGeneration;
       const records = yield* threads.getThreadRecords(
         threadId,
-        ["runs", "runtimeRequests", "messages", "turnItems"],
+        ["runs", "runtimeRequests", "messages", "turnItems", "attempts", "providerTurns"],
         {
           runtimeRequestStatuses: ["pending"],
           messageRunIds: [current.runId],
@@ -528,7 +529,9 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
           turnItemTypes: ["assistant_message"],
         },
       );
-      const run = records.runs.find((candidate) => candidate.id === current.runId);
+      const run = records.runs.find(
+        (candidate) => candidate.id === current.runId && candidate.threadId === threadId,
+      );
       if (!run) continue;
       if (records.runtimeRequests.length) {
         if (current.status !== "waiting") {
@@ -551,14 +554,43 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
           item.type === "assistant_message" ? [[item.messageId, item] as const] : [],
         ),
       );
-      const messages = records.messages.filter(
-        (message) =>
-          message.runId === run.id &&
-          message.role === "assistant" &&
-          (message.nodeId === null || message.nodeId === run.rootNodeId) &&
-          message.voice?.textKind !== "generated_voice_reply" &&
-          !message.notification,
+      const attempt = records.attempts.find(
+        (candidate) => candidate.id === run.activeAttemptId && candidate.runId === run.id,
       );
+      const providerTurn = latestProviderTurnForAttempt(
+        records.providerTurns.filter(
+          (turn) =>
+            turn.nodeId === run.rootNodeId && turn.providerThreadId === attempt?.providerThreadId,
+        ),
+        run.activeAttemptId,
+      );
+      const messages = records.messages.filter((message) => {
+        if (
+          message.threadId !== threadId ||
+          message.runId !== run.id ||
+          message.role !== "assistant" ||
+          message.voice?.textKind === "generated_voice_reply" ||
+          message.notification
+        )
+          return false;
+        const item = phases.get(message.id);
+        if (
+          item &&
+          (item.threadId !== threadId || item.runId !== run.id || item.nodeId !== message.nodeId)
+        )
+          return false;
+        // Provider messages own item nodes; their typed turn joins them to the root agent's active attempt.
+        if (item?.providerTurnId != null)
+          return (
+            attempt?.rootNodeId === run.rootNodeId &&
+            attempt?.providerInstanceId === run.providerInstanceId &&
+            providerTurn !== undefined &&
+            item.providerTurnId === providerTurn.id &&
+            item.providerThreadId === providerTurn.providerThreadId &&
+            item.parentItemId === null
+          );
+        return message.nodeId === null || message.nodeId === run.rootNodeId;
+      });
       if (terminal.has(run.status)) {
         const explicit = messages.filter(
           (message) => phases.get(message.id)?.phase === "final_answer",

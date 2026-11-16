@@ -1,0 +1,112 @@
+{
+  "run": {
+    "voiceHistoryCutoffOrdinal": 2,
+    "id": "run:thread:captured-result-thread:ordinal:1",
+    "threadId": "captured-result-thread",
+    "ordinal": 1,
+    "providerInstanceId": "codex",
+    "modelSelection": {
+      "instanceId": "codex",
+      "model": "gpt-6.1-sol"
+    },
+    "providerThreadId": "provider-thread:provider:codex:native-thread:pending%3Arun%3Athread%3Acaptured-result-thread%3Aordinal%3A1",
+    "userMessageId": "live_instruction_captured-session_captured-delegation",
+    "rootNodeId": "node:run:run%3Athread%3Acaptured-result-thread%3Aordinal%3A1:root",
+    "activeAttemptId": "run-attempt:run:run%3Athread%3Acaptured-result-thread%3Aordinal%3A1:attempt:1",
+    "status": "completed",
+    "queuePosition": null,
+    "requestedAt": "2026-11-16T13:52:33.177Z",
+    "startedAt": "2026-11-16T13:52:34.654Z",
+    "completedAt": "2026-11-16T13:53:05.765Z",
+    "checkpointId": "checkpoint:scope:checkpoint-scope%3Athread%3Acaptured-result-thread%3Aname%3Aroot:name:1",
+    "contextHandoffId": null
+  },
+  "finalMessage": {
+    "createdBy": "agent",
+    "creationSource": "provider",
+    "id": "message:provider:codex:native-item:captured-final",
+    "threadId": "captured-result-thread",
+    "runId": "run:thread:captured-result-thread:ordinal:1",
+    "nodeId": "node:provider:codex:native-item:captured-final",
+    "role": "assistant",
+    "text": "The fictional marker is **LILAC-204**. The caveat is: **“Sample data only.”**",
+    "attachments": [],
+    "streaming": false,
+    "createdAt": "2026-11-16T13:53:05.164Z",
+    "updatedAt": "2026-11-16T13:53:05.597Z"
+  },
+  "typedFinal": {
+    "id": "turn-item:provider:codex:native-item:captured-final",
+    "threadId": "captured-result-thread",
+    "runId": "run:thread:captured-result-thread:ordinal:1",
+    "nodeId": "node:provider:codex:native-item:captured-final",
+    "providerThreadId": "provider-thread:provider:codex:native-thread:pending%3Arun%3Athread%3Acaptured-result-thread%3Aordinal%3A1",
+    "providerTurnId": "provider-turn:provider:codex:native-turn:captured-native-turn",
+    "nativeItemRef": {
+      "driver": "codex",
+      "nativeId": "captured-final",
+      "strength": "strong"
+    },
+    "parentItemId": null,
+    "ordinal": 1000006,
+    "status": "completed",
+    "title": null,
+    "startedAt": "2026-11-16T13:53:05.164Z",
+    "completedAt": "2026-11-16T13:53:05.597Z",
+    "updatedAt": "2026-11-16T13:53:05.597Z",
+    "type": "assistant_message",
+    "phase": "final_answer",
+    "messageId": "message:provider:codex:native-item:captured-final",
+    "text": "The fictional marker is **LILAC-204**. The caveat is: **“Sample data only.”**",
+    "streaming": false
+  },
+  "providerTurn": {
+    "id": "provider-turn:provider:codex:native-turn:captured-native-turn",
+    "providerThreadId": "provider-thread:provider:codex:native-thread:pending%3Arun%3Athread%3Acaptured-result-thread%3Aordinal%3A1",
+    "nodeId": "node:run:run%3Athread%3Acaptured-result-thread%3Aordinal%3A1:root",
+    "runAttemptId": "run-attempt:run:run%3Athread%3Acaptured-result-thread%3Aordinal%3A1:attempt:1",
+    "nativeTurnRef": {
+      "driver": "codex",
+      "nativeId": "captured-native-turn",
+      "strength": "strong"
+    },
+    "ordinal": 1,
+    "status": "completed",
+    "startedAt": "2026-11-16T13:52:35.177Z",
+    "completedAt": "2026-11-16T13:53:05.000Z",
+    "tokenUsage": {
+      "usedTokens": 12447,
+      "maxTokens": 258400,
+      "inputTokens": 12411,
+      "cachedInputTokens": 12160,
+      "outputTokens": 36,
+      "reasoningOutputTokens": 0,
+      "updatedAt": "2026-11-16T13:53:05.614Z"
+    },
+    "turnTokenUsage": {
+      "usageScope": "main_agent",
+      "cachedInputTokens": 12160,
+      "cacheCreationTokens": 0,
+      "reasoningTokens": 0,
+      "hasSubagents": false,
+      "models": ["gpt-6.1-sol"],
+      "usageStatus": "complete",
+      "inputTokens": 24648,
+      "outputTokens": 85
+    }
+  },
+  "attempt": {
+    "id": "run-attempt:run:run%3Athread%3Acaptured-result-thread%3Aordinal%3A1:attempt:1",
+    "nativeThreadId": "captured-native-thread",
+    "runId": "run:thread:captured-result-thread:ordinal:1",
+    "attemptOrdinal": 1,
+    "rootNodeId": "node:run:run%3Athread%3Acaptured-result-thread%3Aordinal%3A1:root",
+    "providerInstanceId": "codex",
+    "providerThreadId": "provider-thread:provider:codex:native-thread:pending%3Arun%3Athread%3Acaptured-result-thread%3Aordinal%3A1",
+    "providerTurnId": null,
+    "reason": "initial",
+    "status": "completed",
+    "startedAt": "2026-11-16T13:52:34.654Z",
+    "completedAt": "2026-11-16T13:53:05.701Z"
+  }
+}

@@ -1,6 +1,15 @@
 import { expect, it } from "@effect/vitest";
 import {
   CommandId,
+  EventId,
+  OrchestrationV2RunJson,
+  OrchestrationV2RunAttemptJson,
+  OrchestrationV2ProviderTurnJson,
+  OrchestrationV2ConversationMessageJson,
+  OrchestrationV2TurnItemJson,
+  ProviderTurnId,
+  RunAttemptId,
+  ProviderThreadId,
   MessageId,
   NodeId,
   RuntimeRequestId,
@@ -19,6 +28,8 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
@@ -28,6 +39,17 @@ import { makeLiveAgentSession } from "./liveAgentSession.ts";
 import { decodeNativeLiveEvent, type NativeLiveAppend } from "./liveProtocol.ts";
 import parentCapture from "./fixtures/live-native/parent-association.json" with { type: "json" };
 import stallCapture from "./fixtures/live-native/handoff-stall.json" with { type: "json" };
+import resultCapture from "./fixtures/live-native/result-association.json" with { type: "json" };
+
+const decodeCapturedResult = Schema.decodeUnknownSync(
+  Schema.Struct({
+    run: OrchestrationV2RunJson,
+    attempt: OrchestrationV2RunAttemptJson,
+    providerTurn: OrchestrationV2ProviderTurnJson,
+    typedFinal: OrchestrationV2TurnItemJson,
+    finalMessage: OrchestrationV2ConversationMessageJson,
+  }),
+);
 
 const services = Layer.mergeAll(
   VoiceFixture.layer,
@@ -914,7 +936,7 @@ it.effect(
                     id: TurnItemId.make(`commentary-item-${index}`),
                     threadId,
                     runId: run.id,
-                    nodeId: null,
+                    nodeId: run.rootNodeId,
                     ordinal: index,
                     type: "assistant_message",
                     status: "completed",
@@ -1462,4 +1484,141 @@ it.effect.each(["replay", "stop"] as const)(
           );
       }),
     ).pipe(Effect.provide(services)),
+);
+
+// R8 retained projection rows; identities and answer text are normalized in the fixture.
+it.effect.each([
+  "root result",
+  "other thread",
+  "other run",
+  "generated voice",
+  "stale attempt",
+  "child turn",
+  "unrelated node",
+  "mismatched item thread",
+  "mismatched item run",
+  "child item",
+  "wrong provider thread",
+  "superseded turn",
+])("captured canonical result association: %s", (scenario) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const {
+        run,
+        attempt,
+        providerTurn: turn,
+        typedFinal: item,
+        finalMessage: message,
+      } = decodeCapturedResult(resultCapture);
+      const threadId = run.threadId;
+      yield* VoiceFixture.create(threadId);
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const base = { id: EventId.make("captured-result"), threadId, occurredAt: message.updatedAt };
+      yield* store.apply({ ...base, type: "run.updated", payload: { ...run, status: "running" } });
+      yield* store.apply({ ...base, type: "run-attempt.updated", payload: attempt });
+      yield* store.apply({
+        ...base,
+        type: "provider-turn.updated",
+        payload: {
+          ...turn,
+          ...(scenario === "stale attempt"
+            ? { runAttemptId: RunAttemptId.make("stale-attempt") }
+            : {}),
+          ...(scenario === "child turn" ? { nodeId: NodeId.make("child-root") } : {}),
+          ...(scenario === "wrong provider thread"
+            ? { providerThreadId: ProviderThreadId.make("parallel-provider-thread") }
+            : {}),
+        },
+      });
+      if (scenario === "superseded turn")
+        yield* store.apply({
+          ...base,
+          type: "provider-turn.updated",
+          payload: { ...turn, id: ProviderTurnId.make("newer-turn"), ordinal: turn.ordinal + 1 },
+        });
+      const appends: NativeLiveAppend[] = [];
+      const agent = yield* makeLiveAgentSession({
+        binding: { threadId },
+        sessionId: "captured-result-session",
+        onBound: () => {},
+        send: () => Effect.void,
+        append: (event) =>
+          Effect.sync(() => {
+            appends.push(event);
+          }),
+      });
+      yield* agent.seed;
+      expect(appends.every((event) => !event.text.includes("actualAgentResult"))).toBe(true);
+      yield* store.apply({
+        ...base,
+        type: "message.updated",
+        payload: {
+          ...message,
+          ...(scenario === "other thread" ? { threadId: ThreadId.make("other-thread") } : {}),
+          ...(scenario === "other run" ? { runId: RunId.make("other-run") } : {}),
+          ...(scenario === "unrelated node" ? { nodeId: NodeId.make("unrelated-node") } : {}),
+          ...(scenario === "generated voice"
+            ? { voice: { ...VoiceFixture.voice, textKind: "generated_voice_reply" as const } }
+            : {}),
+        },
+      });
+      yield* store.apply({
+        ...base,
+        type: "turn-item.updated",
+        payload: {
+          ...item,
+          ...(scenario === "mismatched item thread"
+            ? { threadId: ThreadId.make("other-thread") }
+            : {}),
+          ...(scenario === "mismatched item run" ? { runId: RunId.make("other-run") } : {}),
+          ...(scenario === "child item" ? { parentItemId: TurnItemId.make("parent-item") } : {}),
+        },
+      });
+      yield* store.apply({ ...base, type: "run.updated", payload: run });
+      yield* agent.poll;
+      yield* agent.poll;
+      const results = appends.filter((event) => event.text.includes("actualAgentResult"));
+      if (scenario === "root result") {
+        expect(results).toHaveLength(1);
+        expect(JSON.parse(results[0]!.text)).toMatchObject({
+          runId: run.id,
+          status: "completed",
+          actualAgentResult: message.text,
+          sourceMessageIds: [message.id],
+        });
+        yield* agent.receive({
+          type: "turn_done",
+          role: "assistant",
+          turnId: "narrated-result",
+          text: message.text,
+        });
+        yield* agent.receive({
+          type: "delegation",
+          delegationId: "cyclic-refeed",
+          userTurnId: "narrated-result",
+          instructions: message.text,
+          provenance: "native_live_delegation",
+        });
+        yield* agent.poll;
+        expect((yield* threads.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(1);
+        expect(appends.filter((event) => event.text.includes("actualAgentResult"))).toHaveLength(1);
+        const replacement = yield* makeLiveAgentSession({
+          binding: { threadId },
+          sessionId: "replacement-result-session",
+          onBound: () => {},
+          send: () => Effect.void,
+          append: (event) =>
+            Effect.sync(() => {
+              appends.push(event);
+            }),
+        });
+        yield* replacement.seed;
+        yield* replacement.poll;
+        expect(appends.filter((event) => event.text.includes("actualAgentResult"))).toHaveLength(1);
+      } else {
+        expect(results).toHaveLength(0);
+      }
+    }),
+  ).pipe(Effect.provide(services)),
 );
