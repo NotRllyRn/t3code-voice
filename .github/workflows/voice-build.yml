@@ -1,0 +1,188 @@
+name: Voice fork build (manual, experimental)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full merged source SHA (stable branch ancestor)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: voice-build-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    if: github.repository == 'NotRllyRn/t3code-voice' && vars.VOICE_BUILD_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    environment: voice-build
+    timeout-minutes: 90
+    steps:
+      - name: Checkout exact source
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git init .
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git fetch --no-tags origin "$SOURCE_SHA" '+refs/heads/feature/codex-voice-stable:refs/remotes/origin/feature/codex-voice-stable'
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -c checkout.workers=0 checkout --detach "$SOURCE_SHA"
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+      - name: Verify merged source and release version
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == 'NotRllyRn/t3code-voice' && "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          git fetch --no-tags origin '+refs/heads/feature/codex-voice-stable:refs/remotes/origin/feature/codex-voice-stable'
+          git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/feature/codex-voice-stable
+          [[ -z "$(git status --porcelain --untracked-files=no)" ]]
+          node --input-type=module -e '
+            import { FORK_RELEASE } from "./packages/shared/src/forkIdentity.ts";
+            import { readFileSync } from "node:fs";
+            const v = `${FORK_RELEASE.upstream.tag.slice(1)}-voice.${FORK_RELEASE.voiceRevision}`;
+            for (const p of ["apps/server", "apps/desktop", "apps/web", "packages/contracts"])
+              if (JSON.parse(readFileSync(`${p}/package.json`, "utf8")).version !== v) throw Error(`${p} version mismatch`);
+            console.log(`version=${v}`);
+            ' >> "$GITHUB_OUTPUT"
+        id: source
+      - uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=t3... --filter=@t3tools/web... --filter=@t3tools/scripts...
+          save-pnpm-store: false
+      - name: Build server and web client fresh
+        env:
+          T3CODE_TELEMETRY_CHANNEL: dev
+        run: vp run --filter t3 build
+      - name: Build Linux native resource monitor and CLI executable
+        run: |
+          cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-unknown-linux-gnu
+          node apps/server/scripts/cli.ts build-exe --verbose
+      - name: Package and smoke-test Linux x64 archive
+        shell: bash
+        env:
+          VERSION: ${{ steps.source.outputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          command -v patchelf || { sudo apt-get update && sudo apt-get install -y patchelf; }
+          mkdir -p "$RUNNER_TEMP/cli-resource-monitor/linux-x64" "$RUNNER_TEMP/voice-assets"
+          cp native/resource-monitor/target/x86_64-unknown-linux-gnu/release/t3-resource-monitor "$RUNNER_TEMP/cli-resource-monitor/linux-x64/"
+          node scripts/build-cli-archive.ts --platform linux --arch x64 --version "$VERSION" --resource-monitor-dir "$RUNNER_TEMP/cli-resource-monitor" --output-dir "$RUNNER_TEMP/voice-assets"
+          archive="$RUNNER_TEMP/voice-assets/t3-$VERSION-linux-x64.tar.gz"
+          test -s "$archive"
+          tar -tzf "$archive" | grep -Fx "t3-$VERSION-linux-x64/t3"
+          node scripts/smoke-cli-archive.ts --archive "$archive" --expect-version "$VERSION"
+          VOICE_BUILD_SMOKE=archive-layout,cli-version node scripts/voice-build-manifest.ts "$GITHUB_REPOSITORY" "$SOURCE_SHA" "$VERSION" linux-x64 "$RUNNER_TEMP/voice-assets/voice-release.json" "$archive"
+          (cd "$RUNNER_TEMP/voice-assets" && sha256sum -c SHA256SUMS)
+          node scripts/voice-release-notes.ts "$VERSION" "$SOURCE_SHA" "$RUNNER_TEMP/voice-assets/RELEASE_NOTES.md"
+      - name: Retain Linux build for manual inspection (not a release)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: voice-${{ steps.source.outputs.version }}-${{ inputs.source_sha }}-linux-x64
+          path: ${{ runner.temp }}/voice-assets/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  mac:
+    if: github.repository == 'NotRllyRn/t3code-voice' && vars.VOICE_BUILD_ENABLED == 'true'
+    runs-on: macos-15
+    environment: voice-build
+    timeout-minutes: 120
+    steps:
+      - name: Checkout exact source
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git init .
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git fetch --no-tags origin "$SOURCE_SHA" '+refs/heads/feature/codex-voice-stable:refs/remotes/origin/feature/codex-voice-stable'
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -c checkout.workers=0 checkout --detach "$SOURCE_SHA"
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+      - name: Verify merged source and release version
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == 'NotRllyRn/t3code-voice' && "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          git fetch --no-tags origin '+refs/heads/feature/codex-voice-stable:refs/remotes/origin/feature/codex-voice-stable'
+          git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/feature/codex-voice-stable
+          [[ -z "$(git status --porcelain --untracked-files=no)" ]]
+          node --input-type=module -e '
+            import { FORK_RELEASE } from "./packages/shared/src/forkIdentity.ts";
+            import { readFileSync } from "node:fs";
+            const v = `${FORK_RELEASE.upstream.tag.slice(1)}-voice.${FORK_RELEASE.voiceRevision}`;
+            for (const p of ["apps/server", "apps/desktop", "apps/web", "packages/contracts"])
+              if (JSON.parse(readFileSync(`${p}/package.json`, "utf8")).version !== v) throw Error(`${p} version mismatch`);
+            console.log(`version=${v}`);
+            ' >> "$GITHUB_OUTPUT"
+        id: source
+      - uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+          save-pnpm-store: false
+      - name: Build native resource monitor
+        run: cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target aarch64-apple-darwin
+      - name: Package fresh experimental ad-hoc macOS arm64 desktop
+        env:
+          VERSION: ${{ steps.source.outputs.version }}
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: "true"
+          T3CODE_DESKTOP_OUTPUT_DIR: ${{ runner.temp }}/voice-assets
+          T3CODE_TELEMETRY_CHANNEL: dev
+        run: vp run dist:desktop:artifact --platform mac --target dmg --arch arm64 --build-version "$VERSION" --verbose
+      - name: Launch and inspect final macOS archives
+        shell: bash
+        env:
+          VERSION: ${{ steps.source.outputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          assets="$RUNNER_TEMP/voice-assets"
+          dmg="$assets/T3-Code-Voice-$VERSION-arm64.dmg"
+          zip="$assets/T3-Code-Voice-$VERSION-arm64.zip"
+          test -s "$dmg" && test -s "$zip"
+          unzip -t "$zip"
+          mount="$RUNNER_TEMP/voice-dmg"
+          mkdir -p "$mount"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$dmg"
+          trap 'hdiutil detach "$mount" -force >/dev/null || true' EXIT
+          app=("$mount"/*.app)
+          test "${#app[@]}" -eq 1 && test -d "${app[0]}"
+          executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${app[0]}/Contents/Info.plist")
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${app[0]}/Contents/Info.plist")" = 'io.github.notrllyrn.t3codevoice'
+          file "${app[0]}/Contents/MacOS/$executable" | grep -q arm64
+          node scripts/smoke-desktop-app.ts --artifacts-dir "$RUNNER_TEMP/voice-launch" --executable "${app[0]}/Contents/MacOS/$executable"
+          VOICE_BUILD_SMOKE=zip-integrity,dmg-arch-identity,packaged-launch node scripts/voice-build-manifest.ts "$GITHUB_REPOSITORY" "$SOURCE_SHA" "$VERSION" mac-arm64 "$assets/voice-release.json" "$dmg" "$zip"
+          (cd "$assets" && shasum -a 256 -c SHA256SUMS)
+          node scripts/voice-release-notes.ts "$VERSION" "$SOURCE_SHA" "$assets/RELEASE_NOTES.md"
+      - name: Retain macOS build for manual inspection (not notarized)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: voice-${{ steps.source.outputs.version }}-${{ inputs.source_sha }}-mac-arm64
+          path: ${{ runner.temp }}/voice-assets/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

@@ -8,6 +8,7 @@ import * as NodePath from "node:path";
 import * as NodeTimersPromises from "node:timers/promises";
 import * as NodeUtil from "node:util";
 import { _electron, type ElectronApplication } from "playwright-core";
+import { FORK_DESKTOP } from "../packages/shared/src/forkIdentity.ts";
 
 // A snapshot from an older build on purpose: the packaged server must migrate it forward, as it
 // does for every upgrading user. It holds one project and two threads, nothing else.
@@ -50,6 +51,7 @@ try {
       XDG_CONFIG_HOME: NodePath.join(home, ".config"),
       XDG_DATA_HOME: NodePath.join(home, ".local/share"),
       T3CODE_HOME: t3Home,
+      [FORK_DESKTOP.homeEnvironmentVariable]: t3Home,
       T3CODE_TELEMETRY_ENABLED: "false",
       T3CODE_DISABLE_AUTO_UPDATE: "true",
     },
