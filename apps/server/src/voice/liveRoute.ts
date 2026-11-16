@@ -1,0 +1,156 @@
+import * as NodeHttpServerRequest from "@effect/platform-node/NodeHttpServerRequest";
+import {
+  AuthOrchestrationOperateScope,
+  LIVE_VOICE_PATH,
+  LIVE_VOICE_PROTOCOL,
+  LIVE_VOICE_REQUESTED_MODEL,
+  LiveVoiceBinding,
+  type ThreadId,
+} from "@t3tools/contracts";
+import { LiveConnectionError } from "@t3tools/provider-core/server/liveConnection";
+import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
+import * as Clock from "effect/Clock";
+import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
+import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
+import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
+import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
+import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
+import { claimVoiceUpgrade, boundedVoiceSocket } from "./transport.ts";
+import { VoiceOwners } from "./owner.ts";
+import { runLiveSession } from "./liveSession.ts";
+import { liveNetworkLayer } from "./liveTransport.ts";
+
+const decodeBinding = Schema.decodeUnknownEffect(Schema.fromJsonString(LiveVoiceBinding), {
+  onExcessProperty: "error",
+});
+const encodeSelection = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const changed = () => new LiveConnectionError({ reason: "connection-changed" });
+
+export const liveVoiceRouteLayer = Layer.unwrap(
+  Effect.gen(function* () {
+    const auth = yield* EnvironmentAuth.EnvironmentAuth;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const providers = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
+    const identity = yield* ServerEnvironment.ServerEnvironmentIdentity;
+    const environmentId = yield* identity.getEnvironmentId;
+    const active = yield* VoiceOwners;
+    return HttpRouter.add(
+      "GET",
+      LIVE_VOICE_PATH,
+      Effect.gen(function* () {
+        const request = yield* HttpServerRequest.HttpServerRequest;
+        const authenticated = yield* auth
+          .authenticateWebSocketUpgrade(request, "media")
+          .pipe(Effect.result);
+        if (authenticated._tag === "Failure") return HttpServerResponse.empty({ status: 401 });
+        const session = authenticated.success;
+        if (!session.scopes.includes(AuthOrchestrationOperateScope))
+          return HttpServerResponse.empty({ status: 403 });
+        const query = new URL(request.url, "http://localhost").searchParams;
+        if (
+          query.getAll("threadId").length + query.getAll("draft").length !== 1 ||
+          [...query.keys()].some((key) => !["threadId", "draft", "wsTicket"].includes(key))
+        )
+          return HttpServerResponse.empty({ status: 400 });
+        const rawBinding = query.has("threadId")
+          ? encodeSelection({ threadId: query.get("threadId") })
+          : `{"draft":${query.get("draft")}}`;
+        const decoded = yield* decodeBinding(rawBinding).pipe(Effect.result);
+        if (decoded._tag === "Failure") return HttpServerResponse.empty({ status: 400 });
+        const binding = decoded.success;
+        let threadId: ThreadId | undefined = "threadId" in binding ? binding.threadId : undefined;
+        const thread = threadId ? yield* threads.getThreadShell(threadId) : undefined;
+        if (threadId && (!thread || thread.archivedAt || thread.deletedAt))
+          return HttpServerResponse.empty({ status: 404 });
+        const selection =
+          thread?.modelSelection ?? ("draft" in binding ? binding.draft.modelSelection : undefined);
+        if (!selection) return HttpServerResponse.empty({ status: 400 });
+        const provider = yield* providers.getInstance(selection.instanceId);
+        if (!provider?.enabled || provider.driverKind !== "codex" || !provider.liveConnection)
+          return HttpServerResponse.empty({ status: 422 });
+        if (active.has(session.sessionId)) return HttpServerResponse.empty({ status: 409 });
+        const resolved = yield* provider.liveConnection.resolveLiveConnection().pipe(Effect.result);
+        if (resolved._tag === "Failure") return HttpServerResponse.empty({ status: 503 });
+        const connection = resolved.success;
+        const selectionIdentity = encodeSelection(selection);
+        const validateOwner = Effect.gen(function* () {
+          // Upgrade tickets are one-shot; re-check their bound session, never consume the ticket again.
+          const sessions = yield* auth.listSessions();
+          const authorized = sessions.find(
+            (candidate) => candidate.sessionId === session.sessionId,
+          );
+          if (
+            !authorized ||
+            !authorized.scopes.includes(AuthOrchestrationOperateScope) ||
+            DateTime.toEpochMillis(authorized.expiresAt) <= (yield* Clock.currentTimeMillis)
+          )
+            return yield* changed();
+          const current = threadId ? yield* threads.getThreadShell(threadId) : undefined;
+          if (
+            threadId &&
+            (!current ||
+              current.archivedAt ||
+              current.deletedAt ||
+              encodeSelection(current.modelSelection) !== selectionIdentity)
+          )
+            return yield* changed();
+          const instance = yield* providers.getInstance(selection.instanceId);
+          if (!instance?.enabled || instance !== provider || !instance.liveConnection)
+            return yield* changed();
+          const next = yield* instance.liveConnection.resolveLiveConnection();
+          if (next.revision !== connection.revision) return yield* changed();
+        }).pipe(Effect.mapError(changed));
+        return yield* Effect.gen(function* () {
+          let claimed = false;
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              if (claimed) active.delete(session.sessionId);
+            }),
+          );
+          if (active.has(session.sessionId)) return HttpServerResponse.empty({ status: 409 });
+          active.add(session.sessionId);
+          claimed = true;
+          const claim = yield* Effect.acquireRelease(
+            Effect.sync(() =>
+              claimVoiceUpgrade(NodeHttpServerRequest.toIncomingMessage(request).socket),
+            ),
+            (claim) => Effect.sync(claim.close),
+          );
+          const socket = boundedVoiceSocket(yield* request.upgrade, claim.wire);
+          yield* runLiveSession({
+            socket,
+            binding,
+            connection,
+            validateOwner,
+            capability: {
+              environmentId,
+              providerInstanceId: selection.instanceId,
+              protocol: LIVE_VOICE_PROTOCOL,
+              requestedModel: LIVE_VOICE_REQUESTED_MODEL,
+              effectiveModel: null,
+            },
+            onBound: (id) => {
+              threadId = id;
+            },
+          }).pipe(
+            Effect.provideService(ThreadManagement.ThreadManagementService, threads),
+            Effect.provideService(ThreadLaunch.ThreadLaunchService, launches),
+            Effect.provideService(ManagedProjectFolders.ManagedProjectFolders, folders),
+            Effect.provide(liveNetworkLayer),
+            Effect.catch(() =>
+              Effect.logWarning("Live voice session ended", { reason: "disconnected" }),
+            ),
+          );
+          return HttpServerResponse.empty();
+        }).pipe(Effect.scoped);
+      }),
+    );
+  }),
+);

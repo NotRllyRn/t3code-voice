@@ -47,6 +47,7 @@ import * as CloudSpeech from "./speech/CloudSpeech.ts";
 import { speechHttpApiLayer } from "./speech/http.ts";
 import { speechStreamRouteLayer } from "./speech/stream.ts";
 import { realtimeVoiceRouteLayer } from "./voice/route.ts";
+import { liveVoiceRouteLayer } from "./voice/liveRoute.ts";
 import { VoiceWebSocket } from "./voice/transport.ts";
 import * as PullRequestProviderRegistry from "./pullRequest/PullRequestProviderRegistry.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
@@ -804,6 +805,7 @@ const layerMakeRoutes = Layer.mergeAll(
     Ws.layer,
     speechStreamRouteLayer,
     realtimeVoiceRouteLayer,
+    liveVoiceRouteLayer,
   ),
   McpHttpServer.layer.pipe(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),

@@ -28,8 +28,8 @@ export type NativeLiveEvent =
   | {
       readonly type: "delegation";
       readonly delegationId: string;
-      readonly transcriptHint: string;
-      readonly association: "unsupported-native-cutoff";
+      readonly instructions: string;
+      readonly provenance: "native_live_delegation";
     }
   | { readonly type: "error"; readonly reason: LiveVoiceReason }
   // Synthesized by the owning transport, not an invented upstream session.closed event.
@@ -127,8 +127,8 @@ export function decodeNativeLiveEvent(frame: string): NativeLiveEvent | null {
         if (content.type !== "input_text") throw invalid();
         return text(content.text, MAX_TRANSCRIPT_BYTES);
       });
-      const transcriptHint = text(parts.join(""), MAX_TRANSCRIPT_BYTES);
-      if (!transcriptHint.trim()) throw invalid();
+      const instructions = text(parts.join(""), MAX_TRANSCRIPT_BYTES);
+      if (!instructions.trim()) throw invalid();
       // Pinned parser discards offset_ms; its test proves presence, not association semantics.
       if (
         event.offset_ms !== undefined &&
@@ -138,8 +138,8 @@ export function decodeNativeLiveEvent(frame: string): NativeLiveEvent | null {
       return {
         type: "delegation",
         delegationId: id(item.id),
-        transcriptHint,
-        association: "unsupported-native-cutoff",
+        instructions,
+        provenance: "native_live_delegation",
       };
     }
     case "error":

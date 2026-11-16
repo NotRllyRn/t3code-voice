@@ -29,6 +29,7 @@ import { encodeVoiceFrame, relayVoiceSockets, VoiceRelayError } from "./relay.ts
 import { makeVoiceAgentSession, VoiceDraft } from "./agentSession.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
+import { VoiceOwners } from "./owner.ts";
 
 const decodeReference = Schema.decodeUnknownEffect(Schema.fromJsonString(SecretReference));
 const decodeThreadId = Schema.decodeUnknownEffect(ThreadId);
@@ -122,7 +123,7 @@ export const realtimeVoiceRouteLayer = Layer.unwrap(
     const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
     const providers = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
     // One socket per authenticated app session, not one per tab or thread.
-    const active = new Set<string>();
+    const active = yield* VoiceOwners;
     return HttpRouter.add(
       "GET",
       REALTIME_VOICE_PATH,

@@ -47,13 +47,13 @@ describe("pinned native Live wire", () => {
     expect(decode({ type: "session.closed" })).toBeNull();
   });
 
-  it("preserves delegation identity but blocks unsupported original-transcript association", () => {
+  it("preserves native delegation identity with explicit derived provenance, not a transcript cutoff", () => {
     for (const event of [fixtures.delegation, { ...fixtures.delegation, offset_ms: undefined }]) {
       expect(decode(event)).toEqual({
         type: "delegation",
         delegationId: "delegation-fictional",
-        transcriptHint: "Please rename the sample.",
-        association: "unsupported-native-cutoff",
+        instructions: "Please rename the sample.",
+        provenance: "native_live_delegation",
       });
     }
     expect(
@@ -67,7 +67,7 @@ describe("pinned native Live wire", () => {
           ],
         },
       }),
-    ).toMatchObject({ transcriptHint: "One hint.", association: "unsupported-native-cutoff" });
+    ).toMatchObject({ instructions: "One hint.", provenance: "native_live_delegation" });
   });
 
   it.each([

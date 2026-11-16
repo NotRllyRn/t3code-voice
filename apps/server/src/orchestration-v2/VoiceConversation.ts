@@ -68,7 +68,8 @@ export const sendRecordedVoiceMessage = Effect.fn("VoiceConversation.sendRecorde
     if (
       message?.role !== "user" ||
       message.voice?.textKind !== "final_user_transcript" ||
-      message.voice.sessionId !== input.sessionId
+      message.voice.sessionId !== input.sessionId ||
+      message.voice.transcriptFinality === "application_frozen"
     ) {
       return yield* new OrchestratorDispatchError({
         commandId,
