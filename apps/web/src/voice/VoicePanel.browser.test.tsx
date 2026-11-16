@@ -189,6 +189,7 @@ function setup(acquire?: (value: LiveMedia) => Promise<LiveMedia>) {
       answer: vi.fn(async () => {}),
       microphone: vi.fn(),
       playback: vi.fn(async () => {}),
+      stopAudio: vi.fn(),
       dispose: vi.fn(),
     };
     attempts.push({ value, options });
@@ -230,6 +231,9 @@ function setup(acquire?: (value: LiveMedia) => Promise<LiveMedia>) {
       );
     },
     [Symbol.dispose]() {
+      sockets.forEach((socket) =>
+        socket.event({ type: "live.cleanup", sessionId: "session_1", result: "acknowledged" }),
+      );
       audio.mockRestore();
       socketFactory.mockRestore();
     },
@@ -396,6 +400,11 @@ it.each(["link", "sidebar", "redirect"] as const)(
     expect(h.attempts[0]!.value.dispose).not.toHaveBeenCalled();
     expect(store.getComposerDraft(ref)?.prompt).toBe("Keep unsent text");
     await navigateThread("unrelated_thread");
+    expect(h.attempts[0]!.value.stopAudio).toHaveBeenCalledTimes(1);
+    expect(h.attempts[0]!.value.dispose).not.toHaveBeenCalled();
+    await act(() =>
+      h.sockets[0]!.event({ type: "live.cleanup", sessionId: "session_1", result: "acknowledged" }),
+    );
     expect(h.attempts[0]!.value.dispose).toHaveBeenCalledTimes(1);
     await expect.element(screen.getByRole("button", { name: "Start live voice" })).toBeVisible();
     await navigateThread("created_thread");
@@ -407,6 +416,10 @@ it.each(["link", "sidebar", "redirect"] as const)(
     );
     await h.connect();
     await screen.unmount();
+    expect(h.attempts[1]!.value.stopAudio).toHaveBeenCalledTimes(1);
+    await act(() =>
+      h.sockets[1]!.event({ type: "live.cleanup", sessionId: "session_1", result: "acknowledged" }),
+    );
     expect(h.attempts[1]!.value.dispose).toHaveBeenCalledTimes(1);
     expect(h.sockets[1]!.close).toHaveBeenCalledTimes(1);
   },
@@ -458,6 +471,17 @@ it.each(["ready", "muted", "blocked"] as const)(
       expect(h.attempts[0]!.value.microphone).toHaveBeenLastCalledWith(outcome !== "muted");
     } else {
       await act(() => playback.reject(Error("private-autoplay-error")));
+      await expect
+        .element(screen.getByRole("status"))
+        .toHaveTextContent("Stopping voice. Microphone and playback are off.");
+      expect(h.attempts[0]!.value.stopAudio).toHaveBeenCalledTimes(1);
+      await act(() =>
+        h.sockets[0]!.event({
+          type: "live.cleanup",
+          sessionId: "session_1",
+          result: "acknowledged",
+        }),
+      );
       await expect
         .element(screen.getByRole("alert"))
         .toHaveTextContent(
@@ -526,6 +550,17 @@ it("keeps Send, mic mute, original coding Stop; accessible refresh and playback 
   await expect.element(screen.getByRole("button", { name: "Stop live voice" })).toBeVisible();
   await capture("coding-stop");
   await userEvent.click(screen.getByRole("button", { name: "Stop live voice" }));
+  await expect
+    .element(screen.getByRole("status"))
+    .toHaveTextContent("Stopping voice. Microphone and playback are off.");
+  expect(h.attempts[0]!.value.stopAudio).toHaveBeenCalledTimes(1);
+  expect(h.attempts[0]!.value.dispose).not.toHaveBeenCalled();
+  await expect.element(screen.getByRole("button", { name: "Stopping live voice" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Start live voice" }).query()).toBeNull();
+  await capture("stopping");
+  await act(() =>
+    h.sockets[0]!.event({ type: "live.cleanup", sessionId: "session_1", result: "acknowledged" }),
+  );
   await screen.rerender(<VoiceComposer />);
   await userEvent.click(screen.getByRole("button", { name: "Start live voice" }));
   await vi.waitFor(() => expect(h.sockets).toHaveLength(2));

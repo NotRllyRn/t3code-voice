@@ -1,6 +1,7 @@
 import { expect, test, vi } from "vite-plus/test";
 import {
   LIVE_VOICE_CONNECT_BUDGET_MS,
+  LIVE_VOICE_STOP_TIMEOUT_MS,
   type LiveVoiceClientEvent,
   type LiveVoiceServerEvent,
 } from "@t3tools/contracts";
@@ -57,6 +58,9 @@ function harness(acquire?: (media: LiveMedia, options: LiveMediaOptions) => Prom
           item.enabled = enabled;
         }),
         playback: vi.fn(async (_enabled: boolean) => {}),
+        stopAudio: vi.fn(() => {
+          item.enabled = false;
+        }),
         dispose: vi.fn(() => {
           item.enabled = false;
         }),
@@ -91,9 +95,14 @@ function harness(acquire?: (media: LiveMedia, options: LiveMediaOptions) => Prom
         attemptId,
         answerSdp: "v=0\r\ns=fictional-answer\r\n",
       }),
+    cleanup: (result: "acknowledged" | "failed" | "unknown" = "acknowledged") =>
+      socket.event({ type: "live.cleanup", sessionId: "session_1", result }),
     connected: (attemptId = "attempt_1") =>
       socket.event({ type: "live.status", sessionId: "session_1", phase: "connected", attemptId }),
-    [Symbol.dispose]: () => controller.dispose(),
+    [Symbol.dispose]: () => {
+      controller.dispose();
+      socket.event({ type: "live.cleanup", sessionId: "session_1", result: "acknowledged" });
+    },
   };
 }
 
@@ -126,8 +135,26 @@ test("requires server authorization, both peer and server readiness, then mutes 
   h.controller.mute();
   expect(attempt.enabled).toBe(true);
   h.controller.stop();
+  expect(attempt.media.stopAudio).toHaveBeenCalledTimes(1);
+  expect(attempt.media.dispose).not.toHaveBeenCalled();
+  expect(h.socket.close).not.toHaveBeenCalled();
+  expect(h.controller.state.phase).toBe("stopping");
+  h.controller.stop();
+  await h.controller.start();
+  h.connected();
+  h.authorize("attempt_2");
+  attempt.options.peer("connected");
+  h.controller.mute();
+  expect(attempt.enabled).toBe(false);
+  expect(h.mediaFactory).toHaveBeenCalledTimes(1);
+  h.socket.event({ type: "live.closed", sessionId: "session_1" });
+  h.socket.event({ type: "live.cleanup", sessionId: "foreign_session", result: "acknowledged" });
+  expect(attempt.media.dispose).not.toHaveBeenCalled();
+  h.cleanup();
+  h.cleanup();
   expect(attempt.media.dispose).toHaveBeenCalledTimes(1);
   expect(h.socket.close).toHaveBeenCalledTimes(1);
+  expect(h.controller.state.cleanupResult).toBe("acknowledged");
   expect(h.socket.sent.map((event) => event.type)).toEqual([
     "live.start",
     "live.peer",
@@ -185,6 +212,7 @@ test("waits through 90s refresh without old ready deadline, then makes only the 
     expect(h.controller.state.phase).toBe("connected");
     expect(h.mediaFactory).toHaveBeenCalledTimes(2);
     h.controller.stop();
+    h.cleanup();
     expect(vi.getTimerCount()).toBe(0);
     expect(h.attempts[1]!.media.dispose).toHaveBeenCalledTimes(1);
   } finally {
@@ -279,6 +307,7 @@ test.each([
   await Promise.resolve();
   expect(h.controller.state.phase).toBe("connecting");
   h.controller.stop();
+  h.cleanup();
   expect(h.controller.state.phase).toBe("idle");
   expect(old.media.dispose).toHaveBeenCalledTimes(1);
   h.socket.readyState = 1;
@@ -315,15 +344,18 @@ test.each(["playback-blocked", "invalid-offer", "media-denied", "forbidden"] as 
       h.answer();
       attempt.options.peer("connected");
       h.connected();
-      await vi.waitFor(() => expect(h.controller.state.phase).toBe("error"));
+      await vi.waitFor(() => expect(h.controller.state.phase).toBe("stopping"));
     } else if (reason === "invalid-offer") {
       attempt.media.answer = async () => {
         throw Error("private-answer-error");
       };
       h.answer();
-      await vi.waitFor(() => expect(h.controller.state.phase).toBe("error"));
+      await vi.waitFor(() => expect(h.controller.state.phase).toBe("stopping"));
     } else if (reason === "media-denied") attempt.options.fail(reason);
     else h.socket.event({ type: "live.status", sessionId: "session_1", phase: "error", reason });
+    expect(attempt.media.stopAudio).toHaveBeenCalledTimes(1);
+    h.cleanup();
+    expect(h.controller.state.phase).toBe("error");
     expect(h.publish.mock.calls.some(([state]) => state.phase === "connected")).toBe(false);
     expect(h.controller.state.reason).toBe(reason);
     expect(h.controller.state.error).not.toContain("private-provider-payload");
@@ -364,6 +396,8 @@ test("server connected status cannot bypass the total startup deadline while pla
     playback.resolve();
     await vi.advanceTimersByTimeAsync(0);
     expect(h.attempts[0]!.enabled).toBe(false);
+    expect(h.attempts[0]!.media.stopAudio).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(LIVE_VOICE_STOP_TIMEOUT_MS);
     expect(h.attempts[0]!.media.dispose).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
   } finally {
@@ -413,3 +447,60 @@ test("Stop cancels refresh immediately and the absolute startup budget bounds a 
     vi.useRealTimers();
   }
 });
+
+test.each(["acknowledged", "failed", "unknown", "deadline", "socket", "peer", "dispose"] as const)(
+  "Stop finishes on %s without resuming capture or retaining ownership",
+  async (outcome) => {
+    vi.useFakeTimers();
+    try {
+      using h = harness();
+      await h.controller.start();
+      h.authorize();
+      await vi.advanceTimersByTimeAsync(0);
+      h.answer();
+      h.attempts[0]!.options.peer("connected");
+      h.connected();
+      await vi.advanceTimersByTimeAsync(0);
+      const old = h.attempts[0]!;
+      h.controller.stop();
+      expect(old.enabled).toBe(false);
+      expect(old.media.stopAudio).toHaveBeenCalledTimes(1);
+      expect(old.media.dispose).not.toHaveBeenCalled();
+      if (outcome === "socket") h.socket.close();
+      else if (outcome === "peer") {
+        old.options.peer("failed");
+        expect(old.media.dispose).toHaveBeenCalledTimes(1);
+        expect(h.socket.close).not.toHaveBeenCalled();
+        h.cleanup();
+      } else if (outcome === "deadline" || outcome === "dispose") {
+        if (outcome === "dispose") h.controller.dispose();
+        await vi.advanceTimersByTimeAsync(LIVE_VOICE_STOP_TIMEOUT_MS - 1);
+        expect(old.media.dispose).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+      } else h.cleanup(outcome);
+      expect(old.media.dispose).toHaveBeenCalledTimes(1);
+      expect(old.options.signal.aborted).toBe(true);
+      expect(h.controller.state.phase).toBe("idle");
+      expect(h.controller.state.cleanupResult).toBe(
+        outcome === "peer"
+          ? "acknowledged"
+          : ["acknowledged", "failed"].includes(outcome)
+            ? outcome
+            : "unknown",
+      );
+      expect(h.socket.sent.filter((event) => event.type === "live.stop")).toHaveLength(1);
+      expect(vi.getTimerCount()).toBe(0);
+      if (outcome !== "dispose") {
+        h.socket.readyState = 1;
+        await h.controller.start();
+        h.authorize("new_attempt");
+        await vi.advanceTimersByTimeAsync(0);
+        expect(h.mediaFactory).toHaveBeenCalledTimes(2);
+        old.options.peer("connected");
+        expect(old.enabled).toBe(false);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);

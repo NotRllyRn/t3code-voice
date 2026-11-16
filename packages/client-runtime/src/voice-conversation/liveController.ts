@@ -6,6 +6,8 @@ import {
   LIVE_VOICE_HEARTBEAT_INTERVAL_MS,
   LIVE_VOICE_MAX_CREATE_ATTEMPTS,
   LIVE_VOICE_MAX_FRAME_BYTES,
+  LIVE_VOICE_STOP_TIMEOUT_MS,
+  type LiveVoiceCleanupResult,
   type LiveVoiceClientEvent,
   type LiveVoicePhase,
   type LiveVoiceReason,
@@ -19,6 +21,7 @@ export interface LiveVoiceState {
   phase: LiveVoicePhase;
   muted: boolean;
   error: string;
+  cleanupResult?: LiveVoiceCleanupResult | undefined;
   reason?: LiveVoiceReason | undefined;
   sessionId?: string | undefined;
   threadId?: ThreadId | undefined;
@@ -61,6 +64,7 @@ interface Attempt {
   answered: boolean;
   activating: boolean;
   active: boolean;
+  sent: boolean;
 }
 interface Session {
   abort: AbortController;
@@ -70,6 +74,9 @@ interface Session {
   attempt?: Attempt | undefined;
   finalizers: Array<() => void>;
   connected: boolean;
+  stopping: boolean;
+  stopReason?: LiveVoiceReason | undefined;
+  hadCall: boolean;
 }
 export interface LiveVoiceDependencies {
   media: LiveMediaFactory;
@@ -93,18 +100,21 @@ export class LiveVoiceController {
     this.state = { ...this.state, ...patch };
     if (!this.disposed) this.publish(this.state);
   }
+  private current(session: Session) {
+    return this.session === session && !session.abort.signal.aborted;
+  }
   private alive(session: Session, attempt?: Attempt) {
     return (
       !this.disposed &&
-      this.session === session &&
-      !session.abort.signal.aborted &&
+      this.current(session) &&
+      !session.stopping &&
       (!attempt || (session.attempt === attempt && !attempt.abort.signal.aborted))
     );
   }
   private send(session: Session, event: LiveVoiceClientEvent) {
     const socket = session.socket;
     if (
-      !this.alive(session) ||
+      !this.current(session) ||
       !socket ||
       socket.readyState !== 1 ||
       socket.bufferedAmount > LIVE_VOICE_MAX_FRAME_BYTES
@@ -127,33 +137,65 @@ export class LiveVoiceController {
       }
     }
   }
-  private end(reason?: LiveVoiceReason) {
-    const session = this.session;
-    if (session) {
+  private finish(session: Session, result: LiveVoiceCleanupResult) {
+    if (!this.current(session)) return;
+    this.session = undefined;
+    session.abort.abort();
+    this.closeAttempt(session);
+    for (const finalize of session.finalizers.splice(0).reverse()) {
       try {
-        this.send(session, { type: "live.stop" });
+        finalize();
       } catch {
-        /* Closing the socket also releases server ownership. */
-      }
-      this.session = undefined;
-      session.abort.abort();
-      this.closeAttempt(session);
-      for (const finalize of session.finalizers.splice(0).reverse()) {
-        try {
-          finalize();
-        } catch {
-          /* A failed finalizer must not retain other resources. */
-        }
+        /* A failed finalizer must not retain other resources. */
       }
     }
     this.update({
-      phase: reason ? "error" : "idle",
-      error: reason ? reasons[reason] : "",
-      reason,
+      phase: session.stopReason ? "error" : "idle",
+      error: session.stopReason
+        ? reasons[session.stopReason]
+        : result === "acknowledged" || !session.hadCall
+          ? ""
+          : "Voice stopped. Remote cleanup was not acknowledged.",
+      reason: session.stopReason,
+      cleanupResult: result,
       muted: false,
       retryAt: undefined,
       deadlineAt: undefined,
     });
+  }
+  private end(reason?: LiveVoiceReason, immediate = false) {
+    const session = this.session;
+    if (!session) return;
+    if (session.stopping) {
+      if (immediate) this.finish(session, "unknown");
+      return;
+    }
+    session.stopping = true;
+    session.stopReason = reason;
+    try {
+      session.attempt?.media?.stopAudio();
+    } catch {
+      immediate = true;
+    }
+    this.update({
+      phase: "stopping",
+      muted: true,
+      reason,
+      retryAt: undefined,
+      deadlineAt: undefined,
+    });
+    try {
+      this.send(session, { type: "live.stop" });
+    } catch {
+      immediate = true;
+    }
+    if (!this.current(session)) return;
+    if (immediate || !session.attempt?.sent) {
+      this.finish(session, "unknown");
+      return;
+    }
+    const deadline = setTimeout(() => this.finish(session, "unknown"), LIVE_VOICE_STOP_TIMEOUT_MS);
+    session.finalizers.push(() => clearTimeout(deadline));
   }
   async start() {
     if (this.disposed || this.session) return;
@@ -162,6 +204,8 @@ export class LiveVoiceController {
       attempts: new Set(),
       finalizers: [],
       connected: false,
+      stopping: false,
+      hadCall: false,
     };
     this.session = session;
     this.state = { ...INITIAL_LIVE_VOICE_STATE, phase: "connecting" };
@@ -176,7 +220,7 @@ export class LiveVoiceController {
       const socket = this.deps.socket(url);
       session.socket = socket;
       const message = ({ data }: { data: unknown }) => {
-        if (!this.alive(session)) return;
+        if (!this.current(session)) return;
         try {
           if (typeof data !== "string") throw Error("Binary control");
           this.receive(session, decodeLiveVoiceServerEvent(data));
@@ -185,7 +229,7 @@ export class LiveVoiceController {
         }
       };
       const disconnected = () => {
-        if (this.alive(session)) this.end("disconnected");
+        if (this.current(session)) this.end("disconnected", true);
       };
       socket.addEventListener("message", message);
       socket.addEventListener("close", disconnected);
@@ -220,6 +264,12 @@ export class LiveVoiceController {
         }
       }
     }
+    if (event.type === "live.cleanup") {
+      this.finish(session, event.result);
+      this.deps.event?.(event);
+      return;
+    }
+    if (session.stopping) return;
     // A retired peer cannot change the current attempt's state, even within the same session.
     if (
       event.type === "live.status" &&
@@ -318,6 +368,7 @@ export class LiveVoiceController {
       answered: false,
       activating: false,
       active: false,
+      sent: false,
     };
     session.attempt = attempt;
     session.attempts.add(id);
@@ -334,13 +385,14 @@ export class LiveVoiceController {
           if (this.alive(session, attempt)) this.end(reason);
         },
         peer: (state) => {
+          if (state === "failed" && this.current(session) && session.attempt === attempt) {
+            if (session.stopping) this.closeAttempt(session);
+            else this.end("disconnected", true);
+            return;
+          }
           if (!this.alive(session, attempt)) return;
           try {
             this.send(session, { type: "live.peer", attemptId: id, state });
-            if (state === "failed") {
-              this.end("disconnected");
-              return;
-            }
             attempt.ready = true;
             void this.activate(session, attempt);
           } catch {
@@ -355,6 +407,8 @@ export class LiveVoiceController {
       const offerSdp = await media.offer();
       if (!this.alive(session, attempt)) return;
       this.send(session, { type: "live.start", attemptId: id, offerSdp });
+      attempt.sent = true;
+      session.hadCall = true;
     } catch {
       if (this.alive(session, attempt)) this.end("media-denied");
     }
@@ -383,7 +437,7 @@ export class LiveVoiceController {
   }
   mute() {
     const session = this.session;
-    if (!session) return;
+    if (!session || session.stopping) return;
     const muted = !this.state.muted;
     this.update({ muted });
     session.attempt?.media?.microphone(
@@ -400,7 +454,7 @@ export class LiveVoiceController {
     this.end();
   }
   dispose() {
-    this.end();
     this.disposed = true;
+    this.end();
   }
 }

@@ -136,6 +136,10 @@ export const liveVoiceRouteLayer = Layer.unwrap(
               requestedModel: LIVE_VOICE_REQUESTED_MODEL,
               effectiveModel: null,
             },
+            onStopped: () => {
+              active.delete(session.sessionId);
+              claimed = false;
+            },
             onBound: (id) => {
               threadId = id;
             },

@@ -14,6 +14,7 @@ import * as Scope from "effect/Scope";
 import * as Socket from "effect/socket/Socket";
 import * as TestClock from "effect/testing/TestClock";
 import * as Redacted from "effect/Redacted";
+import type { LiveVoiceCleanupResult } from "@t3tools/contracts";
 import { LiveConnectionError } from "@t3tools/provider-core/server/liveConnection";
 import {
   acquireLiveCall,
@@ -35,7 +36,8 @@ it.effect.each(["acknowledged", "timeout", "failure", "defect"] as const)(
       const scope = yield* Scope.make();
       const events: string[] = [];
       const logs: unknown[] = [];
-      const call = yield* acquireLiveCall(connection, sdp).pipe(
+      const cleanup: { result: LiveVoiceCleanupResult } = { result: "unknown" };
+      const call = yield* acquireLiveCall(connection, sdp, cleanup).pipe(
         Effect.provideService(Scope.Scope, scope),
         Effect.provideService(LiveNetwork, {
           create: () =>
@@ -91,6 +93,9 @@ it.effect.each(["acknowledged", "timeout", "failure", "defect"] as const)(
       yield* Fiber.join(close);
       yield* Scope.close(scope, Exit.void);
       expect(events).toEqual(["hangup", "release"]);
+      expect(cleanup.result).toBe(
+        mode === "acknowledged" ? "acknowledged" : mode === "timeout" ? "unknown" : "failed",
+      );
       expect(JSON.stringify(logs).includes("Live cleanup failed")).toBe(mode !== "acknowledged");
       expect(JSON.stringify(logs)).not.toContain("fictional-private-cleanup");
     }),
@@ -385,7 +390,7 @@ it.live.each([
             expect(yield* reader.pull).toEqual(["ready"]);
             if (mode === "interrupted") {
               yield* Deferred.succeed(ready, undefined);
-              yield* Effect.never;
+              return yield* Effect.never;
             }
             if (mode === "closed") {
               sideband!.terminate();

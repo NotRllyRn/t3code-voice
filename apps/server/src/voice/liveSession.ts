@@ -5,6 +5,7 @@ import {
   LIVE_VOICE_READY_TIMEOUT_MS,
   LIVE_VOICE_HEARTBEAT_TIMEOUT_MS,
   type LiveVoiceBinding,
+  type LiveVoiceCleanupResult,
   type LiveVoiceCapability,
   type LiveVoiceServerEvent,
   decodeLiveVoiceClientEvent,
@@ -40,11 +41,15 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
   readonly connection: ResolvedLiveConnection;
   readonly capability: LiveVoiceCapability;
   readonly validateOwner: Effect.Effect<void, LiveConnectionError>;
+  readonly onStopped?: () => void;
   readonly onBound: (id: import("@t3tools/contracts").ThreadId) => void;
 }) {
   const sessionId = SecureRandom.uuidV4Unsafe();
   const queue = yield* Queue.bounded<Work>(128);
   const stop = yield* Deferred.make<void>();
+  const resources = yield* Scope.make();
+  yield* Effect.addFinalizer(() => Scope.close(resources, Exit.void));
+  let cleanup: { result: LiveVoiceCleanupResult } = { result: "unknown" };
   const writer = yield* input.socket.writer;
   let alive = true;
   let attempts = 0;
@@ -82,7 +87,7 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
       for (const message of encodeNativeLiveAppend(event))
         yield* nativeWriter.write(stringify(message)).pipe(Effect.mapError(unavailable));
     }),
-  });
+  }).pipe(Effect.provideService(Scope.Scope, resources));
   const offer = (work: Work) => Queue.offer(queue, work).pipe(Effect.asVoid);
   const downstreamReader = yield* input.socket.reader;
   const read = Effect.forever(
@@ -179,8 +184,11 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
       previousOffer = event.offerSdp;
       yield* status("connecting");
       const callScope = yield* Scope.make();
-      yield* Effect.addFinalizer(() => Scope.close(callScope, Exit.void));
-      const call = yield* acquireLiveCall(input.connection, event.offerSdp).pipe(
+      yield* Effect.addFinalizer(() => Scope.close(callScope, Exit.void)).pipe(
+        Effect.provideService(Scope.Scope, resources),
+      );
+      cleanup = { result: "unknown" };
+      const call = yield* acquireLiveCall(input.connection, event.offerSdp, cleanup).pipe(
         Effect.provideService(Scope.Scope, callScope),
       );
       if (!alive) return;
@@ -216,6 +224,7 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
         Effect.mapError(unavailable),
         Effect.catch(() => Deferred.succeed(stop, undefined)),
         Effect.forkScoped,
+        Effect.provideService(Scope.Scope, resources),
       );
       answerAt = yield* Clock.currentTimeMillis;
       yield* send({
@@ -247,8 +256,13 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
     ),
     Effect.ensuring(
       Effect.gen(function* () {
-        if (alive) yield* send({ type: "live.closed", sessionId }).pipe(Effect.ignore);
         alive = false;
+        yield* agent.stop;
+        yield* Scope.close(resources, Exit.void);
+        input.onStopped?.();
+        yield* writer
+          .write(stringify({ type: "live.cleanup", sessionId, result: cleanup.result }))
+          .pipe(Effect.timeout("1 second"), Effect.ignore);
       }),
     ),
   );

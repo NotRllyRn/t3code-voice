@@ -49,6 +49,7 @@ it.effect(
       const up = yield* peer;
       const creates: string[] = [];
       let hangups = 0;
+      let releases = 0;
       const fiber = yield* runLiveSession({
         socket: down.socket,
         binding: { threadId },
@@ -56,6 +57,11 @@ it.effect(
         capability,
         validateOwner: Effect.void,
         onBound: () => {},
+        onStopped: () => {
+          expect(hangups).toBe(1);
+          expect(up.closed()).toBe(true);
+          releases++;
+        },
       }).pipe(
         Effect.provide(agentAux),
         Effect.provideService(LiveNetwork, {
@@ -129,6 +135,12 @@ it.effect(
       yield* Queue.offer(down.input, '{"type":"live.stop"}');
       yield* Fiber.join(fiber);
       expect(hangups).toBe(1);
+      expect(releases).toBe(1);
+      expect(JSON.parse(yield* Queue.take(down.output))).toMatchObject({
+        type: "live.cleanup",
+        result: "acknowledged",
+      });
+      expect(yield* Queue.size(down.output)).toBe(0);
       expect(up.closed()).toBe(true);
       expect(down.closed()).toBe(true);
     }).pipe(Effect.provide(VoiceFixture.layer)),
@@ -263,6 +275,10 @@ it.effect.each(["ready", "binding"] as const)(
         const records = yield* threads.getThreadRecords(threadId, ["messages", "runs"]);
         expect(records.messages).toHaveLength(0);
         expect(records.runs).toHaveLength(0);
+        expect(JSON.parse(yield* Queue.take(down.output))).toMatchObject({
+          type: "live.cleanup",
+          result: "acknowledged",
+        });
         expect(yield* Queue.size(down.output)).toBe(0);
         return;
       }

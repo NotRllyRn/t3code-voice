@@ -83,12 +83,16 @@ const agentServices = Layer.mergeAll(
   }),
 );
 
-const setup = Effect.fn("LiveIntegration.setup")(function* (mode: "refresh" | "terminal") {
+const setup = Effect.fn("LiveIntegration.setup")(function* (
+  mode: "refresh" | "terminal" | "cleanup" | "cleanup-failed" | "cleanup-stalled",
+) {
   const browserEvents = yield* Queue.unbounded<LiveVoiceServerEvent>();
   const nativeFrames = yield* Queue.unbounded<Record<string, unknown>>();
   const providerEvents = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
   const started = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2TurnInput>();
   const hangups = yield* Queue.unbounded<void>();
+  const hangupStatuses = yield* Queue.unbounded<number>();
+  let mapped = false;
   const requests: string[] = [];
   const offers: string[] = [];
   let allocations = 0;
@@ -104,11 +108,15 @@ const setup = Effect.fn("LiveIntegration.setup")(function* (mode: "refresh" | "t
         request.on("end", () => {
           requests.push(request.url!);
           if (request.url?.endsWith("/hangup")) {
-            response.writeHead(200).end();
+            const status = !mapped || mode === "cleanup-failed" ? 404 : 200;
+            Queue.offerUnsafe(hangupStatuses, status);
+            if (mode === "cleanup-stalled") return;
+            if (status === 200) mapped = false;
+            response.writeHead(status).end();
             Queue.offerUnsafe(hangups, undefined);
           } else {
             offers.push(JSON.parse(body).sdp);
-            if (offers.length === 1 || mode === "terminal") {
+            if ((offers.length === 1 && mode === "refresh") || mode === "terminal") {
               response.writeHead(mode === "terminal" ? 401 : 503, {
                 "Content-Type": "application/json",
               });
@@ -119,6 +127,7 @@ const setup = Effect.fn("LiveIntegration.setup")(function* (mode: "refresh" | "t
               );
             } else {
               allocations++;
+              mapped = true;
               response.writeHead(201, {
                 "Content-Type": "application/sdp",
                 Location: "/v1/live/fictional-owned",
@@ -131,6 +140,9 @@ const setup = Effect.fn("LiveIntegration.setup")(function* (mode: "refresh" | "t
       const ws = new NodeWS.WebSocketServer({ server: http });
       ws.on("connection", (socket) => {
         native = socket;
+        socket.on("close", () => {
+          mapped = false;
+        });
         socket.on("message", (frame) =>
           Queue.offerUnsafe(nativeFrames, JSON.parse(frame.toString())),
         );
@@ -296,7 +308,13 @@ const setup = Effect.fn("LiveIntegration.setup")(function* (mode: "refresh" | "t
   const origin = HttpServer.formatAddress(
     Context.get(services, HttpServer.HttpServer).address,
   ).replace(/^http/, "ws");
-  const media: Array<{ options: LiveMediaOptions; disposed: boolean; mic: boolean }> = [];
+  const media: Array<{
+    options: LiveMediaOptions;
+    disposed: boolean;
+    mic: boolean;
+    captureStopped: boolean;
+    playback: boolean;
+  }> = [];
   let browser: NodeWS.WebSocket | undefined;
   const controller = new LiveVoiceController(
     {
@@ -308,16 +326,32 @@ const setup = Effect.fn("LiveIntegration.setup")(function* (mode: "refresh" | "t
         return browser;
       },
       media: async (options) => {
-        const current = { options, disposed: false, mic: false };
+        const current = {
+          options,
+          disposed: false,
+          mic: false,
+          captureStopped: false,
+          playback: false,
+        };
         media.push(current);
         return {
           offer: async () => sdp.replace("42 2", `${42 + media.length} ${2 + media.length}`),
           answer: async () => {},
-          playback: async () => {},
+          playback: async (enabled) => {
+            current.playback = enabled && !current.captureStopped;
+          },
           microphone: (enabled) => {
-            current.mic = enabled;
+            current.mic = enabled && !current.captureStopped;
+          },
+          stopAudio: () => {
+            current.captureStopped = true;
+            current.playback = false;
+            current.mic = false;
           },
           dispose: () => {
+            mapped = false;
+            current.captureStopped = true;
+            current.playback = false;
             current.disposed = true;
             current.mic = false;
           },
@@ -342,6 +376,7 @@ const setup = Effect.fn("LiveIntegration.setup")(function* (mode: "refresh" | "t
     providerEvents,
     started,
     hangups,
+    hangupStatuses,
     offers,
     requests,
     media,
@@ -541,9 +576,72 @@ it.effect(
         expect(completed.messages.find((message) => message.id === finalId)?.text).toBe(final);
         f.controller.stop();
         yield* Queue.take(f.hangups);
+        yield* take(f.browserEvents, (event) => event.type === "live.cleanup");
         expect(f.controller.state.phase).toBe("idle");
         expect(f.media.every((media) => media.disposed && !media.mic)).toBe(true);
         expect(f.requests.filter((url) => url.endsWith("/hangup"))).toHaveLength(1);
+      }),
+    ),
+);
+
+it.effect.each(["cleanup", "cleanup-failed", "cleanup-stalled"] as const)(
+  "%s: Stop releases capture immediately while CPA retains the media/sideband mapping until hangup",
+  (mode) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const f = yield* setup(mode);
+        yield* Effect.promise(() => f.controller.start());
+        yield* take(f.browserEvents, (event) => event.type === "live.answer");
+        f.native({ type: "session.started", session: { id: "fictional-native-session" } });
+        yield* take(f.nativeFrames, (frame) => frame.type === "session.context.append");
+        f.media[0]!.options.peer("connected");
+        yield* take(
+          f.browserEvents,
+          (event) => event.type === "live.status" && event.phase === "connected",
+        );
+        const media = f.media[0]!;
+        if (mode === "cleanup-stalled") {
+          f.native({
+            type: "turn.created",
+            turn: { id: "fictional-user-turn", role: "user", transcript: "Pending request" },
+          });
+          yield* take(f.browserEvents, (event) => event.type === "live.caption");
+          f.native(nativeDelegation("fictional-pending-stop"));
+          f.native({ type: "turn.delta", turn_id: "fictional-user-turn", delta: "." });
+          yield* take(f.browserEvents, (event) => event.type === "live.caption");
+          expect((yield* f.management.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(0);
+        }
+        f.controller.stop();
+        expect(media.captureStopped).toBe(true);
+        expect(media.mic).toBe(false);
+        expect(media.playback).toBe(false);
+        const status = yield* Queue.take(f.hangupStatuses);
+        expect(status).toBe(mode === "cleanup-failed" ? 404 : 200);
+        if (mode === "cleanup-stalled") {
+          expect(media.disposed).toBe(false);
+          expect(f.controller.state.phase).toBe("stopping");
+          f.native({
+            type: "turn.done",
+            turn: { id: "fictional-user-turn", role: "user", transcript: "Pending request." },
+          });
+          yield* TestClock.adjust("5 seconds");
+        }
+        const cleanup = yield* take(f.browserEvents, (event) => event.type === "live.cleanup");
+        expect(cleanup).toMatchObject({
+          result:
+            mode === "cleanup" ? "acknowledged" : mode === "cleanup-failed" ? "failed" : "unknown",
+        });
+        expect(media.disposed).toBe(true);
+        expect(f.controller.state.phase).toBe("idle");
+        expect(f.controller.state.cleanupResult).toBe(
+          cleanup.type === "live.cleanup" && cleanup.result,
+        );
+        expect(f.offers).toHaveLength(1);
+        expect(f.requests.filter((url) => url.endsWith("/hangup"))).toHaveLength(1);
+        expect((yield* f.management.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(0);
+        expect(JSON.stringify(cleanup)).not.toMatch(
+          /fictional-selected-key|fictional-owned|127\.0\.0\.1/,
+        );
       }),
     ),
 );

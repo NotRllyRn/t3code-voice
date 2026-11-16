@@ -4,6 +4,7 @@ import {
   LIVE_VOICE_REFRESH_WAIT_MS,
   LIVE_VOICE_READY_TIMEOUT_MS,
   type LiveVoiceReason,
+  type LiveVoiceCleanupResult,
 } from "@t3tools/contracts";
 import {
   LiveConnectionError,
@@ -126,6 +127,7 @@ export function liveRetryAt(
 export const acquireLiveCall = Effect.fn("LiveTransport.acquireCall")(function* (
   connection: ResolvedLiveConnection,
   offerSdp: string,
+  cleanup: { result: LiveVoiceCleanupResult } = { result: "unknown" },
 ) {
   const network = yield* LiveNetwork;
   const sidebandScope = yield* Scope.make();
@@ -135,15 +137,20 @@ export const acquireLiveCall = Effect.fn("LiveTransport.acquireCall")(function* 
     Effect.gen(function* () {
       if (!callId || cleaned) return;
       cleaned = true;
-      yield* network
+      const result = yield* network
         .hangup(connection, nativeLiveCallUrls(connection.createUrl, callId).hangupUrl)
         .pipe(
           Effect.interruptible,
-          Effect.timeout("5 seconds"),
-          Effect.catchCause(() =>
-            Effect.logWarning("Live cleanup failed", { reason: "temporarily-unavailable" }),
-          ),
+          Effect.timeoutOption("5 seconds"),
+          Effect.matchCause({
+            onFailure: () => "failed" as const,
+            onSuccess: (value) =>
+              Option.isSome(value) ? ("acknowledged" as const) : ("unknown" as const),
+          }),
         );
+      cleanup.result = result;
+      if (result !== "acknowledged")
+        yield* Effect.logWarning("Live cleanup failed", { reason: "temporarily-unavailable" });
     }).pipe(Effect.ensuring(Scope.close(sidebandScope, Exit.void))),
   );
   // Acquisition is bounded by the adapter. Do not discard headers on Stop/late success.

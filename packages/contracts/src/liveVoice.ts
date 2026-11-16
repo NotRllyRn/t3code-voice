@@ -25,6 +25,10 @@ export const LIVE_VOICE_READY_TIMEOUT_MS = 15_000;
 export const LIVE_VOICE_REFRESH_WAIT_MS = 90_000;
 export const LIVE_VOICE_HEARTBEAT_INTERVAL_MS = 15_000;
 export const LIVE_VOICE_HEARTBEAT_TIMEOUT_MS = 45_000;
+export const LIVE_VOICE_STOP_TIMEOUT_MS = 12_000;
+
+export const LiveVoiceCleanupResult = Schema.Literals(["acknowledged", "failed", "unknown"]);
+export type LiveVoiceCleanupResult = typeof LiveVoiceCleanupResult.Type;
 
 const utf8 = new TextEncoder();
 const boundedText = (maxBytes: number) =>
@@ -109,6 +113,11 @@ export const LiveVoiceClientEvent = Schema.Union([
 export type LiveVoiceClientEvent = typeof LiveVoiceClientEvent.Type;
 
 export const LiveVoiceServerEvent = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("live.cleanup"),
+    sessionId: LiveVoiceId,
+    result: LiveVoiceCleanupResult,
+  }),
   Schema.Struct({
     type: Schema.Literal("live.answer"),
     sessionId: LiveVoiceId,

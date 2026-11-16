@@ -256,7 +256,12 @@ export function ComposerLiveVoiceControls({ live }: { live: LiveVoice }) {
           muted: voice.muted,
         },
       )}
-      {button("Stop live voice", () => void controller?.stop(), <XIcon aria-hidden="true" />)}
+      {button(
+        voice.phase === "stopping" ? "Stopping live voice" : "Stop live voice",
+        () => void controller?.stop(),
+        <XIcon aria-hidden="true" />,
+        { disabled: voice.phase === "stopping", busy: voice.phase === "stopping" },
+      )}
     </>
   );
 }
@@ -268,13 +273,15 @@ export function ComposerLiveVoiceFeedback({ live }: { live: LiveVoice }) {
     <>
       <span role="status" className="sr-only">
         {active
-          ? voice.phase === "refresh_wait"
-            ? "Waiting for the selected provider to refresh. You can stop voice at any time."
-            : voice.phase !== "connected"
-              ? "Connecting voice…"
-              : voice.muted
-                ? "Mic muted"
-                : "Listening"
+          ? voice.phase === "stopping"
+            ? "Stopping voice. Microphone and playback are off."
+            : voice.phase === "refresh_wait"
+              ? "Waiting for the selected provider to refresh. You can stop voice at any time."
+              : voice.phase !== "connected"
+                ? "Connecting voice…"
+                : voice.muted
+                  ? "Mic muted"
+                  : "Listening"
           : ""}
       </span>
       <span role="alert" className="sr-only">

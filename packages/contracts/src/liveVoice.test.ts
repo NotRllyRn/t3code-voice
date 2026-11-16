@@ -99,6 +99,21 @@ describe("Live control boundary", () => {
     }
   });
 
+  it.each(["acknowledged", "failed", "unknown"] as const)(
+    "keeps cleanup %s separate from Live closure",
+    (result) => {
+      const event = { type: "live.cleanup", sessionId: "fictional-session", result };
+      expect(decodeLiveVoiceServerEvent(JSON.stringify(event))).toEqual(event);
+      for (const invalid of [
+        { ...event, result: "404 means success" },
+        { ...event, error: "private-detail" },
+      ])
+        expect(() => decodeLiveVoiceServerEvent(JSON.stringify(invalid))).toThrow(
+          "Invalid Live control frame",
+        );
+    },
+  );
+
   it("preserves legacy voice records while distinguishing application-frozen Live windows", () => {
     const decode = Schema.decodeUnknownSync(OrchestrationV2VoiceMessage);
     const legacy = {

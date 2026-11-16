@@ -5,6 +5,7 @@ export interface LiveMedia {
   answer(sdp: string): Promise<void>;
   microphone(enabled: boolean): void;
   playback(enabled: boolean): Promise<void>;
+  stopAudio(): void;
   dispose(): void;
 }
 

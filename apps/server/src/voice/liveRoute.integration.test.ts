@@ -8,6 +8,8 @@ import { expect, it } from "@effect/vitest";
 import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  CommandId,
+  ThreadId,
   LIVE_VOICE_PATH,
   ProviderInstanceId,
   ProviderDriverKind,
@@ -30,6 +32,8 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import * as VoiceFixture from "../orchestration-v2/VoiceConversation.testkit.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
@@ -181,6 +185,10 @@ it.live.each([...responses, ...plainResponses])(
         const up = yield* fixture(variant);
         const logs: unknown[] = [];
         const owners = new Set<string>();
+        const voice = yield* Layer.build(VoiceFixture.layer);
+        const threads = Context.get(voice, ThreadManagement.ThreadManagementService);
+        const threadId = ThreadId.make("fixture-live-route-thread");
+        let launches = 0;
         const selected = { ...connection, createUrl: `${up.origin}/prefix/v1/live` };
         const provider: ProviderInstance = {
           instanceId: ProviderInstanceId.make("selected-instance"),
@@ -205,11 +213,40 @@ it.live.each([...responses, ...plainResponses])(
         const services = yield* Layer.build(
           HttpRouter.serve(
             liveVoiceRouteLayer.pipe(
-              Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
-              Layer.provide(Layer.mock(ThreadLaunch.ThreadLaunchService)({})),
+              Layer.provide(Layer.succeed(ThreadManagement.ThreadManagementService, threads)),
+              Layer.provide(
+                Layer.mock(ThreadLaunch.ThreadLaunchService)({
+                  launch: (input) =>
+                    Effect.gen(function* () {
+                      launches++;
+                      yield* Context.get(voice, Orchestrator.OrchestratorV2)
+                        .dispatch({
+                          type: "thread.create",
+                          commandId: CommandId.make("fixture-live-route-create"),
+                          threadId,
+                          projectId: input.projectId,
+                          title: input.title ?? "Voice",
+                          modelSelection: input.modelSelection,
+                          runtimeMode: input.runtimeMode,
+                          interactionMode: input.interactionMode,
+                          branch: null,
+                          worktreePath: null,
+                          createdBy: "user",
+                          creationSource: "web",
+                        })
+                        .pipe(Effect.orDie);
+                      return {
+                        threadId,
+                        projection: yield* threads.getThreadProjection(threadId),
+                        resumed: false,
+                      };
+                    }).pipe(Effect.orDie),
+                }),
+              ),
               Layer.provide(
                 Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
                   namedProjectsRoot: "/fixture/projects",
+                  ensureScratchProject: Effect.succeed({ projectId: VoiceFixture.projectId }),
                 }),
               ),
               Layer.provide(
@@ -275,6 +312,7 @@ it.live.each([...responses, ...plainResponses])(
           (socket) => Effect.sync(() => socket.terminate()),
         );
         const seen: LiveVoiceServerEvent[] = [];
+        const ownersAtCleanup: number[] = [];
         yield* Effect.promise(
           () =>
             new Promise<void>((resolve, reject) => {
@@ -282,6 +320,7 @@ it.live.each([...responses, ...plainResponses])(
               browser.on("message", (raw) => {
                 const event = JSON.parse(raw.toString()) as LiveVoiceServerEvent;
                 seen.push(event);
+                if (event.type === "live.cleanup") ownersAtCleanup.push(owners.size);
                 if (
                   event.type === "live.status" &&
                   event.phase === "connecting" &&
@@ -340,6 +379,14 @@ it.live.each([...responses, ...plainResponses])(
           expect(JSON.stringify(logs)).not.toContain("failurePhase");
           yield* Effect.promise(() => up.sidebandClosed);
         }
+        expect(ownersAtCleanup).toEqual([0]);
+        expect(launches).toBe(rejected ? 0 : 1);
+        expect(seen.filter((event) => event.type === "live.bound")).toHaveLength(rejected ? 0 : 1);
+        expect(seen.filter((event) => event.type === "live.cleanup")).toEqual([
+          expect.objectContaining({
+            result: "unknownCall" in variant ? "unknown" : "acknowledged",
+          }),
+        ]);
         expect(up.ws.clients.size).toBe(0);
         expect(
           up.requests.every((request) => request.authorization === "Bearer fictional-selected-key"),

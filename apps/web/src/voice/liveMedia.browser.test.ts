@@ -112,6 +112,16 @@ it("captures disabled tracks, gates on PC and channel, and uses an actual audio 
   await media.playback(true);
   expect(audio.muted).toBe(false);
   expect(h.play).toHaveBeenCalled();
+  media.stopAudio();
+  expect(h.track.enabled).toBe(false);
+  expect(h.track.stop).toHaveBeenCalledTimes(1);
+  expect(peer.close).not.toHaveBeenCalled();
+  expect(peer.channel.close).not.toHaveBeenCalled();
+  expect(audio.muted).toBe(true);
+  expect(audio.srcObject).toBeNull();
+  media.microphone(true);
+  expect(h.track.enabled).toBe(false);
+  await expect(media.playback(true)).rejects.toThrow("Live media stopped");
   media.dispose();
   media.dispose();
   expect(h.track.stop).toHaveBeenCalledTimes(1);
@@ -176,4 +186,36 @@ it("dispose cancels pending ICE gathering and ignores stale track callbacks", as
   trackCallback({ track: { kind: "audio" } as MediaStreamTrack, streams: [new MediaStream()] });
   expect(h.play).not.toHaveBeenCalled();
   expect(h.track.enabled).toBe(false);
+});
+
+it("ends the actual capture track immediately and keeps the peer open until disposal", async () => {
+  using h = setup();
+  const context = new AudioContext();
+  try {
+    const source = context.createMediaStreamDestination();
+    const track = source.stream.getAudioTracks()[0]!;
+    h.microphone.mockResolvedValue(source.stream);
+    const media = await browserLiveMedia(h.options);
+    const peer = h.peers[0]!;
+    peer.connectionState = "connected";
+    peer.channel.readyState = "open";
+    peer.channel.onopen!();
+    media.microphone(true);
+    expect(track.enabled).toBe(true);
+    media.stopAudio();
+    expect(track.readyState).toBe("ended");
+    expect(track.enabled).toBe(false);
+    expect(peer.close).not.toHaveBeenCalled();
+    expect(h.fail).not.toHaveBeenCalled();
+    const audio = [...document.querySelectorAll("audio")].at(-1)!;
+    peer.ontrack!({ track, streams: [source.stream] });
+    media.microphone(true);
+    expect(track.enabled).toBe(false);
+    expect(audio.muted).toBe(true);
+    expect(audio.srcObject).toBeNull();
+    media.dispose();
+    expect(peer.close).toHaveBeenCalledTimes(1);
+  } finally {
+    await context.close();
+  }
 });

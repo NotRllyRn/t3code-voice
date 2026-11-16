@@ -3,6 +3,7 @@ import type { LiveMediaFactory } from "@t3tools/client-runtime/voice-conversatio
 /** RTP audio only; the server-side sideband remains authoritative for all app events. */
 export const browserLiveMedia: LiveMediaFactory = async (options) => {
   let disposed = false;
+  let audioStopped = false;
   let stream: MediaStream | undefined;
   let peer: RTCPeerConnection | undefined;
   let channel: RTCDataChannel | undefined;
@@ -13,15 +14,24 @@ export const browserLiveMedia: LiveMediaFactory = async (options) => {
   audio.autoplay = true;
   audio.muted = true;
   audio.hidden = true;
+  const stopAudio = () => {
+    if (audioStopped) return;
+    audioStopped = true;
+    playbackEnabled = false;
+    stream?.getTracks().forEach((track) => {
+      track.enabled = false;
+      track.stop();
+    });
+    audio.muted = true;
+    audio.pause();
+    audio.srcObject = null;
+  };
   const dispose = () => {
     if (disposed) return;
     disposed = true;
     options.signal.removeEventListener("abort", dispose);
     finalizers.splice(0).forEach((release) => release());
-    stream?.getTracks().forEach((track) => {
-      track.enabled = false;
-      track.stop();
-    });
+    stopAudio();
     if (channel) {
       channel.onopen = null;
       channel.onclose = null;
@@ -33,15 +43,11 @@ export const browserLiveMedia: LiveMediaFactory = async (options) => {
       peer.onconnectionstatechange = null;
       peer.close();
     }
-    audio.pause();
-    if (audio.srcObject instanceof MediaStream)
-      audio.srcObject.getTracks().forEach((track) => track.stop());
-    audio.srcObject = null;
     audio.remove();
   };
   options.own(dispose);
   options.signal.addEventListener("abort", dispose, { once: true });
-  const alive = () => !disposed && !options.signal.aborted && options.alive();
+  const alive = () => !disposed && !audioStopped && !options.signal.aborted && options.alive();
   const check = () => {
     if (!alive()) throw Error("Live media stopped");
   };
@@ -77,14 +83,20 @@ export const browserLiveMedia: LiveMediaFactory = async (options) => {
     channel = pc.createDataChannel("oai-events");
     const dc = channel;
     const report = () => {
-      if (!alive()) return;
+      if (disposed || options.signal.aborted) return;
       if (
         pc.connectionState === "failed" ||
         pc.connectionState === "disconnected" ||
         pc.connectionState === "closed"
       ) {
+        dispose();
         options.peer("failed");
-      } else if (!ready && pc.connectionState === "connected" && dc.readyState === "open") {
+      } else if (
+        alive() &&
+        !ready &&
+        pc.connectionState === "connected" &&
+        dc.readyState === "open"
+      ) {
         ready = true;
         options.peer("connected");
       }
@@ -92,10 +104,16 @@ export const browserLiveMedia: LiveMediaFactory = async (options) => {
     pc.onconnectionstatechange = report;
     dc.onopen = report;
     dc.onclose = () => {
-      if (alive()) options.peer("failed");
+      if (!disposed) {
+        dispose();
+        options.peer("failed");
+      }
     };
     dc.onerror = () => {
-      if (alive()) options.peer("failed");
+      if (!disposed) {
+        dispose();
+        options.peer("failed");
+      }
     };
     pc.ontrack = ({ track, streams }) => {
       if (!alive() || track.kind !== "audio") return;
@@ -154,6 +172,7 @@ export const browserLiveMedia: LiveMediaFactory = async (options) => {
         playbackEnabled = enabled;
         await play();
       },
+      stopAudio,
       dispose,
     };
   } catch (error) {
