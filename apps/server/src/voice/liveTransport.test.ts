@@ -1,11 +1,18 @@
 import * as NodeWS from "@effect/platform-node/NodeWS";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- fictional loopback HTTP/WS boundary, no provider calls.
+import * as NodeHttp from "node:http";
 import { expect, it, vi } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import { FetchHttpClient } from "effect/http";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Exit from "effect/Exit";
+import * as Scope from "effect/Scope";
+import * as Socket from "effect/socket/Socket";
+import * as TestClock from "effect/testing/TestClock";
 import * as Redacted from "effect/Redacted";
 import { LiveConnectionError } from "@t3tools/provider-core/server/liveConnection";
 import {
@@ -18,6 +25,76 @@ import {
 } from "./liveTransport.ts";
 import { connection, peer, sdp } from "./liveTestkit.ts";
 import { MAX_BUFFER_BYTES, MAX_BUFFER_FRAMES } from "./transport.ts";
+
+it.effect.each(["acknowledged", "timeout", "failure", "defect"] as const)(
+  "hangup precedes lazy sideband release, including %s cleanup",
+  (mode) =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const closing = yield* Deferred.make<void>();
+      const scope = yield* Scope.make();
+      const events: string[] = [];
+      const logs: unknown[] = [];
+      const call = yield* acquireLiveCall(connection, sdp).pipe(
+        Effect.provideService(Scope.Scope, scope),
+        Effect.provideService(LiveNetwork, {
+          create: () =>
+            Effect.succeed({
+              status: 201,
+              location: "/v1/live/owned",
+              contentType: "application/sdp",
+              retryAfter: null,
+              body: Effect.succeed(sdp),
+            }),
+          sideband: () =>
+            Effect.succeed(
+              Socket.make({
+                reader: Effect.acquireRelease(
+                  Effect.succeed({ pull: Effect.never, upgrade: () => Effect.void }),
+                  () =>
+                    Effect.sync(() => {
+                      events.push("release");
+                    }),
+                ),
+                writer: Effect.succeed({ write: () => Effect.void, writeAll: () => Effect.void }),
+              }),
+            ),
+          hangup: () =>
+            Effect.gen(function* () {
+              events.push("hangup");
+              yield* Deferred.succeed(entered, undefined);
+              if (mode === "timeout") return yield* Effect.never;
+              if (mode === "defect")
+                return yield* Effect.die(new Error("fictional-private-cleanup"));
+              if (mode === "failure")
+                return yield* new LiveConnectionError({ reason: "temporarily-unavailable" });
+            }),
+        }),
+        Effect.provide(
+          Logger.layer([Logger.make(({ message, cause }) => logs.push({ message, cause }))], {
+            mergeWithExisting: false,
+          }),
+        ),
+      );
+      if (call.type !== "created") throw new Error("Expected call");
+      yield* call.socket.reader.pipe(Effect.provideService(Scope.Scope, scope));
+      const close = yield* Scope.close(scope, Exit.void).pipe(
+        Effect.ensuring(Deferred.succeed(closing, undefined)),
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(entered);
+      if (mode === "timeout") {
+        expect(events).toEqual(["hangup"]);
+        yield* TestClock.adjust("5 seconds");
+      }
+      yield* Deferred.await(closing);
+      yield* Fiber.join(close);
+      yield* Scope.close(scope, Exit.void);
+      expect(events).toEqual(["hangup", "release"]);
+      expect(JSON.stringify(logs).includes("Live cleanup failed")).toBe(mode !== "acknowledged");
+      expect(JSON.stringify(logs)).not.toContain("fictional-private-cleanup");
+    }),
+);
 
 it("allows only structured definitive refresh failures, not quota/auth/arbitrary/ambiguous errors", () => {
   for (const [status, body, retry] of [
@@ -203,6 +280,167 @@ const loopbackServer = Effect.acquireRelease(
   ),
 );
 
+// CPA v8.0.63 sideband.go complete deletes the call map before closing resources;
+// capabilities.go hangup peeks that same map, including while sideband is claimed.
+it.live.each([
+  "claimed",
+  "interrupted",
+  "closed",
+  "upstream-404",
+  "unauthorized",
+  "stalled",
+] as const)(
+  "known-call cleanup uses its configured origin and preserves CPA %s semantics",
+  (mode) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const closed = Promise.withResolvers<void>();
+        const aborted = Promise.withResolvers<void>();
+        const paths: string[] = [];
+        const statuses: number[] = [];
+        const logs: unknown[] = [];
+        const ready = yield* Deferred.make<void>();
+        let mapped = false;
+        let sideband: NodeWS.WebSocket | undefined;
+        const up = yield* Effect.acquireRelease(
+          Effect.promise(async () => {
+            const http = NodeHttp.createServer((request, response) => {
+              paths.push(request.url!);
+              expect(request.headers.authorization).toBe("Bearer fictional-selected-key");
+              if (request.url === "/prefix/v1/live") {
+                mapped = true;
+                response.writeHead(201, {
+                  "Content-Type": "application/sdp",
+                  Location: "https://never-follow.example.test/live/owned-call",
+                });
+                response.end(sdp);
+              } else if (request.url === "/prefix/v1/realtime/calls/owned-call/hangup") {
+                if (mode === "stalled") {
+                  response.once("close", () => aborted.resolve());
+                  return;
+                }
+                const status = !mapped
+                  ? 404
+                  : mode === "unauthorized"
+                    ? 403
+                    : mode === "upstream-404"
+                      ? 404
+                      : 200;
+                statuses.push(status);
+                if (status === 200) {
+                  mapped = false;
+                  sideband?.terminate();
+                }
+                response.writeHead(status);
+                response.end("fictional-private-response");
+              } else {
+                response.writeHead(404);
+                response.end();
+              }
+            });
+            const ws = new NodeWS.WebSocketServer({ server: http });
+            ws.on("connection", (socket, request) => {
+              paths.push(request.url!);
+              expect(request.headers.authorization).toBe("Bearer fictional-selected-key");
+              sideband = socket;
+              socket.once("close", () => {
+                mapped = false;
+                closed.resolve();
+              });
+              socket.send("ready");
+            });
+            await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
+            const address = http.address();
+            if (!address || typeof address === "string") throw new Error("Expected loopback port");
+            return { http, ws, origin: `http://127.0.0.1:${address.port}` };
+          }),
+          ({ http, ws }) =>
+            Effect.promise(async () => {
+              for (const socket of ws.clients) socket.terminate();
+              await new Promise<void>((resolve) => http.close(() => resolve()));
+              ws.close();
+            }),
+        );
+        let locallyTerminated = false;
+        const terminate = NodeWS.WebSocket.prototype.terminate;
+        using _terminate = vi
+          .spyOn(NodeWS.WebSocket.prototype, "terminate")
+          .mockImplementation(function (this: NodeWS.WebSocket) {
+            if (this.url === `${up.origin.replace("http:", "ws:")}/prefix/v1/live/owned-call`)
+              locallyTerminated = true;
+            terminate.call(this);
+          });
+        const context = yield* Layer.build(
+          liveNetworkLayer.pipe(Layer.provide(FetchHttpClient.layer)),
+        );
+        const network = Context.get(context, LiveNetwork);
+        const running = Effect.scoped(
+          Effect.gen(function* () {
+            const call = yield* acquireLiveCall(
+              { ...connection, createUrl: `${up.origin}/prefix/v1/live` },
+              sdp,
+            );
+            if (call.type !== "created") throw new Error("Expected call");
+            const reader = yield* call.socket.reader;
+            expect(yield* reader.pull).toEqual(["ready"]);
+            if (mode === "interrupted") {
+              yield* Deferred.succeed(ready, undefined);
+              yield* Effect.never;
+            }
+            if (mode === "closed") {
+              sideband!.terminate();
+              yield* Effect.promise(() => closed.promise);
+              expect((yield* reader.pull.pipe(Effect.result))._tag).toBe("Failure");
+            }
+          }),
+        ).pipe(
+          Effect.provideService(LiveNetwork, {
+            ...network,
+            hangup: (selected, url) =>
+              Effect.gen(function* () {
+                // Exercise the schedule where CPA observes an earlier local terminate before HTTP arrives.
+                if (locallyTerminated) yield* Effect.promise(() => closed.promise);
+                yield* network.hangup(selected, url);
+              }),
+          }),
+          Effect.provide(
+            Logger.layer([Logger.make(({ message }) => logs.push(message))], {
+              mergeWithExisting: false,
+            }),
+          ),
+        );
+        if (mode === "interrupted") {
+          const fiber = yield* running.pipe(Effect.forkScoped);
+          yield* Deferred.await(ready);
+          yield* Fiber.interrupt(fiber);
+        } else yield* running;
+        yield* Effect.promise(() => closed.promise);
+        if (mode === "stalled") yield* Effect.promise(() => aborted.promise);
+        expect(paths).toEqual([
+          "/prefix/v1/live",
+          "/prefix/v1/live/owned-call",
+          "/prefix/v1/realtime/calls/owned-call/hangup",
+        ]);
+        expect(statuses).toEqual(
+          mode === "stalled"
+            ? []
+            : [
+                mode === "claimed" || mode === "interrupted"
+                  ? 200
+                  : mode === "unauthorized"
+                    ? 403
+                    : 404,
+              ],
+        );
+        expect(JSON.stringify(logs).includes("Live cleanup failed")).toBe(
+          mode !== "claimed" && mode !== "interrupted",
+        );
+        expect(JSON.stringify(logs)).not.toMatch(/fictional|owned-call|127\.0\.0\.1/);
+        expect(mapped).toBe(false);
+      }),
+    ),
+);
+
 it.live.each(["bytes", "frames", "callback-error"] as const)(
   "native sideband bounds %s without waiting for writes and reaps its allocation",
   (mode) =>
@@ -311,16 +549,32 @@ it.live("native sideband releases send reservations for an ordinary reading peer
       const context = yield* Layer.build(
         liveNetworkLayer.pipe(Layer.provide(FetchHttpClient.layer)),
       );
-      const socket = yield* Context.get(context, LiveNetwork).sideband(
-        connection,
-        `ws://127.0.0.1:${address.port}/v1/live/reading`,
+      const terminate = NodeWS.WebSocket.prototype.terminate;
+      let wire: NodeWS.WebSocket | undefined;
+      using _terminate = vi
+        .spyOn(NodeWS.WebSocket.prototype, "terminate")
+        .mockImplementation(function (this: NodeWS.WebSocket) {
+          wire = this;
+          expect(this.listenerCount("close")).toBeGreaterThan(0);
+          terminate.call(this);
+        });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const socket = yield* Context.get(context, LiveNetwork).sideband(
+            connection,
+            `ws://127.0.0.1:${address.port}/v1/live/reading`,
+          );
+          const reader = yield* socket.reader;
+          const writer = yield* socket.writer;
+          for (let index = 0; index <= MAX_BUFFER_FRAMES; index++) {
+            yield* writer.write(`fixture-${index}`);
+            expect(yield* reader.pull).toEqual([`fixture-${index}`]);
+          }
+        }),
       );
-      const reader = yield* socket.reader;
-      const writer = yield* socket.writer;
-      for (let index = 0; index <= MAX_BUFFER_FRAMES; index++) {
-        yield* writer.write(`fixture-${index}`);
-        expect(yield* reader.pull).toEqual([`fixture-${index}`]);
-      }
+      expect(_terminate).toHaveBeenCalledTimes(1);
+      expect(wire?.readyState).toBe(NodeWS.WebSocket.CLOSED);
+      expect(wire?.listenerCount("close")).toBe(0);
     }),
   ),
 );

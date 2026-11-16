@@ -11,6 +11,7 @@ import {
 } from "@t3tools/provider-core/server/liveConnection";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
@@ -127,6 +128,7 @@ export const acquireLiveCall = Effect.fn("LiveTransport.acquireCall")(function* 
   offerSdp: string,
 ) {
   const network = yield* LiveNetwork;
+  const sidebandScope = yield* Scope.make();
   let callId: string | undefined;
   let cleaned = false;
   yield* Effect.addFinalizer(() =>
@@ -136,11 +138,13 @@ export const acquireLiveCall = Effect.fn("LiveTransport.acquireCall")(function* 
       yield* network
         .hangup(connection, nativeLiveCallUrls(connection.createUrl, callId).hangupUrl)
         .pipe(
-          Effect.catch(() =>
+          Effect.interruptible,
+          Effect.timeout("5 seconds"),
+          Effect.catchCause(() =>
             Effect.logWarning("Live cleanup failed", { reason: "temporarily-unavailable" }),
           ),
         );
-    }),
+    }).pipe(Effect.ensuring(Scope.close(sidebandScope, Exit.void))),
   );
   // Acquisition is bounded by the adapter. Do not discard headers on Stop/late success.
   const response = yield* Effect.uninterruptible(
@@ -197,8 +201,15 @@ export const acquireLiveCall = Effect.fn("LiveTransport.acquireCall")(function* 
   );
   callId = result.callId;
   const urls = nativeLiveCallUrls(connection.createUrl, callId);
-  const socket = yield* network.sideband(connection, urls.sidebandUrl);
-  return { type: "created" as const, answerSdp: result.answerSdp, socket };
+  const socket = yield* network
+    .sideband(connection, urls.sidebandUrl)
+    .pipe(Effect.provideService(Scope.Scope, sidebandScope));
+  // CPA removes the hangup mapping when sideband exits, including its lazy reader resource.
+  const ownedSocket = Socket.make({
+    reader: socket.reader.pipe(Effect.provideService(Scope.Scope, sidebandScope)),
+    writer: socket.writer.pipe(Effect.provideService(Scope.Scope, sidebandScope)),
+  });
+  return { type: "created" as const, answerSdp: result.answerSdp, socket: ownedSocket };
 });
 
 const safeFailure = () => new LiveConnectionError({ reason: "temporarily-unavailable" });
@@ -356,7 +367,22 @@ export const liveNetworkLayer = Layer.effect(
               });
               return ws;
             }),
-            () => Effect.sync(fail),
+            (ws) =>
+              Effect.callback<void>((resume) => {
+                const closed = () => resume(Effect.void);
+                if (ws.readyState === NodeWS.WebSocket.CLOSED) return closed();
+                ws.once("close", closed);
+                fail();
+                return Effect.sync(() => ws.off("close", closed));
+              }).pipe(
+                Effect.interruptible,
+                Effect.timeout("1 second"),
+                Effect.catchCause(() =>
+                  Effect.logWarning("Live sideband cleanup failed", {
+                    reason: "temporarily-unavailable",
+                  }),
+                ),
+              ),
           ),
           { openTimeout: "10 seconds", highWaterMark: 131072 },
         ).pipe(Effect.mapError(safeFailure));
