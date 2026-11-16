@@ -15,5 +15,17 @@ export const FORK_DESKTOP = {
   releasesUrl: "https://github.com/NotRllyRn/t3code-voice/releases",
 } as const;
 
+export const FORK_RELEASE = {
+  repository: "NotRllyRn/t3code-voice",
+  baseBranch: "feature/codex-voice-stable",
+  upstream: {
+    repository: "pingdotgg/t3code",
+    tag: "v0.1.9",
+    sha: "24e77473ecf41bc1f7142529c7911c1c1aae1d76",
+  },
+  voiceRevision: 1,
+  githubPrerelease: true,
+} as const;
+
 export const forkDesktopScheme = (isDevelopment: boolean): string =>
   isDevelopment ? FORK_DESKTOP.developmentScheme : FORK_DESKTOP.scheme;
