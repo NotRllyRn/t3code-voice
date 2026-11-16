@@ -65,6 +65,7 @@ function harness(acquire?: (media: LiveMedia, options: LiveMediaOptions) => Prom
     attempts.push(item);
     return acquire ? acquire(item.media, options) : item.media;
   });
+  const publish = vi.fn();
   const controller = new LiveVoiceController(
     {
       socket: () => socket as unknown as VoiceSocket,
@@ -72,9 +73,10 @@ function harness(acquire?: (media: LiveMedia, options: LiveMediaOptions) => Prom
       media: mediaFactory,
       event,
     },
-    () => {},
+    publish,
   );
   return {
+    publish,
     controller,
     socket,
     attempts,
@@ -113,7 +115,10 @@ test("requires server authorization, both peer and server readiness, then mutes 
   expect(attempt.enabled).toBe(false);
   h.answer();
   attempt.options.peer("connected");
+  await Promise.resolve();
   expect(attempt.enabled).toBe(false);
+  expect(attempt.media.playback).not.toHaveBeenCalled();
+  expect(h.controller.state.phase).toBe("connecting");
   h.connected();
   await vi.waitFor(() => expect(attempt.enabled).toBe(true));
   h.controller.mute();
@@ -240,15 +245,63 @@ test("does not open the microphone while remote answer or playback is still pend
   h.connected();
   h.controller.mute();
   h.controller.mute();
+  expect(h.controller.state.phase).toBe("connecting");
   expect(attempt.enabled).toBe(false);
   answer.resolve();
   await Promise.resolve();
+  expect(h.controller.state.phase).toBe("connecting");
   expect(attempt.enabled).toBe(false);
   playback.resolve();
   await vi.waitFor(() => expect(attempt.enabled).toBe(true));
+  expect(h.controller.state.phase).toBe("connected");
 });
 
-test.each(["playback-blocked", "media-denied", "forbidden"] as const)(
+test.each([
+  ["answer", "resolve"],
+  ["answer", "reject"],
+  ["playback", "resolve"],
+  ["playback", "reject"],
+] as const)("ignores stale %s %s after Stop and a new generation", async (gate, outcome) => {
+  const pending = deferred<void>();
+  using h = harness(async (media) => {
+    if (h.attempts.length === 1) {
+      if (gate === "answer") media.answer = () => pending.promise;
+      else media.playback = () => pending.promise;
+    }
+    return media;
+  });
+  await h.controller.start();
+  await offered(h);
+  const old = h.attempts[0]!;
+  h.answer();
+  old.options.peer("connected");
+  h.connected();
+  await Promise.resolve();
+  expect(h.controller.state.phase).toBe("connecting");
+  h.controller.stop();
+  expect(h.controller.state.phase).toBe("idle");
+  expect(old.media.dispose).toHaveBeenCalledTimes(1);
+  h.socket.readyState = 1;
+  await h.controller.start();
+  await offered(h, "new_attempt");
+  const current = h.attempts[1]!;
+  h.answer("new_attempt");
+  current.options.peer("connected");
+  h.connected("new_attempt");
+  await vi.waitFor(() => expect(current.enabled).toBe(true));
+  if (outcome === "resolve") pending.resolve();
+  else pending.reject(Error("stale-private-error"));
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(old.media.microphone).not.toHaveBeenCalledWith(true);
+  expect(old.media.dispose).toHaveBeenCalledTimes(1);
+  expect(current.enabled).toBe(true);
+  expect(current.media.dispose).not.toHaveBeenCalled();
+  expect(h.controller.state.phase).toBe("connected");
+  expect(h.controller.state.error).toBe("");
+});
+
+test.each(["playback-blocked", "invalid-offer", "media-denied", "forbidden"] as const)(
   "sanitizes %s and closes without a client retry",
   async (reason) => {
     using h = harness();
@@ -263,8 +316,15 @@ test.each(["playback-blocked", "media-denied", "forbidden"] as const)(
       attempt.options.peer("connected");
       h.connected();
       await vi.waitFor(() => expect(h.controller.state.phase).toBe("error"));
+    } else if (reason === "invalid-offer") {
+      attempt.media.answer = async () => {
+        throw Error("private-answer-error");
+      };
+      h.answer();
+      await vi.waitFor(() => expect(h.controller.state.phase).toBe("error"));
     } else if (reason === "media-denied") attempt.options.fail(reason);
     else h.socket.event({ type: "live.status", sessionId: "session_1", phase: "error", reason });
+    expect(h.publish.mock.calls.some(([state]) => state.phase === "connected")).toBe(false);
     expect(h.controller.state.reason).toBe(reason);
     expect(h.controller.state.error).not.toContain("private-provider-payload");
     expect(attempt.media.dispose).toHaveBeenCalledTimes(1);

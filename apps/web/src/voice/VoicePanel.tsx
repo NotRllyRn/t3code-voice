@@ -30,6 +30,7 @@ import { Button } from "../components/ui/button";
 import { cn } from "../lib/utils";
 import { browserLiveMedia } from "./liveMedia";
 import { liveCaptionKey, liveCaptions } from "./liveCaptions";
+import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 
 interface Props {
   environmentId: EnvironmentId;
@@ -135,6 +136,12 @@ export function useComposerLiveVoice({
             owner.current.promotedThread = event.threadId;
             owner.current.target = { threadId: event.threadId };
             liveCaptions.bind(token, liveCaptionKey(environmentId, event.threadId));
+            if (!threadId && draftId) {
+              const store = useComposerDraftStore.getState();
+              const id = DraftId.make(draftId);
+              if (store.getDraftSession(id)?.environmentId === environmentId)
+                store.markDraftThreadPromoting(id, { environmentId, threadId: event.threadId });
+            }
           }
         },
       },

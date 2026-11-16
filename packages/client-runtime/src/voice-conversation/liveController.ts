@@ -273,7 +273,6 @@ export class LiveVoiceController {
           if (!session.attempt || (event.attemptId && event.attemptId !== session.attempt.id))
             break;
           session.connected = true;
-          this.update({ phase: "connected", reason: undefined, retryAt: undefined });
           void this.activate(session, session.attempt);
         }
         break;
@@ -363,7 +362,7 @@ export class LiveVoiceController {
   private async activate(session: Session, attempt: Attempt) {
     if (
       !this.alive(session, attempt) ||
-      this.state.phase !== "connected" ||
+      !session.connected ||
       !attempt.ready ||
       !attempt.answered ||
       !attempt.media ||
@@ -373,9 +372,10 @@ export class LiveVoiceController {
     attempt.activating = true;
     try {
       await attempt.media.playback(true);
-      if (this.alive(session, attempt) && this.state.phase === "connected") {
+      if (this.alive(session, attempt) && session.connected) {
         attempt.active = true;
         attempt.media.microphone(!this.state.muted);
+        this.update({ phase: "connected", reason: undefined, retryAt: undefined });
       }
     } catch {
       if (this.alive(session, attempt)) this.end("playback-blocked");
