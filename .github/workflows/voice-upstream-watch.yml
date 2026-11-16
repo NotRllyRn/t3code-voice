@@ -1,0 +1,37 @@
+name: Voice upstream watch (disabled until configured)
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: voice-upstream-watch
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    if: github.repository == 'NotRllyRn/t3code-voice' && vars.VOICE_UPSTREAM_WATCH_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    environment: voice-automation
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feature/codex-voice-stable
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/voice-upstream-poll.ts
+            packages/shared/src/forkIdentity.ts
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Verify stable upstream release and notify signed coordinator
+        env:
+          VOICE_UPSTREAM_WEBHOOK_URL: ${{ secrets.VOICE_UPSTREAM_WEBHOOK_URL }}
+          VOICE_UPSTREAM_WEBHOOK_SECRET: ${{ secrets.VOICE_UPSTREAM_WEBHOOK_SECRET }}
+        run: node scripts/voice-upstream-poll.ts --enable-webhook
