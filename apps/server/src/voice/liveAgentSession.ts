@@ -516,23 +516,29 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
           generation: number;
         }
       | undefined;
+    if (!feedback.size) return;
+    const runIds = [...feedback.keys()];
+    const records = yield* threads.getThreadRecords(
+      threadId,
+      ["runs", "runtimeRequests", "messages", "turnItems", "attempts", "providerTurns"],
+      {
+        runIds,
+        runtimeRequestStatuses: ["pending"],
+        messageRunIds: runIds,
+        messageRoles: ["assistant"],
+        turnItemRunIds: runIds,
+        turnItemTypes: ["assistant_message"],
+      },
+    );
+    const runs = new Map(records.runs.map((run) => [run.id, run]));
+    const attempts = new Map(records.attempts.map((attempt) => [attempt.id, attempt]));
+    const turnsByAttempt = Map.groupBy(records.providerTurns, (turn) => turn.runAttemptId);
+    const messagesByRun = Map.groupBy(records.messages, (message) => message.runId);
+    const itemsByRun = Map.groupBy(records.turnItems, (item) => item.runId);
     for (const current of feedback.values()) {
       const generation = narrationGeneration;
-      const records = yield* threads.getThreadRecords(
-        threadId,
-        ["runs", "runtimeRequests", "messages", "turnItems", "attempts", "providerTurns"],
-        {
-          runtimeRequestStatuses: ["pending"],
-          messageRunIds: [current.runId],
-          messageRoles: ["assistant"],
-          turnItemRunIds: [current.runId],
-          turnItemTypes: ["assistant_message"],
-        },
-      );
-      const run = records.runs.find(
-        (candidate) => candidate.id === current.runId && candidate.threadId === threadId,
-      );
-      if (!run) continue;
+      const run = runs.get(current.runId);
+      if (!run || run.threadId !== threadId) continue;
       if (records.runtimeRequests.length) {
         if (current.status !== "waiting") {
           current.status = "waiting";
@@ -550,21 +556,20 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
           yield* input.send({ type: "live.agent", status: "started", runId: run.id });
       }
       const phases = new Map(
-        records.turnItems.flatMap((item) =>
+        (itemsByRun.get(run.id) ?? []).flatMap((item) =>
           item.type === "assistant_message" ? [[item.messageId, item] as const] : [],
         ),
       );
-      const attempt = records.attempts.find(
-        (candidate) => candidate.id === run.activeAttemptId && candidate.runId === run.id,
-      );
+      const activeAttempt = run.activeAttemptId ? attempts.get(run.activeAttemptId) : undefined;
+      const attempt = activeAttempt?.runId === run.id ? activeAttempt : undefined;
       const providerTurn = latestProviderTurnForAttempt(
-        records.providerTurns.filter(
+        (turnsByAttempt.get(run.activeAttemptId) ?? []).filter(
           (turn) =>
             turn.nodeId === run.rootNodeId && turn.providerThreadId === attempt?.providerThreadId,
         ),
         run.activeAttemptId,
       );
-      const messages = records.messages.filter((message) => {
+      const messages = (messagesByRun.get(run.id) ?? []).filter((message) => {
         if (
           message.threadId !== threadId ||
           message.runId !== run.id ||

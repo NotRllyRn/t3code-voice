@@ -1,4 +1,5 @@
 import { expect, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
 import {
   CommandId,
   EventId,
@@ -1619,6 +1620,182 @@ it.effect.each([
       } else {
         expect(results).toHaveLength(0);
       }
+    }),
+  ).pipe(Effect.provide(services)),
+);
+
+it.effect.each([1, 4])("result snapshots stay constant per poll with %s tracked runs", (count) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const captured = decodeCapturedResult(resultCapture);
+      const typedFinal = captured.typedFinal;
+      if (typedFinal.type !== "assistant_message")
+        throw new Error("Expected captured assistant item.");
+      const threadId = captured.run.threadId;
+      yield* VoiceFixture.create(threadId);
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const base = {
+        id: EventId.make("batched-result"),
+        threadId,
+        occurredAt: captured.finalMessage.updatedAt,
+      };
+      const entries = Array.from({ length: count }, (_, index) => {
+        const runId = RunId.make(`batched-run-${index}`);
+        const attemptId = RunAttemptId.make(`batched-attempt-${index}`);
+        const turnId = ProviderTurnId.make(`batched-turn-${index}`);
+        const nodeId = NodeId.make(`batched-message-node-${index}`);
+        const messageId = MessageId.make(`batched-message-${index}`);
+        const rootNodeId = NodeId.make(`batched-root-${index}`);
+        const providerThreadId = ProviderThreadId.make(`batched-provider-thread-${index}`);
+        return {
+          run: {
+            ...captured.run,
+            id: runId,
+            ordinal: index + 1,
+            activeAttemptId: attemptId,
+            rootNodeId,
+            providerThreadId,
+          },
+          attempt: { ...captured.attempt, id: attemptId, runId, rootNodeId, providerThreadId },
+          turn: {
+            ...captured.providerTurn,
+            id: turnId,
+            runAttemptId: attemptId,
+            nodeId: rootNodeId,
+            providerThreadId,
+          },
+          item: {
+            ...typedFinal,
+            id: TurnItemId.make(`batched-item-${index}`),
+            runId,
+            nodeId,
+            messageId,
+            providerTurnId: turnId,
+            providerThreadId,
+            ordinal: captured.typedFinal.ordinal + index,
+          },
+          message: {
+            ...captured.finalMessage,
+            id: messageId,
+            runId,
+            nodeId,
+            text: `Authored result ${index}.`,
+          },
+        };
+      });
+      for (const entry of entries) {
+        yield* store.apply({
+          ...base,
+          type: "run.updated",
+          payload: { ...entry.run, status: "running" },
+        });
+        yield* store.apply({ ...base, type: "run-attempt.updated", payload: entry.attempt });
+        yield* store.apply({ ...base, type: "provider-turn.updated", payload: entry.turn });
+        yield* store.apply({
+          ...base,
+          type: "message.updated",
+          payload: { ...entry.message, streaming: true },
+        });
+        yield* store.apply({
+          ...base,
+          type: "turn-item.updated",
+          payload: { ...entry.item, streaming: true },
+        });
+      }
+      const appends: NativeLiveAppend[] = [];
+      const agent = yield* makeLiveAgentSession({
+        binding: { threadId },
+        sessionId: "batched-result-session",
+        onBound: () => {},
+        send: () => Effect.void,
+        append: (event) =>
+          Effect.sync(() => {
+            appends.push(event);
+          }),
+      });
+      yield* agent.seed;
+      const lookups = vi.spyOn(store, "getThreadRecords");
+      yield* Effect.addFinalizer(() => Effect.sync(() => lookups.mockRestore()));
+      yield* agent.poll;
+      expect(lookups).toHaveBeenCalledTimes(2);
+      expect(
+        lookups.mock.calls.find(([, fields]) => fields.includes("attempts"))?.[2],
+      ).toMatchObject({
+        messageRunIds: entries.map((entry) => entry.run.id),
+        messageRoles: ["assistant"],
+        turnItemRunIds: entries.map((entry) => entry.run.id),
+        turnItemTypes: ["assistant_message"],
+      });
+      expect(lookups.mock.calls.filter(([, fields]) => fields.includes("attempts"))).toHaveLength(
+        1,
+      );
+      expect(
+        lookups.mock.calls.filter(([, fields]) => fields.includes("providerTurns")),
+      ).toHaveLength(1);
+      expect(appends.filter((event) => event.text.includes("actualAgentResult"))).toHaveLength(0);
+      lookups.mockClear();
+      for (const entry of entries) {
+        const attemptId = RunAttemptId.make(`${entry.attempt.id}-fresh`);
+        const turnId = ProviderTurnId.make(`${entry.turn.id}-fresh`);
+        yield* store.apply({
+          ...base,
+          type: "run-attempt.updated",
+          payload: {
+            ...entry.attempt,
+            id: attemptId,
+            attemptOrdinal: entry.attempt.attemptOrdinal + 1,
+          },
+        });
+        yield* store.apply({
+          ...base,
+          type: "provider-turn.updated",
+          payload: {
+            ...entry.turn,
+            id: turnId,
+            runAttemptId: attemptId,
+            ordinal: entry.turn.ordinal + 1,
+          },
+        });
+        yield* store.apply({ ...base, type: "message.updated", payload: entry.message });
+        yield* store.apply({
+          ...base,
+          type: "turn-item.updated",
+          payload: { ...entry.item, providerTurnId: turnId },
+        });
+        yield* store.apply({
+          ...base,
+          type: "run.updated",
+          payload: { ...entry.run, activeAttemptId: attemptId },
+        });
+      }
+      yield* agent.poll;
+      expect(lookups).toHaveBeenCalledTimes(2);
+      expect(lookups.mock.calls.filter(([, fields]) => fields.includes("attempts"))).toHaveLength(
+        1,
+      );
+      expect(
+        lookups.mock.calls.filter(([, fields]) => fields.includes("providerTurns")),
+      ).toHaveLength(1);
+      expect(
+        appends
+          .filter((event) => event.text.includes("actualAgentResult"))
+          .map((event) => JSON.parse(event.text)),
+      ).toEqual(
+        entries.map((entry) =>
+          expect.objectContaining({
+            runId: entry.run.id,
+            status: "completed",
+            actualAgentResult: entry.message.text,
+            sourceMessageIds: [entry.message.id],
+          }),
+        ),
+      );
+      lookups.mockClear();
+      yield* agent.poll;
+      expect(lookups).toHaveBeenCalledTimes(1);
+      expect(appends.filter((event) => event.text.includes("actualAgentResult"))).toHaveLength(
+        count,
+      );
     }),
   ).pipe(Effect.provide(services)),
 );
