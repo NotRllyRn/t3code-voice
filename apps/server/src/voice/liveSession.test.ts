@@ -1,25 +1,29 @@
 import { expect, it } from "@effect/vitest";
-import { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
+import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { LiveConnectionError } from "@t3tools/provider-core/server/liveConnection";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as TestClock from "effect/testing/TestClock";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
+import * as VoiceFixture from "../orchestration-v2/VoiceConversation.testkit.ts";
+import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
+import { makeLiveAgentSession } from "./liveAgentSession.ts";
 import { runLiveSession } from "./liveSession.ts";
 import { LiveNetwork } from "./liveTransport.ts";
 import { connection, peer, sdp } from "./liveTestkit.ts";
 
-const agents = Layer.mergeAll(
-  Layer.mock(ThreadManagement.ThreadManagementService)({}),
+const agentAux = Layer.mergeAll(
   Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
   Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
     namedProjectsRoot: "/fixture/projects",
   }),
 );
+const agents = Layer.mergeAll(Layer.mock(ThreadManagement.ThreadManagementService)({}), agentAux);
 const capability = {
   environmentId: EnvironmentId.make("fixture-environment"),
   providerInstanceId: ProviderInstanceId.make("selected-instance"),
@@ -39,19 +43,21 @@ it.effect(
   "server authorizes fresh attempts; 90s wait is cancellable, bounded and never an immediate retry",
   () =>
     Effect.gen(function* () {
+      const threadId = ThreadId.make("fixture-retry-thread");
+      yield* VoiceFixture.create(threadId);
       const down = yield* peer;
       const up = yield* peer;
       const creates: string[] = [];
       let hangups = 0;
       const fiber = yield* runLiveSession({
         socket: down.socket,
-        binding,
+        binding: { threadId },
         connection,
         capability,
         validateOwner: Effect.void,
         onBound: () => {},
       }).pipe(
-        Effect.provide(agents),
+        Effect.provide(agentAux),
         Effect.provideService(LiveNetwork, {
           create: (_, body) =>
             Effect.sync(() => {
@@ -125,7 +131,7 @@ it.effect(
       expect(hangups).toBe(1);
       expect(up.closed()).toBe(true);
       expect(down.closed()).toBe(true);
-    }),
+    }).pipe(Effect.provide(VoiceFixture.layer)),
 );
 
 it.effect.each(["stop", "unauthorized-offer", "stale-config", "budget", "heartbeat"] as const)(
@@ -178,4 +184,122 @@ it.effect.each(["stop", "unauthorized-offer", "stale-config", "budget", "heartbe
       yield* Fiber.join(fiber);
       expect(creates).toBe(0);
     }),
+);
+
+it.effect.each(["ready", "binding"] as const)(
+  "draft Stop while %s preserves reachable history before microphone readiness",
+  (phase) =>
+    Effect.gen(function* () {
+      const down = yield* peer;
+      const up = yield* peer;
+      const threadId = ThreadId.make("draft-stop-thread");
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const bindingEntered = yield* Deferred.make<void>();
+      const bindingRelease = yield* Deferred.make<void>();
+      let launches = 0;
+      const fiber = yield* runLiveSession({
+        socket: down.socket,
+        binding: { draft: { ...binding.draft, projectId: VoiceFixture.projectId } },
+        connection,
+        capability,
+        validateOwner: Effect.void,
+        onBound: () => {},
+      }).pipe(
+        Effect.provide(
+          Layer.mock(ThreadLaunch.ThreadLaunchService)({
+            launch: () =>
+              Effect.gen(function* () {
+                launches++;
+                yield* VoiceFixture.create(threadId).pipe(
+                  Effect.provideService(Orchestrator.OrchestratorV2, orchestrator),
+                );
+                yield* Deferred.succeed(bindingEntered, undefined);
+                if (phase === "binding") yield* Deferred.await(bindingRelease);
+                return {
+                  threadId,
+                  projection: yield* threads.getThreadProjection(threadId),
+                  resumed: false,
+                };
+              }).pipe(Effect.orDie),
+          }),
+        ),
+        Effect.provide(agentAux),
+        Effect.provideService(LiveNetwork, {
+          create: () =>
+            Effect.succeed({
+              status: 201,
+              contentType: "text/plain",
+              location: "/v1/live/draft-call",
+              retryAfter: null,
+              body: Effect.succeed(sdp),
+            }),
+          sideband: () => Effect.succeed(up.socket),
+          hangup: () => Effect.void,
+        }),
+        Effect.scoped,
+        Effect.forkScoped,
+      );
+      const first = JSON.parse(yield* Queue.take(down.output));
+      yield* Queue.offer(
+        down.input,
+        JSON.stringify({ type: "live.start", attemptId: first.attemptId, offerSdp: sdp }),
+      );
+      yield* Queue.take(down.output);
+      yield* Queue.take(down.output);
+      yield* Queue.offer(up.input, '{"type":"session.started","session":{"id":"draft-native"}}');
+      yield* Queue.offer(
+        down.input,
+        JSON.stringify({ type: "live.peer", attemptId: first.attemptId, state: "connected" }),
+      );
+      if (phase === "binding") {
+        yield* Deferred.await(bindingEntered);
+        yield* Queue.offer(
+          up.input,
+          '{"type":"input_transcript.added","item":{"text":"Not admitted while binding."}}',
+        );
+        yield* Queue.offer(down.input, '{"type":"live.stop"}');
+        yield* Fiber.join(fiber);
+        const records = yield* threads.getThreadRecords(threadId, ["messages", "runs"]);
+        expect(records.messages).toHaveLength(0);
+        expect(records.runs).toHaveLength(0);
+        expect(yield* Queue.size(down.output)).toBe(0);
+        return;
+      }
+      const receipt = JSON.parse(yield* Queue.take(down.output));
+      expect(receipt).toEqual({ type: "live.bound", threadId });
+      expect(JSON.parse(yield* Queue.take(down.output)).phase).toBe("connected");
+      yield* Queue.offer(
+        up.input,
+        '{"type":"input_transcript.added","item":{"text":"Remember the violet kite."}}',
+      );
+      expect(JSON.parse(yield* Queue.take(down.output)).committed).toBe(false);
+      yield* Queue.offer(down.input, '{"type":"live.stop"}');
+      yield* Fiber.join(fiber);
+      expect(launches).toBe(1);
+      const records = yield* threads.getThreadRecords(threadId, ["messages", "runs"]);
+      expect(records.messages.map((message) => message.text)).toEqual([
+        "Remember the violet kite.",
+      ]);
+      expect(records.runs).toHaveLength(0);
+      const history: string[] = [];
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const restarted = yield* makeLiveAgentSession({
+            binding: { threadId: receipt.threadId },
+            sessionId: "restarted",
+            onBound: () => {},
+            send: () => Effect.void,
+            append: (event) =>
+              Effect.sync(() => {
+                history.push(event.text);
+              }),
+          }).pipe(Effect.provide(agentAux));
+          yield* restarted.seed;
+          expect(restarted.getThreadId()).toBe(threadId);
+          expect(history[0]).toContain("Remember the violet kite.");
+        }),
+      );
+      expect(launches).toBe(1);
+    }).pipe(Effect.provide(VoiceFixture.layer)),
 );

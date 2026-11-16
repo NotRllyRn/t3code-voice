@@ -146,6 +146,7 @@ export interface ThreadManagementSendInput {
   readonly attachments: ReadonlyArray<ChatAttachment>;
   readonly modelSelection?: ModelSelection;
   readonly mode: ThreadManagementSendMode;
+  readonly expectedUserMessageCount?: number;
   /** Start a new provider session; the orchestrator queues it instead of steering. */
   readonly freshContext?: boolean;
   readonly createdBy: OrchestrationV2Actor;
@@ -371,6 +372,7 @@ export interface ThreadManagementServiceShape {
   ) => Effect.Effect<void, LegacyV1ThreadImporter.LegacyV1ThreadImportError>;
   readonly dispatch: (
     command: OrchestrationV2ServerCommand,
+    options?: { readonly expectedUserMessageCount?: number },
   ) => Effect.Effect<
     Orchestrator.OrchestratorV2DispatchResult,
     Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
@@ -754,10 +756,10 @@ const make = Effect.gen(function* () {
     }
   };
 
-  const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
+  const dispatch: ThreadManagementServiceShape["dispatch"] = (command, options) =>
     ensureCommandTranscripts(command).pipe(
       Effect.andThen(assertDispatchTargetEnabled(command)),
-      Effect.andThen(orchestrator.dispatch(command)),
+      Effect.andThen(orchestrator.dispatch(command, options)),
     );
 
   const getProjectThreadRecords: ThreadManagementServiceShape["getProjectThreadRecords"] = (
@@ -853,22 +855,27 @@ const make = Effect.gen(function* () {
       };
     }
 
-    const dispatched = yield* dispatch({
-      type: "message.dispatch",
-      commandId: input.commandId,
-      threadId: input.threadId,
-      messageId: input.messageId,
-      ...(input.scheduledTaskId === undefined ? {} : { scheduledTaskId: input.scheduledTaskId }),
-      ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
-      text: input.text,
-      attachments: input.attachments,
-      ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
-      ...(input.freshContext ? { freshContext: true } : {}),
-      dispatchMode,
-      ...(mode === "auto" ? { deliveryIntent: "auto" } : {}),
-      createdBy: input.createdBy,
-      creationSource: input.creationSource,
-    });
+    const dispatched = yield* dispatch(
+      {
+        type: "message.dispatch",
+        commandId: input.commandId,
+        threadId: input.threadId,
+        messageId: input.messageId,
+        ...(input.scheduledTaskId === undefined ? {} : { scheduledTaskId: input.scheduledTaskId }),
+        ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
+        text: input.text,
+        attachments: input.attachments,
+        ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+        ...(input.freshContext ? { freshContext: true } : {}),
+        dispatchMode,
+        ...(mode === "auto" ? { deliveryIntent: "auto" } : {}),
+        createdBy: input.createdBy,
+        creationSource: input.creationSource,
+      },
+      input.expectedUserMessageCount === undefined
+        ? undefined
+        : { expectedUserMessageCount: input.expectedUserMessageCount },
+    );
     const projection = yield* getProjectThreadRecords(input, ["runs", "messages", "turnItems"], {
       messageIds: [input.messageId],
       turnItemTypes: ["user_message"],

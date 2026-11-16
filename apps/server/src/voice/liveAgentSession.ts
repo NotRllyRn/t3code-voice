@@ -43,6 +43,7 @@ export const sendLiveDelegation = Effect.fn("LiveAgent.sendDelegation")(function
   readonly sessionId: string;
   readonly delegationId: string;
   readonly instructions: string;
+  readonly expectedUserMessageCount?: number;
   readonly context: readonly { readonly role: "user" | "assistant"; readonly text: string }[];
 }) {
   const threads = yield* ThreadManagement.ThreadManagementService;
@@ -64,6 +65,9 @@ export const sendLiveDelegation = Effect.fn("LiveAgent.sendDelegation")(function
     text,
     attachments: [],
     mode: "queue",
+    ...(input.expectedUserMessageCount === undefined
+      ? {}
+      : { expectedUserMessageCount: input.expectedUserMessageCount }),
     createdBy: "agent",
     creationSource: "server",
   });
@@ -93,13 +97,13 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       sequence: number;
       frozen: boolean;
       nativeDone: boolean;
+      inputCount: number;
       at: number;
     }
   >();
   const context: Array<{ role: "user" | "assistant"; text: string }> = [];
   const ids = new Set<string>();
-  let humanEpoch = 0;
-  let claimedHumanEpoch = 0;
+  let claimedHumanSegmentId: string | undefined;
   let humanAt = Number.NEGATIVE_INFINITY;
   let narrationGeneration = 0;
   let progressAt = 0;
@@ -222,10 +226,11 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
         segment.nativeDone = true;
         return;
       }
+      // Without a new transcript or a distinct turn ID, another completion is ambiguous.
+      if (event.role === "user" && event.type === "turn_done" && segment?.nativeDone && !nativeId)
+        return;
       const now = yield* Clock.currentTimeMillis;
       if (event.role === "user" && event.text.trim()) {
-        // Only inbound human text changes authority; history boundaries and assistant output cannot.
-        humanEpoch++;
         humanAt = now;
         narrationGeneration++;
       }
@@ -238,9 +243,16 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
           sequence: sequence++,
           frozen: false,
           nativeDone: false,
+          inputCount: 0,
           at: now,
         };
         segments.set(event.role, segment);
+        if (event.role === "user" && threadId) {
+          const { messages } = yield* threads.getThreadRecords(threadId, ["messages"], {
+            messageRoles: ["user"],
+          });
+          segment.inputCount = messages.filter((message) => !message.voice).length;
+        }
       }
       const next = event.type === "transcript" ? segment.text + event.text : event.text;
       if (!bounded(next, 16384)) return yield* fail();
@@ -270,7 +282,8 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       !bounded(event.instructions, 16384)
     )
       return yield* fail();
-    if (humanEpoch <= claimedHumanEpoch) {
+    const human = segments.get("user");
+    if (!human?.nativeDone || !human.text.trim() || human.id === claimedHumanSegmentId) {
       yield* append(event.delegationId, "quiet", {
         status: "not_submitted",
         reason: "ambiguous_repeat",
@@ -278,13 +291,21 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       });
       return;
     }
-    claimedHumanEpoch = humanEpoch;
+    claimedHumanSegmentId = human.id;
     yield* freeze("user");
     yield* freeze("assistant");
     const shell = yield* ensureThread();
-    const state = yield* threads.getThreadRecords(shell.id, ["runtimeRequests"], {
+    const state = yield* threads.getThreadRecords(shell.id, ["runtimeRequests", "messages"], {
+      messageRoles: ["user"],
       runtimeRequestStatuses: ["pending"],
     });
+    if (state.messages.filter((message) => !message.voice).length !== human.inputCount) {
+      yield* append(event.delegationId, "quiet", {
+        status: "not_submitted",
+        reason: "canonical_input_changed",
+      });
+      return;
+    }
     if (state.runtimeRequests.length) {
       yield* input.send({ type: "live.agent", status: "waiting" });
       yield* append(event.delegationId, "speakable", {
@@ -300,8 +321,16 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       sessionId: input.sessionId,
       delegationId: event.delegationId,
       instructions: event.instructions,
+      expectedUserMessageCount: human.inputCount,
       context: [...context],
-    });
+    }).pipe(Effect.catchTags({ OrchestratorInputChangedError: () => Effect.undefined }));
+    if (!sent) {
+      yield* append(event.delegationId, "quiet", {
+        status: "not_submitted",
+        reason: "canonical_input_changed",
+      });
+      return;
+    }
     feedback.set(sent.run.id, {
       delegationId: event.delegationId,
       runId: sent.run.id,
@@ -326,7 +355,8 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
     if (stopped) return;
     const tick = yield* Clock.currentTimeMillis;
     for (const [role, segment] of segments)
-      if (!segment.frozen && tick - segment.at >= HISTORY_IDLE_MS) yield* freeze(role);
+      if (role === "assistant" && !segment.frozen && tick - segment.at >= HISTORY_IDLE_MS)
+        yield* freeze(role);
     if (!threadId || !seeded) return;
     const updates = yield* threads.getThreadRecords(threadId, ["runs", "messages"], {
       messageRoles: ["user"],
@@ -347,7 +377,9 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       observedOrdinal = run.ordinal;
       if (message.voice || message.createdBy !== "user") continue;
       // Typed input already has a canonical run; it is context, never fresh delegation authority.
-      if (DateTime.toEpochMillis(message.createdAt) >= humanAt) claimedHumanEpoch = humanEpoch;
+      const human = segments.get("user");
+      if (human && updates.messages.filter((message) => !message.voice).length > human.inputCount)
+        claimedHumanSegmentId = human.id;
       narrationGeneration++;
       humanAt = Math.max(humanAt, DateTime.toEpochMillis(message.createdAt));
       if (feedback.size >= MAX_TRACKED_RUNS) return yield* fail();
@@ -526,6 +558,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
   );
   return {
     receive: (event: NativeLiveEvent) => receive(event).pipe(Effect.mapError(fail)),
+    bind: ensureThread().pipe(Effect.asVoid, Effect.mapError(fail)),
     seed: seed().pipe(Effect.mapError(fail)),
     poll: poll().pipe(Effect.mapError(fail)),
     getThreadId: () => threadId,

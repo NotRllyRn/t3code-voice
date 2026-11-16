@@ -416,6 +416,7 @@ it.effect(
           sessionId: caption.voice!.sessionId,
           delegationId: "fictional-delegation",
           instructions,
+          expectedUserMessageCount: 0,
           context: [{ role: "user", text: original }],
         }).pipe(Effect.provideService(ThreadManagement.ThreadManagementService, f.management));
         expect(receipt.run.id).toBe(history.runs[0]!.id);

@@ -144,6 +144,8 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
         });
         if (!event) return;
         if (event.type === "started") {
+          if ("draft" in input.binding) yield* agent.bind;
+          if (!alive) return;
           nativeStarted = true;
           yield* agent.seed;
           if (peer) yield* status("connected");

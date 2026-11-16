@@ -298,9 +298,9 @@ it.live("a derived spoken yes cannot bypass pending T3 permissions or questions"
         }),
       );
       yield* agent.receive({
-        type: "transcript",
+        type: "turn_done",
         role: "user",
-        itemId: "permission-words",
+        turnId: "permission-words",
         text: "Yes approve that.",
       });
       yield* agent.receive({
@@ -503,14 +503,14 @@ it.effect("only fresh human input authorizes delegation, including after complet
       expect(
         records.messages.some((message) => message.text === "No, inspect blue only. Do not edit."),
       ).toBe(true);
-      // The source protocol does not promise turn IDs; a new completed human turn still counts.
+      // An ID-less repeat without new transcript input cannot prove a new utterance.
       yield* agent.receive({
         type: "turn_done",
         role: "user",
         text: "No, inspect blue only. Do not edit.",
       });
       yield* agent.receive({ ...delegation, delegationId: "idless-followup" });
-      expect((yield* threads.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(4);
+      expect((yield* threads.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(3);
     }),
   ).pipe(Effect.provide(services)),
 );
@@ -686,7 +686,7 @@ it.effect(
 );
 
 it.effect(
-  "inactivity freezes both roles without execution; late completion and Stop do not duplicate history",
+  "inactivity freezes assistant history without finalizing human authority; completion and Stop do not duplicate history",
   () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("thread:live-inactivity");
@@ -712,7 +712,7 @@ it.effect(
           yield* agent.poll;
           const threads = yield* ThreadManagement.ThreadManagementService;
           expect((yield* threads.getThreadRecords(threadId, ["messages"])).messages).toHaveLength(
-            2,
+            1,
           );
           for (const role of ["user", "assistant"] as const) {
             yield* agent.receive({
@@ -743,8 +743,8 @@ it.effect(
       );
       expect(records.runs).toHaveLength(0);
       expect(records.messages.map((message) => message.text)).toEqual([
-        "Initial user.",
         "Initial assistant.",
+        "Initial user.",
         "Corrected user.",
         "Corrected assistant.",
       ]);
@@ -879,6 +879,194 @@ it.effect(
           expect(finals.some((notice) => notice.text.includes(`commentary-${index}`))).toBe(true);
           expect(finals.some((notice) => notice.text.includes(sent[index]!.run.id))).toBe(true);
         }
+      }),
+    ).pipe(Effect.provide(services)),
+);
+
+it.live.each([false, true])(
+  "partial/final corrections grant one request, never partial authority (IDs: %s)",
+  (withIds) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const threadId = ThreadId.make(`thread:partial-final-${withIds}`);
+        yield* VoiceFixture.create(threadId);
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const agent = yield* makeLiveAgentSession({
+          binding: { threadId },
+          sessionId: `partial-${withIds}`,
+          onBound: () => {},
+          send: () => Effect.void,
+          append: () => Effect.void,
+        });
+        yield* agent.seed;
+        const delegate = (delegationId: string) =>
+          agent.receive({
+            type: "delegation",
+            delegationId,
+            instructions: "Inspect blue only. Do not edit.",
+            provenance: "native_live_delegation",
+          });
+        yield* agent.receive({
+          type: "transcript",
+          role: "user",
+          text: "Inspect it",
+          ...(withIds ? { itemId: "partial-one" } : {}),
+        });
+        yield* delegate("premature");
+        expect((yield* threads.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(0);
+        yield* agent.receive({
+          type: "transcript",
+          role: "user",
+          text: ", blue only",
+          ...(withIds ? { itemId: "partial-two" } : {}),
+        });
+        yield* delegate("second-partial");
+        expect((yield* threads.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(0);
+        yield* agent.receive({
+          type: "turn_done",
+          role: "user",
+          text: "Inspect blue only. Do not edit.",
+          ...(withIds ? { turnId: "final-one" } : {}),
+        });
+        yield* delegate("final");
+        yield* agent.receive({
+          type: "turn_done",
+          role: "user",
+          text: "Inspect blue only. Do not edit.",
+          ...(withIds ? { turnId: "final-one" } : {}),
+        });
+        yield* delegate("replayed-final");
+        expect((yield* threads.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(1);
+        yield* agent.receive({
+          type: "transcript",
+          role: "user",
+          text: "Now inspect green.",
+          ...(withIds ? { itemId: "next-partial" } : {}),
+        });
+        yield* agent.receive({
+          type: "turn_done",
+          role: "user",
+          text: "Now inspect green.",
+          ...(withIds ? { turnId: "final-two" } : {}),
+        });
+        yield* delegate("genuine-followup");
+        expect((yield* threads.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(2);
+      }),
+    ).pipe(Effect.provide(services)),
+);
+
+it.live.each(["before-admission", "before-commit"] as const)(
+  "typed submission %s wins without a poll",
+  (timing) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("thread:typed-before-delegation");
+        yield* VoiceFixture.create(threadId);
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const typed = threads.sendToThread({
+          projectId: VoiceFixture.projectId,
+          threadId,
+          commandId: CommandId.make("typed-race"),
+          messageId: MessageId.make("typed-race"),
+          text: "Inspect blue only. Do not edit.",
+          attachments: [],
+          mode: "queue",
+          createdBy: "user",
+          creationSource: "web",
+        });
+        let injected = false;
+        const guarded: typeof threads = {
+          ...threads,
+          sendToThread: (input) =>
+            Effect.gen(function* () {
+              if (timing === "before-commit" && !injected) {
+                injected = true;
+                yield* typed;
+              }
+              return yield* threads.sendToThread(input);
+            }),
+        };
+        const agent = yield* makeLiveAgentSession({
+          binding: { threadId },
+          sessionId: "typed-race",
+          onBound: () => {},
+          send: () => Effect.void,
+          append: () => Effect.void,
+        });
+        yield* agent.seed;
+        yield* agent.receive({
+          type: "turn_done",
+          role: "user",
+          turnId: "speech",
+          text: "Inspect the blue setting.",
+        });
+        if (timing === "before-admission") yield* typed;
+        yield* agent
+          .receive({
+            type: "delegation",
+            delegationId: "typed-duplicate",
+            instructions: "Inspect the blue setting.",
+            provenance: "native_live_delegation",
+          })
+          .pipe(Effect.provideService(ThreadManagement.ThreadManagementService, guarded));
+        const admitted = yield* threads.getThreadRecords(threadId, ["runs", "messages"]);
+        expect(admitted.runs).toHaveLength(1);
+        expect(admitted.runs[0]?.userMessageId).toBe(MessageId.make("typed-race"));
+        expect(
+          admitted.messages.find((message) => message.id === MessageId.make("typed-race"))?.text,
+        ).toBe("Inspect blue only. Do not edit.");
+        yield* agent.receive({
+          type: "turn_done",
+          role: "user",
+          turnId: "next-speech",
+          text: "Now inspect the green setting.",
+        });
+        yield* agent.receive({
+          type: "delegation",
+          delegationId: "typed-followup",
+          instructions: "Inspect the green setting.",
+          provenance: "native_live_delegation",
+        });
+        expect((yield* threads.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(2);
+      }),
+    ).pipe(Effect.provide(services)),
+);
+
+it.live.each(["Read the file.", "Read the blue file only. Do not edit."])(
+  "late final %s cannot reauthorize a partial delegation",
+  (finalText) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("thread:late-corrected-final");
+        yield* VoiceFixture.create(threadId);
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const agent = yield* makeLiveAgentSession({
+          binding: { threadId },
+          sessionId: "late-final",
+          onBound: () => {},
+          send: () => Effect.void,
+          append: () => Effect.void,
+        });
+        yield* agent.seed;
+        yield* agent.receive({
+          type: "transcript",
+          role: "user",
+          itemId: "chunk",
+          text: "Read the file",
+        });
+        const delegation = {
+          type: "delegation",
+          provenance: "native_live_delegation",
+          delegationId: "early",
+          instructions: "Read the file.",
+        } as const;
+        yield* agent.receive(delegation);
+        yield* agent.receive({ type: "turn_done", role: "user", turnId: "final", text: finalText });
+        yield* agent.receive({ ...delegation, delegationId: "late" });
+        const records = yield* threads.getThreadRecords(threadId, ["runs", "messages"]);
+        expect(records.runs).toHaveLength(1);
+        expect(records.messages.find((message) => message.voice)?.text).toBe(finalText);
+        expect(records.messages.find((message) => message.runId)?.text).toContain(finalText);
       }),
     ).pipe(Effect.provide(services)),
 );
