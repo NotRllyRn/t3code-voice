@@ -1,0 +1,211 @@
+{
+  "evidence": "Minimal inbound frames selected from execution-disabled native audio capture R2; only IDs consistently replaced. No credentials, account/session IDs, SDP or audio. Timing retained as data, never association authority.",
+  "sourceSha256": "fac3fa9c62579812631886d1f25a054f058a6fefb962bf3723a4cf1843dcba3f",
+  "contract": "Observed exact parent matches in 3/3 delegations; public source does not document causality or overlap guarantees.",
+  "frames": [
+    {
+      "sequence": 20,
+      "payload": {
+        "type": "turn.created",
+        "turn": {
+          "id": "turn_request",
+          "end_ms": 1400,
+          "role": "user",
+          "start_ms": 1200,
+          "transcript": "Please ask"
+        }
+      }
+    },
+    {
+      "sequence": 24,
+      "payload": {
+        "type": "turn.delta",
+        "delta": " the",
+        "end_ms": 1600,
+        "start_ms": 1400,
+        "turn_id": "turn_request"
+      }
+    },
+    {
+      "sequence": 167,
+      "payload": {
+        "type": "delegation.created",
+        "item": {
+          "id": "delegation_request",
+          "type": "delegation",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Please ask the coding agent to read the fictional fact dot text file and report the lighthouse color. This is only a fictional diagnostic. Do not claim any task has run"
+            }
+          ],
+          "handoff_id": "handoff_request",
+          "target": "client",
+          "user_bidi_turn_id": "turn_request"
+        },
+        "offset_ms": 11200
+      }
+    },
+    {
+      "sequence": 171,
+      "payload": {
+        "type": "turn.done",
+        "turn": {
+          "id": "turn_request",
+          "end_ms": 11600,
+          "role": "user",
+          "start_ms": 1200,
+          "transcript": "Please ask the coding agent to read the fictional fact dot text file and report the lighthouse color. This is only a fictional diagnostic. Do not claim any task has run"
+        }
+      }
+    },
+    {
+      "sequence": 324,
+      "payload": {
+        "type": "turn.created",
+        "turn": {
+          "id": "turn_correction",
+          "end_ms": 25600,
+          "role": "user",
+          "start_ms": 25400,
+          "transcript": "Correction"
+        }
+      }
+    },
+    {
+      "sequence": 330,
+      "payload": {
+        "type": "turn.delta",
+        "delta": ", I",
+        "end_ms": 26000,
+        "start_ms": 25800,
+        "turn_id": "turn_correction"
+      }
+    },
+    {
+      "sequence": 449,
+      "payload": {
+        "type": "delegation.created",
+        "item": {
+          "id": "delegation_correction",
+          "type": "delegation",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Correction, I meant the paper kite code, not the lighthouse color. Please retain that correction. No task has executed in this diagnostic"
+            }
+          ],
+          "handoff_id": "handoff_correction",
+          "target": "client",
+          "user_bidi_turn_id": "turn_correction"
+        },
+        "offset_ms": 33800
+      }
+    },
+    {
+      "sequence": 460,
+      "payload": {
+        "type": "turn.done",
+        "turn": {
+          "id": "turn_correction",
+          "end_ms": 34600,
+          "role": "user",
+          "start_ms": 25400,
+          "transcript": "Correction, I meant the paper kite code, not the lighthouse color. Please retain that correction. No task has executed in this diagnostic"
+        }
+      }
+    },
+    {
+      "sequence": 575,
+      "payload": {
+        "type": "turn.created",
+        "turn": {
+          "id": "turn_next",
+          "end_ms": 45400,
+          "role": "user",
+          "start_ms": 45200,
+          "transcript": " Here is a"
+        }
+      }
+    },
+    {
+      "sequence": 579,
+      "payload": {
+        "type": "turn.delta",
+        "delta": " new",
+        "end_ms": 45600,
+        "start_ms": 45400,
+        "turn_id": "turn_next"
+      }
+    },
+    {
+      "sequence": 686,
+      "payload": {
+        "type": "delegation.created",
+        "item": {
+          "id": "delegation_next",
+          "type": "delegation",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Here is a new request. Ask the coding agent to inspect the fictional blue setting. Keep this separate from the paper kite request"
+            }
+          ],
+          "handoff_id": "handoff_next",
+          "target": "client",
+          "user_bidi_turn_id": "turn_next"
+        },
+        "offset_ms": 52600
+      }
+    },
+    {
+      "sequence": 692,
+      "payload": {
+        "type": "turn.done",
+        "turn": {
+          "id": "turn_next",
+          "end_ms": 53000,
+          "role": "user",
+          "start_ms": 45200,
+          "transcript": " Here is a new request. Ask the coding agent to inspect the fictional blue setting. Keep this separate from the paper kite request"
+        }
+      }
+    },
+    {
+      "sequence": 809,
+      "payload": {
+        "type": "turn.created",
+        "turn": {
+          "id": "turn_greeting",
+          "end_ms": 63600,
+          "role": "user",
+          "start_ms": 63400,
+          "transcript": " Hello"
+        }
+      }
+    },
+    {
+      "sequence": 815,
+      "payload": {
+        "type": "turn.delta",
+        "delta": " there",
+        "end_ms": 64000,
+        "start_ms": 63800,
+        "turn_id": "turn_greeting"
+      }
+    },
+    {
+      "sequence": 845,
+      "payload": {
+        "type": "turn.done",
+        "turn": {
+          "id": "turn_greeting",
+          "end_ms": 65800,
+          "role": "user",
+          "start_ms": 63400,
+          "transcript": " Hello there, how are you today"
+        }
+      }
+    }
+  ]
+}

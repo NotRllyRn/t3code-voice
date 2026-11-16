@@ -100,6 +100,7 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
               lastHeartbeat = yield* Clock.currentTimeMillis;
               if (event.type === "live.stop") {
                 alive = false;
+                yield* agent.stop;
                 yield* Deferred.succeed(stop, undefined);
               } else yield* offer({ type: "client", frame });
             }),

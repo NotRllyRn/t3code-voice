@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import fixtures from "./fixtures/live-native/events.json" with { type: "json" };
 import httpFixture from "./fixtures/live-create-http.json" with { type: "json" };
+import parentCapture from "./fixtures/live-native/parent-association.json" with { type: "json" };
 import {
   NATIVE_LIVE_APPEND_CHUNK_BYTES,
   NATIVE_LIVE_MAX_CONTEXT_BYTES,
@@ -17,6 +18,26 @@ import {
 
 const decode = (event: unknown) => decodeNativeLiveEvent(JSON.stringify(event));
 describe("pinned native Live wire", () => {
+  it("retains captured parent/handoff identity and native turn lifecycle without offset authority", () => {
+    for (const { payload } of parentCapture.frames) {
+      const event = decode(payload);
+      if (payload.type === "delegation.created")
+        expect(event).toMatchObject({
+          type: "delegation",
+          userTurnId: payload.item!.user_bidi_turn_id,
+          handoffId: payload.item!.handoff_id,
+        });
+      else if (payload.type === "turn.created")
+        expect(event).toMatchObject({
+          type: "turn_created",
+          turnId: payload.turn!.id,
+          role: "user",
+          text: payload.turn!.transcript,
+        });
+      else if (payload.type === "turn.delta")
+        expect(event).toEqual({ type: "turn_delta", turnId: payload.turn_id, text: payload.delta });
+    }
+  });
   it("uses native transcript fields without inventing timing/finality or trusting updates as startup", () => {
     expect(decode(fixtures.started)).toEqual({ type: "started", sessionId: "session-fictional" });
     expect(decode(fixtures.updated)).toEqual({ type: "updated", sessionId: "session-fictional" });
@@ -73,6 +94,17 @@ describe("pinned native Live wire", () => {
   });
 
   it.each([
+    { ...fixtures.delegation, item: { ...fixtures.delegation.item, user_bidi_turn_id: null } },
+    {
+      ...fixtures.delegation,
+      item: { ...fixtures.delegation.item, user_bidi_turn_id: "../unsafe" },
+    },
+    { ...fixtures.delegation, item: { ...fixtures.delegation.item, handoff_id: 42 } },
+    { ...fixtures.delegation, item: { ...fixtures.delegation.item, handoff_id: "x".repeat(129) } },
+    { type: "turn.created", turn: { id: "user-one", role: "tool", transcript: "poison" } },
+    { type: "turn.created", turn: { role: "user", transcript: "missing identity" } },
+    { type: "turn.delta", turn_id: "../unsafe", delta: "poison" },
+    { type: "turn.delta", turn_id: "user-one", delta: null },
     { ...fixtures.delegation, item: { ...fixtures.delegation.item, id: "../unsafe" } },
     { ...fixtures.delegation, item: { ...fixtures.delegation.item, target: "server" } },
     { ...fixtures.delegation, item: { ...fixtures.delegation.item, type: "function_call" } },

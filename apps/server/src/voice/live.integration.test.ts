@@ -68,6 +68,8 @@ const nativeDelegation = (id: string) => ({
     id,
     type: "delegation",
     target: "client",
+    user_bidi_turn_id: "fictional-user-turn",
+    handoff_id: id,
     content: [{ type: "input_text", text: instructions }],
   },
 });
@@ -388,12 +390,23 @@ it.effect(
           (event) => event.type === "live.status" && event.phase === "connected",
         );
         f.native({
+          type: "turn.created",
+          turn: { id: "fictional-user-turn", role: "user", transcript: "Please inspect" },
+        });
+        yield* take(f.browserEvents, (event) => event.type === "live.caption" && !event.committed);
+        f.native(nativeDelegation("fictional-delegation"));
+        f.native({
+          type: "turn.delta",
+          turn_id: "fictional-user-turn",
+          delta: " the fictional configuration.",
+        });
+        yield* take(f.browserEvents, (event) => event.type === "live.caption" && !event.committed);
+        expect((yield* f.management.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(0);
+        f.native({
           type: "turn.done",
           turn: { id: "fictional-user-turn", role: "user", transcript: original },
         });
         yield* take(f.browserEvents, (event) => event.type === "live.caption" && event.committed);
-        expect((yield* f.management.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(0);
-        f.native(nativeDelegation("fictional-delegation"));
         const accepted = yield* take(f.browserEvents, (event) => event.type === "live.agent");
         expect(accepted.type === "live.agent" && accepted.status).toBe("accepted");
         const history = yield* f.management.getThreadRecords(threadId, ["messages", "runs"]);
@@ -402,6 +415,7 @@ it.effect(
         const caption = history.messages.find((message) => message.text === original)!;
         expect(caption.voice?.transcriptFinality).toBe("application_frozen");
         expect(caption.voice?.delivery).toBe("unknown");
+        expect(caption.voice?.itemId).toBe("fictional-user-turn");
         const derived = history.messages.find((message) =>
           message.text.includes("Live delegated instruction"),
         )!;
@@ -416,6 +430,8 @@ it.effect(
           sessionId: caption.voice!.sessionId,
           delegationId: "fictional-delegation",
           instructions,
+          userTurnId: "fictional-user-turn",
+          userTranscript: original,
           expectedUserMessageCount: 0,
           context: [{ role: "user", text: original }],
         }).pipe(Effect.provideService(ThreadManagement.ThreadManagementService, f.management));
@@ -675,6 +691,7 @@ it.effect("assistant feedback alone cannot re-authorize a terminal delegation un
       const delegation = {
         type: "delegation",
         delegationId: "fictional-once",
+        userTurnId: "fictional-original",
         instructions,
         provenance: "native_live_delegation",
       } as const;

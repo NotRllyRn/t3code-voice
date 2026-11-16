@@ -25,6 +25,13 @@ export type NativeLiveEvent =
       readonly itemId?: string;
     }
   | {
+      readonly type: "turn_created";
+      readonly role: "user" | "assistant";
+      readonly text: string;
+      readonly turnId: string;
+    }
+  | { readonly type: "turn_delta"; readonly text: string; readonly turnId: string }
+  | {
       readonly type: "turn_done";
       readonly role: "user" | "assistant";
       readonly text: string;
@@ -33,6 +40,8 @@ export type NativeLiveEvent =
   | {
       readonly type: "delegation";
       readonly delegationId: string;
+      readonly userTurnId?: string;
+      readonly handoffId?: string;
       readonly instructions: string;
       readonly provenance: "native_live_delegation";
     }
@@ -79,7 +88,7 @@ function optionalId(value: unknown): string | undefined {
   return value === undefined ? undefined : id(value);
 }
 
-// Native field names are pinned in fixtures/live-native/evidence.json, not the public Live guide.
+// Native dialect: fixtures/live-native/evidence.json; observed parent/lifecycle: parent-association.json.
 export function decodeNativeLiveEvent(frame: string): NativeLiveEvent | null {
   let event: Record<string, unknown>;
   try {
@@ -106,10 +115,18 @@ export function decodeNativeLiveEvent(frame: string): NativeLiveEvent | null {
         ...(itemId === undefined ? {} : { itemId }),
       };
     }
+    case "turn.created":
     case "turn.done": {
       const turn = record(event.turn);
       if (turn.role !== "user" && turn.role !== "assistant") throw invalid();
-      const turnId = optionalId(turn.id);
+      const turnId = event.type === "turn.created" ? id(turn.id) : optionalId(turn.id);
+      if (event.type === "turn.created")
+        return {
+          type: "turn_created",
+          role: turn.role,
+          turnId: turnId!,
+          text: text(turn.transcript, MAX_TRANSCRIPT_BYTES),
+        };
       return {
         type: "turn_done",
         role: turn.role,
@@ -117,6 +134,12 @@ export function decodeNativeLiveEvent(frame: string): NativeLiveEvent | null {
         ...(turnId === undefined ? {} : { turnId }),
       };
     }
+    case "turn.delta":
+      return {
+        type: "turn_delta",
+        turnId: id(event.turn_id),
+        text: text(event.delta, MAX_TRANSCRIPT_BYTES),
+      };
     case "delegation.created": {
       const item = record(event.item);
       if (
@@ -133,6 +156,8 @@ export function decodeNativeLiveEvent(frame: string): NativeLiveEvent | null {
         return text(content.text, MAX_TRANSCRIPT_BYTES);
       });
       const instructions = text(parts.join(""), MAX_TRANSCRIPT_BYTES);
+      const userTurnId = optionalId(item.user_bidi_turn_id);
+      const handoffId = optionalId(item.handoff_id);
       if (!instructions.trim()) throw invalid();
       // Pinned parser discards offset_ms; its test proves presence, not association semantics.
       if (
@@ -143,6 +168,8 @@ export function decodeNativeLiveEvent(frame: string): NativeLiveEvent | null {
       return {
         type: "delegation",
         delegationId: id(item.id),
+        ...(userTurnId === undefined ? {} : { userTurnId }),
+        ...(handoffId === undefined ? {} : { handoffId }),
         instructions,
         provenance: "native_live_delegation",
       };

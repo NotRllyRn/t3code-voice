@@ -11,6 +11,7 @@ import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as VoiceConversation from "../orchestration-v2/VoiceConversation.ts";
@@ -25,6 +26,22 @@ const bounded = (value: string, max: number) => Buffer.byteLength(value, "utf8")
 const HISTORY_IDLE_MS = 10000;
 const PROGRESS_FRESH_MS = 20000;
 const DISCOVERY_BATCH = 8;
+const MAX_PENDING_PARENTS = 32;
+const PARENT_WAIT_MS = 30000;
+
+type Delegation = Extract<NativeLiveEvent, { type: "delegation" }>;
+type Segment = {
+  id: string;
+  turnId?: string;
+  text: string;
+  revision: number;
+  sequence: number;
+  frozen: boolean;
+  nativeDone: boolean;
+  claimed: boolean;
+  inputCount: number;
+  at: number;
+};
 // Resource guard: fail closed rather than silently discard an outstanding run.
 const MAX_TRACKED_RUNS = 4096;
 
@@ -43,6 +60,9 @@ export const sendLiveDelegation = Effect.fn("LiveAgent.sendDelegation")(function
   readonly sessionId: string;
   readonly delegationId: string;
   readonly instructions: string;
+  readonly userTurnId: string;
+  readonly userTranscript: string;
+  readonly handoffId?: string;
   readonly expectedUserMessageCount?: number;
   readonly context: readonly { readonly role: "user" | "assistant"; readonly text: string }[];
 }) {
@@ -54,6 +74,9 @@ export const sendLiveDelegation = Effect.fn("LiveAgent.sendDelegation")(function
       source: "native_live_delegation",
       sessionId: input.sessionId,
       delegationId: input.delegationId,
+      userTurnId: input.userTurnId,
+      userTranscript: input.userTranscript,
+      ...(input.handoffId === undefined ? {} : { handoffId: input.handoffId }),
       instructions: input.instructions,
       conversationContext: input.context,
     });
@@ -88,28 +111,23 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
   let sequence = 0;
   let count = 0;
   let stopped = false;
-  const segments = new Map<
-    "user" | "assistant",
-    {
-      id: string;
-      text: string;
-      revision: number;
-      sequence: number;
-      frozen: boolean;
-      nativeDone: boolean;
-      inputCount: number;
-      at: number;
-    }
-  >();
+  const segments = new Map<"user" | "assistant", Segment>();
+  const userTurns = new Map<string, Segment>();
+  const pending = new Map<string, { event: Delegation; expiresAt: number }>();
+  const historyLock = yield* Semaphore.make(1);
   const context: Array<{ role: "user" | "assistant"; text: string }> = [];
   const ids = new Set<string>();
-  let claimedHumanSegmentId: string | undefined;
+  const handoffs = new Set<string>();
   let humanAt = Number.NEGATIVE_INFINITY;
   let narrationGeneration = 0;
   let progressAt = 0;
   let progressSourceAt = Number.NEGATIVE_INFINITY;
   const transcriptIds = new Set<string>();
   const turnIds = new Set<string>();
+  const stop = Effect.sync(() => {
+    stopped = true;
+    pending.clear();
+  });
   const feedback = new Map<RunId, RunFeedback>();
   let observedOrdinal = 0;
   let seeded = false;
@@ -143,8 +161,10 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
     channel: NativeLiveAppend["channel"],
     data: unknown,
   ) => input.append({ ...(delegationId ? { delegationId } : {}), channel, text: stringify(data) });
-  const freeze = Effect.fn("LiveAgent.freeze")(function* (role: "user" | "assistant") {
-    const segment = segments.get(role);
+  const freeze = Effect.fn("LiveAgent.freeze")(function* (
+    role: "user" | "assistant",
+    segment = segments.get(role),
+  ) {
     if (!segment || segment.frozen || !segment.text.trim()) return;
     // Receipt identity and sequence survive interruption; finalization can retry the same immutable record.
     const shell = yield* ensureThread();
@@ -156,7 +176,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       creationSource: "web",
       voice: {
         sessionId: input.sessionId,
-        itemId: segment.id,
+        itemId: segment.turnId ?? segment.id,
         sequence: segment.sequence,
         // Application-frozen voice response identity, never a coding-provider turn.
         ...(role === "assistant" ? { responseId: `live_response_${segment.id}` } : {}),
@@ -178,7 +198,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       committed: true,
       messageId: saved.messageId,
     });
-  });
+  }, historyLock.withPermits(1));
   const seed = Effect.fn("LiveAgent.seed")(function* () {
     if (seeded) return;
     seeded = true;
@@ -206,93 +226,61 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       outstandingRunCount: outstanding.length,
     });
   });
-  const receive = Effect.fn("LiveAgent.receive")(function* (event: NativeLiveEvent) {
+  const reject = (event: Delegation, reason: string) =>
+    append(event.delegationId, "quiet", {
+      status: "not_submitted",
+      reason,
+    });
+  const expirePending = Effect.fn("LiveAgent.expirePending")(function* (now: number) {
+    for (const [parent, work] of pending) {
+      if (now < work.expiresAt) continue;
+      pending.delete(parent);
+      yield* reject(work.event, "parent_timeout");
+    }
+  });
+  const newSegment = Effect.fn("LiveAgent.newSegment")(function* (
+    role: "user" | "assistant",
+    now: number,
+  ) {
+    if (++count > 1024) return yield* fail();
+    const segment: Segment = {
+      id: `segment_${count}`,
+      text: "",
+      revision: 0,
+      sequence: sequence++,
+      frozen: false,
+      nativeDone: false,
+      claimed: false,
+      inputCount: 0,
+      at: now,
+    };
+    segments.set(role, segment);
+    if (role === "user" && threadId) {
+      const { messages } = yield* threads.getThreadRecords(threadId, ["messages"], {
+        messageRoles: ["user"],
+      });
+      segment.inputCount = messages.filter((message) => !message.voice).length;
+    }
+    return segment;
+  });
+  const caption = (role: "user" | "assistant", segment: Segment) =>
+    input.send({
+      type: "live.caption",
+      sessionId: input.sessionId,
+      role,
+      segmentId: segment.id,
+      revision: ++segment.revision,
+      text: segment.text,
+      committed: false,
+    });
+  const admit = Effect.fn("LiveAgent.admit")(function* (event: Delegation, human: Segment) {
     if (stopped) return;
-    if (event.type === "transcript" || event.type === "turn_done") {
-      const nativeId = event.type === "transcript" ? event.itemId : event.turnId;
-      const seen = event.type === "transcript" ? transcriptIds : turnIds;
-      if (nativeId) {
-        if (seen.has(nativeId)) return;
-        if (seen.size >= 4096) return yield* fail();
-        seen.add(nativeId);
-      }
-      let segment = segments.get(event.role);
-      if (
-        event.type === "turn_done" &&
-        segment?.frozen &&
-        segment.text === event.text &&
-        !segment.nativeDone
-      ) {
-        segment.nativeDone = true;
-        return;
-      }
-      // Without a new transcript or a distinct turn ID, another completion is ambiguous.
-      if (event.role === "user" && event.type === "turn_done" && segment?.nativeDone && !nativeId)
-        return;
-      const now = yield* Clock.currentTimeMillis;
-      if (event.role === "user" && event.text.trim()) {
-        humanAt = now;
-        narrationGeneration++;
-      }
-      if (!segment || segment.frozen) {
-        if (++count > 1024) return yield* fail();
-        segment = {
-          id: `segment_${count}`,
-          text: "",
-          revision: 0,
-          sequence: sequence++,
-          frozen: false,
-          nativeDone: false,
-          inputCount: 0,
-          at: now,
-        };
-        segments.set(event.role, segment);
-        if (event.role === "user" && threadId) {
-          const { messages } = yield* threads.getThreadRecords(threadId, ["messages"], {
-            messageRoles: ["user"],
-          });
-          segment.inputCount = messages.filter((message) => !message.voice).length;
-        }
-      }
-      const next = event.type === "transcript" ? segment.text + event.text : event.text;
-      if (!bounded(next, 16384)) return yield* fail();
-      segment.text = next;
-      segment.at = now;
-      segment.nativeDone = event.type === "turn_done";
-      yield* input.send({
-        type: "live.caption",
-        sessionId: input.sessionId,
-        role: event.role,
-        segmentId: segment.id,
-        revision: ++segment.revision,
-        text: segment.text,
-        committed: false,
-      });
-      if (event.type === "turn_done") yield* freeze(event.role);
-      return;
-    }
-    if (event.type !== "delegation") return;
-    // Claim synchronously before any async work, including freeze/launch. Retain ambiguous claims.
-    if (ids.has(event.delegationId)) return;
-    if (ids.size >= 256) return yield* fail();
-    ids.add(event.delegationId);
-    if (
-      event.provenance !== "native_live_delegation" ||
-      !event.instructions.trim() ||
-      !bounded(event.instructions, 16384)
-    )
-      return yield* fail();
-    const human = segments.get("user");
-    if (!human?.nativeDone || !human.text.trim() || human.id === claimedHumanSegmentId) {
-      yield* append(event.delegationId, "quiet", {
-        status: "not_submitted",
-        reason: "ambiguous_repeat",
-        note: "Clarify new work; an existing request is retained. Do not claim another task was started.",
-      });
-      return;
-    }
-    claimedHumanSegmentId = human.id;
-    yield* freeze("user");
+    const userTurnId = human.turnId;
+    if (!userTurnId || event.userTurnId !== userTurnId || !human.nativeDone || !human.text.trim())
+      return yield* reject(event, "unfinalized_parent");
+    // Newer speech is a veto, never authority for an older parent's instruction.
+    if (segments.get("user") !== human) return yield* reject(event, "superseded_parent");
+    yield* freeze("user", human);
     yield* freeze("assistant");
     const shell = yield* ensureThread();
     const state = yield* threads.getThreadRecords(shell.id, ["runtimeRequests", "messages"], {
@@ -314,6 +302,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       });
       return;
     }
+    if (stopped || segments.get("user") !== human) return;
     if (feedback.size >= MAX_TRACKED_RUNS) return yield* fail();
     const sent = yield* sendLiveDelegation({
       projectId: shell.projectId,
@@ -321,6 +310,9 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       sessionId: input.sessionId,
       delegationId: event.delegationId,
       instructions: event.instructions,
+      userTurnId,
+      userTranscript: human.text,
+      ...(event.handoffId === undefined ? {} : { handoffId: event.handoffId }),
       expectedUserMessageCount: human.inputCount,
       context: [...context],
     }).pipe(Effect.catchTags({ OrchestratorInputChangedError: () => Effect.undefined }));
@@ -351,9 +343,112 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       note: "T3 accepted the request. This is not a completion result.",
     });
   });
+  const receive = Effect.fn("LiveAgent.receive")(function* (event: NativeLiveEvent) {
+    if (stopped) return;
+    const now = yield* Clock.currentTimeMillis;
+    yield* expirePending(now);
+    if (
+      event.type === "turn_created" ||
+      event.type === "turn_delta" ||
+      (event.type === "turn_done" && event.role === "user" && event.turnId)
+    ) {
+      if (event.type === "turn_created" && event.role !== "user") return;
+      const turnId = event.turnId!;
+      let segment = userTurns.get(turnId);
+      if (segment?.nativeDone || (event.type === "turn_created" && segment)) return;
+      if (event.type === "turn_delta" && !segment) return;
+      if (!segment) {
+        const preview = segments.get("user");
+        segment =
+          preview && !preview.turnId && !preview.frozen ? preview : yield* newSegment("user", now);
+        segment.turnId = turnId;
+        userTurns.set(turnId, segment);
+      }
+      const next = event.type === "turn_delta" ? segment.text + event.text : event.text;
+      if (!bounded(next, 16384)) return yield* fail();
+      segment.text = next;
+      segment.at = now;
+      segment.nativeDone = event.type === "turn_done";
+      if (next.trim()) {
+        humanAt = now;
+        narrationGeneration++;
+      }
+      yield* caption("user", segment);
+      if (segment.nativeDone) {
+        yield* freeze("user", segment);
+        const work = pending.get(turnId);
+        // Remove before awaiting admission; finalization/replay can never release it twice.
+        pending.delete(turnId);
+        if (work) yield* admit(work.event, segment);
+      }
+      return;
+    }
+    if (event.type === "transcript" || event.type === "turn_done") {
+      const nativeId = event.type === "transcript" ? event.itemId : event.turnId;
+      const seen = event.type === "transcript" ? transcriptIds : turnIds;
+      if (nativeId) {
+        if (seen.has(nativeId)) return;
+        if (seen.size >= 4096) return yield* fail();
+        seen.add(nativeId);
+      }
+      let segment = segments.get(event.role);
+      // Native user turn deltas own their text. Transcript items carry no evidenced parent key.
+      if (event.role === "user" && segment?.turnId && !segment.nativeDone) return;
+      if (
+        event.type === "turn_done" &&
+        segment?.frozen &&
+        segment.text === event.text &&
+        !segment.nativeDone
+      ) {
+        segment.nativeDone = true;
+        return;
+      }
+      if (event.role === "user" && event.type === "turn_done" && segment?.nativeDone && !nativeId)
+        return;
+      if (event.role === "user" && event.text.trim()) {
+        humanAt = now;
+        narrationGeneration++;
+      }
+      if (!segment || segment.frozen) segment = yield* newSegment(event.role, now);
+      const next = event.type === "transcript" ? segment.text + event.text : event.text;
+      if (!bounded(next, 16384)) return yield* fail();
+      segment.text = next;
+      segment.at = now;
+      segment.nativeDone = event.type === "turn_done";
+      yield* caption(event.role, segment);
+      if (event.type === "turn_done") yield* freeze(event.role, segment);
+      return;
+    }
+    if (event.type !== "delegation") return;
+    // Claim both wire identities before any asynchronous admission or history work.
+    if (ids.has(event.delegationId) || (event.handoffId && handoffs.has(event.handoffId))) return;
+    if (ids.size >= 256 || handoffs.size >= 256) return yield* fail();
+    ids.add(event.delegationId);
+    if (event.handoffId) handoffs.add(event.handoffId);
+    if (
+      event.provenance !== "native_live_delegation" ||
+      !event.instructions.trim() ||
+      !bounded(event.instructions, 16384)
+    )
+      return yield* fail();
+    if (!event.userTurnId) return yield* reject(event, "missing_parent");
+    const human = userTurns.get(event.userTurnId);
+    if (!human) return yield* reject(event, "unknown_parent");
+    if (human.claimed) return yield* reject(event, "ambiguous_repeat");
+    human.claimed = true;
+    if (segments.get("user") !== human) return yield* reject(event, "superseded_parent");
+    if (!human.text.trim()) return yield* reject(event, "empty_parent");
+    if (!human.nativeDone) {
+      if (pending.size >= MAX_PENDING_PARENTS) return yield* fail();
+      pending.set(event.userTurnId, { event, expiresAt: now + PARENT_WAIT_MS });
+      return;
+    }
+    yield* admit(event, human);
+  });
   const poll = Effect.fn("LiveAgent.poll")(function* () {
     if (stopped) return;
     const tick = yield* Clock.currentTimeMillis;
+    yield* expirePending(tick);
     for (const [role, segment] of segments)
       if (role === "assistant" && !segment.frozen && tick - segment.at >= HISTORY_IDLE_MS)
         yield* freeze(role);
@@ -379,7 +474,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       // Typed input already has a canonical run; it is context, never fresh delegation authority.
       const human = segments.get("user");
       if (human && updates.messages.filter((message) => !message.voice).length > human.inputCount)
-        claimedHumanSegmentId = human.id;
+        human.claimed = true;
       narrationGeneration++;
       humanAt = Math.max(humanAt, DateTime.toEpochMillis(message.createdAt));
       if (feedback.size >= MAX_TRACKED_RUNS) return yield* fail();
@@ -546,17 +641,20 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
   });
   yield* Effect.addFinalizer(() =>
     Effect.gen(function* () {
-      stopped = true;
+      yield* stop;
       // Persist terminal windows even when turn.done never arrives. Never execute them or cancel an admitted run.
-      for (const role of ["user", "assistant"] as const) {
-        yield* freeze(role).pipe(
-          Effect.timeout("5 seconds"),
-          Effect.catchCause(() => Effect.logWarning("Live caption history finalization failed.")),
-        );
+      const windows = new Set([...userTurns.values(), ...segments.values()]);
+      for (const segment of windows) {
+        const role = segment === segments.get("assistant") ? "assistant" : "user";
+        yield* freeze(role, segment);
       }
-    }),
+    }).pipe(
+      Effect.timeout("5 seconds"),
+      Effect.catchCause(() => Effect.logWarning("Live caption history finalization failed.")),
+    ),
   );
   return {
+    stop,
     receive: (event: NativeLiveEvent) => receive(event).pipe(Effect.mapError(fail)),
     bind: ensureThread().pipe(Effect.asVoid, Effect.mapError(fail)),
     seed: seed().pipe(Effect.mapError(fail)),
