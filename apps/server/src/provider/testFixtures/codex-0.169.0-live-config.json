@@ -1,0 +1,100 @@
+{
+  "config": {
+    "model_provider": "fixture",
+    "model_providers": {
+      "fixture": {
+        "name": "Fictional relay",
+        "base_url": "https://relay.example.test/prefix/v1",
+        "model_catalog_url": null,
+        "env_key": null,
+        "env_key_instructions": null,
+        "experimental_bearer_token": "fictional-private-bearer",
+        "auth": null,
+        "gateway_oauth": null,
+        "aws": null,
+        "project_id": null,
+        "location": null,
+        "credential_file": null,
+        "wire_api": "responses",
+        "capabilities": null,
+        "query_params": null,
+        "http_headers": null,
+        "env_http_headers": null,
+        "request_max_retries": null,
+        "stream_max_retries": null,
+        "stream_idle_timeout_ms": null,
+        "websocket_connect_timeout_ms": null,
+        "requires_openai_auth": false,
+        "supports_websockets": false,
+        "supports_standalone_web_search": false
+      }
+    }
+  },
+  "origins": {
+    "model_providers.fixture.experimental_bearer_token": {
+      "name": {
+        "type": "user",
+        "file": "/fixture/shadow/config.toml",
+        "profile": null
+      },
+      "version": "sha256:5d465f3132e9f4680f2d26e2944e6ec1a95c77343332ec59980f0ea6e0c40cca"
+    },
+    "model_providers.fixture.base_url": {
+      "name": {
+        "type": "user",
+        "file": "/fixture/shadow/config.toml",
+        "profile": null
+      },
+      "version": "sha256:5d465f3132e9f4680f2d26e2944e6ec1a95c77343332ec59980f0ea6e0c40cca"
+    },
+    "model_provider": {
+      "name": {
+        "type": "user",
+        "file": "/fixture/shadow/config.toml",
+        "profile": null
+      },
+      "version": "sha256:5d465f3132e9f4680f2d26e2944e6ec1a95c77343332ec59980f0ea6e0c40cca"
+    },
+    "model_providers.fixture.name": {
+      "name": {
+        "type": "user",
+        "file": "/fixture/shadow/config.toml",
+        "profile": null
+      },
+      "version": "sha256:5d465f3132e9f4680f2d26e2944e6ec1a95c77343332ec59980f0ea6e0c40cca"
+    },
+    "model_providers.fixture.wire_api": {
+      "name": {
+        "type": "user",
+        "file": "/fixture/shadow/config.toml",
+        "profile": null
+      },
+      "version": "sha256:5d465f3132e9f4680f2d26e2944e6ec1a95c77343332ec59980f0ea6e0c40cca"
+    },
+    "model_providers.fixture.requires_openai_auth": {
+      "name": {
+        "type": "user",
+        "file": "/fixture/shadow/config.toml",
+        "profile": null
+      },
+      "version": "sha256:5d465f3132e9f4680f2d26e2944e6ec1a95c77343332ec59980f0ea6e0c40cca"
+    }
+  },
+  "layers": [
+    {
+      "name": {
+        "type": "user",
+        "file": "/fixture/shadow/config.toml",
+        "profile": null
+      },
+      "disabledReason": null
+    },
+    {
+      "name": {
+        "type": "system",
+        "file": "/etc/codex/config.toml"
+      },
+      "disabledReason": null
+    }
+  ]
+}

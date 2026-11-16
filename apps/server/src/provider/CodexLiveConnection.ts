@@ -1,4 +1,5 @@
 import { LIVE_VOICE_PROTOCOL, LIVE_VOICE_REQUESTED_MODEL } from "@t3tools/contracts";
+import { stableStringify } from "@t3tools/shared/relaySigning";
 import {
   LiveConnectionError,
   type ResolvedLiveConnection,
@@ -34,17 +35,34 @@ const Config = Schema.Struct({
     ),
   ),
 });
+// Codex 0.169 config/read emits null optionals, not the sparse TOML shape.
 const Provider = Schema.Struct({
-  name: Schema.optional(Schema.String),
+  name: Schema.optional(Schema.NullOr(Schema.String)),
   base_url: Schema.String,
   wire_api: Schema.Literal("responses"),
   requires_openai_auth: Schema.Literal(false),
-  supports_websockets: Schema.optional(Schema.Boolean),
-  env_key: Schema.optional(Schema.String),
-  env_key_instructions: Schema.optional(Schema.String),
-  experimental_bearer_token: Schema.optional(Schema.String),
+  supports_websockets: Schema.optional(Schema.NullOr(Schema.Boolean)),
+  env_key: Schema.optional(Schema.NullOr(Schema.String)),
+  env_key_instructions: Schema.optional(Schema.NullOr(Schema.String)),
+  experimental_bearer_token: Schema.optional(Schema.NullOr(Schema.String)),
+  supports_standalone_web_search: Schema.optional(Schema.NullOr(Schema.Boolean)),
+  request_max_retries: Schema.optional(Schema.NullOr(Schema.Number)),
+  stream_max_retries: Schema.optional(Schema.NullOr(Schema.Number)),
+  stream_idle_timeout_ms: Schema.optional(Schema.NullOr(Schema.Number)),
+  websocket_connect_timeout_ms: Schema.optional(Schema.NullOr(Schema.Number)),
+  // Alternate auth, destinations, headers and query settings must remain inactive.
+  auth: Schema.optional(Schema.Null),
+  aws: Schema.optional(Schema.Null),
+  gateway_oauth: Schema.optional(Schema.Null),
+  credential_file: Schema.optional(Schema.Null),
+  project_id: Schema.optional(Schema.Null),
+  location: Schema.optional(Schema.Null),
+  model_catalog_url: Schema.optional(Schema.Null),
+  capabilities: Schema.optional(Schema.Null),
+  http_headers: Schema.optional(Schema.Null),
+  env_http_headers: Schema.optional(Schema.Null),
+  query_params: Schema.optional(Schema.Null),
 });
-const stringify = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const isConnectionError = Schema.is(LiveConnectionError);
 const decodeConfig = Schema.decodeUnknownSync(Config);
 const decodeProvider = Schema.decodeUnknownSync(Provider, { onExcessProperty: "error" });
@@ -119,7 +137,7 @@ export const makeCodexLiveConnection = Effect.fn("CodexLiveConnection.make")(fun
           const provider = decodeProvider(config.config.model_providers[key]);
           const createUrl = codexLiveCreateUrl(provider.base_url);
           const credential =
-            provider.env_key === undefined
+            provider.env_key == null
               ? provider.experimental_bearer_token
               : /^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(provider.env_key)
                 ? input.environment[provider.env_key]
@@ -127,7 +145,8 @@ export const makeCodexLiveConnection = Effect.fn("CodexLiveConnection.make")(fun
           if (!credential || credential.length > 4096 || !/^[\x21-\x7e]+$/.test(credential))
             throw new LiveConnectionError({ reason: "auth-required" });
           // Comparison stays private. Public revision is random owner + monotonic generation, not a secret digest.
-          const identity = stringify([raw, input.homePath, createUrl, credential]);
+          // config/read object order varies between app-server processes.
+          const identity = stableStringify([raw, input.homePath, createUrl, credential]);
           if (!previous || Redacted.value(previous) !== identity) {
             previous = Redacted.make(identity);
             generation++;
