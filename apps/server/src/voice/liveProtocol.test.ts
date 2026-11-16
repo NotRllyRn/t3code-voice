@@ -214,12 +214,12 @@ describe("pinned native Live wire", () => {
     ).toEqual(fixtures.routes);
   });
 
-  it("diagnoses source-writer MIME variants without guessing the missing production field", () => {
+  it("accepts source-writer SDP and plain MIME variants with matching diagnostics", () => {
     for (const variant of httpFixture.cases) {
       const response = { ...httpFixture, contentType: variant.contentType };
       const diagnostic = nativeLiveCreateResponseDiagnostics(response);
       expect(diagnostic).toMatchObject({
-        failurePhase: variant.contentType === "application/sdp" ? "accepted" : "mime",
+        failurePhase: "accepted",
         mimeCategory: variant.contentType === "application/sdp" ? "sdp" : "plain",
         bodyBytes: Buffer.byteLength(httpFixture.body),
         sdpPrefix: true,
@@ -233,33 +233,41 @@ describe("pinned native Live wire", () => {
         sdpAudioLine: true,
         sdpApplicationLine: true,
       });
+      expect(decodeNativeLiveCreateResponse(response)).toEqual({
+        callId: "fictional-owned",
+        answerSdp: httpFixture.body,
+      });
       expect(JSON.stringify(diagnostic)).not.toMatch(/fictional|123456789|0\.0\.0\.0|AA:AA/);
     }
     for (const contentType of [
       "Application/SDP; charset=utf-8",
       " application/sdp ; charset=US-ASCII ",
+      "Text/Plain; charset=utf-8",
+      " text/plain ; charset=US-ASCII ",
     ]) {
-      expect(decodeNativeLiveCreateResponse({ ...httpFixture, contentType }).answerSdp).toBe(
+      for (const body of [
         httpFixture.body,
-      );
+        httpFixture.body.replaceAll("\r\n", "\n"),
+        "v=0\r\ns=" + "x".repeat(65536 - 7),
+      ]) {
+        const response = { ...httpFixture, contentType, body };
+        expect(decodeNativeLiveCreateResponse(response).answerSdp).toBe(body);
+        expect(nativeLiveCreateResponseDiagnostics(response).failurePhase).toBe("accepted");
+      }
     }
-    expect(
-      decodeNativeLiveCreateResponse({
-        ...httpFixture,
-        contentType: "application/sdp",
-        body: httpFixture.body.replaceAll("\r\n", "\n"),
-      }).answerSdp,
-    ).toContain("v=0\n");
   });
 
   it.each([
     ["status", { status: 200 }],
-    ["mime", { contentType: "text/plain; charset=utf-8" }],
+    ["mime", { contentType: "application/octet-stream" }],
+    ["mime", { contentType: "" }],
     ["mime", { contentType: null }],
     ["mime", { contentType: "text/html; private=fictional-secret" }],
     ["mime", { contentType: "application/json" }],
     ["location", { location: "/v1/live/..%2Ffictional-secret" }],
     ["location", { location: null }],
+    ["sdp", { body: "not SDP" }],
+    ["sdp", { body: "" }],
     ["sdp", { body: "<html>fictional-secret</html>" }],
     ["sdp", { body: '{"sdp":"fictional-secret"}' }],
     ["sdp", { body: "v=0\r\ns=é\r\n" }],
@@ -268,12 +276,16 @@ describe("pinned native Live wire", () => {
     ["sdp", { body: "v=0" }],
     ["sdp", { body: "v=0\rs=-\r" }],
   ] as const)("classifies %s rejection without retaining response material %#", (phase, patch) => {
-    const response = { ...httpFixture, contentType: "application/sdp", ...patch };
-    expect(nativeLiveCreateResponseDiagnostics(response).failurePhase).toBe(phase);
-    expect(JSON.stringify(nativeLiveCreateResponseDiagnostics(response))).not.toContain(
-      "fictional-secret",
-    );
-    expect(() => decodeNativeLiveCreateResponse(response)).toThrow(/^Incompatible Live protocol$/);
+    for (const contentType of ["application/sdp", "text/plain; charset=utf-8"]) {
+      const response = { ...httpFixture, contentType, ...patch };
+      expect(nativeLiveCreateResponseDiagnostics(response).failurePhase).toBe(phase);
+      expect(JSON.stringify(nativeLiveCreateResponseDiagnostics(response))).not.toContain(
+        "fictional-secret",
+      );
+      expect(() => decodeNativeLiveCreateResponse(response)).toThrow(
+        /^Incompatible Live protocol$/,
+      );
+    }
   });
 
   it.each([

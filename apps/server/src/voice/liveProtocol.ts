@@ -269,7 +269,7 @@ export function nativeLiveCreateResponseDiagnostics(input: NativeLiveCreateRespo
   let failurePhase: "accepted" | "status" | "mime" | "location" | "sdp" = "accepted";
   const mimeCategory = nativeLiveMimeCategory(input.contentType);
   if (input.status !== 201) failurePhase = "status";
-  else if (mimeCategory !== "sdp") failurePhase = "mime";
+  else if (mimeCategory !== "sdp" && mimeCategory !== "plain") failurePhase = "mime";
   else {
     try {
       if (input.location === null) throw invalid();
@@ -305,9 +305,10 @@ export function nativeLiveCreateResponseDiagnostics(input: NativeLiveCreateRespo
 
 export function decodeNativeLiveCreateResponse(input: NativeLiveCreateResponse) {
   try {
+    const mimeCategory = nativeLiveMimeCategory(input.contentType);
     if (
       input.status !== 201 ||
-      input.contentType?.split(";", 1)[0]?.trim().toLowerCase() !== "application/sdp" ||
+      (mimeCategory !== "sdp" && mimeCategory !== "plain") ||
       input.location === null
     )
       throw invalid();

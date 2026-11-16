@@ -45,7 +45,23 @@ import createFixture from "./fixtures/live-create-http.json" with { type: "json"
 const responses = [
   { name: "source SDP", phase: null },
   { name: "MIME case and parameters", contentType: "Application/SDP; charset=utf-8", phase: null },
-  { name: "source plain text", contentType: createFixture.cases[1]!.contentType, phase: "mime" },
+  { name: "source plain text", contentType: createFixture.cases[1]!.contentType, phase: null },
+  {
+    name: "plain MIME case and parameters",
+    contentType: " Text/Plain ; charset=UTF-8",
+    phase: null,
+  },
+  { name: "wrong MIME with SDP", contentType: "application/octet-stream", phase: "mime" },
+  { name: "HTML MIME with SDP", contentType: "text/html", phase: "mime" },
+  { name: "JSON MIME with SDP", contentType: "application/json", phase: "mime" },
+  { name: "missing MIME with SDP", contentType: null, phase: "mime" },
+  { name: "malformed plain", contentType: "text/plain", body: "not SDP", phase: "sdp" },
+  {
+    name: "plain control byte",
+    contentType: "text/plain",
+    body: "v=0\r\ns=\u0000\r\n",
+    phase: "sdp",
+  },
   { name: "non-ASCII", body: createFixture.body.replace("s=-", "s=é"), phase: "sdp" },
   { name: "HTML", body: "<html>fictional-private-response</html>", phase: "sdp" },
   { name: "JSON envelope", body: JSON.stringify({ sdp: createFixture.body }), phase: "sdp" },
@@ -74,7 +90,10 @@ const responses = [
     unknownCall: true,
   },
 ] as const;
-type CreateResponse = (typeof responses)[number];
+const plainResponses = responses
+  .filter((variant) => "body" in variant && !("contentType" in variant) && variant.phase !== null)
+  .map((variant) => ({ ...variant, name: `plain ${variant.name}`, contentType: "text/plain" }));
+type CreateResponse = (typeof responses)[number] | (typeof plainResponses)[number];
 const fixture = (variant: CreateResponse) =>
   Effect.acquireRelease(
     Effect.promise(async () => {
@@ -92,10 +111,14 @@ const fixture = (variant: CreateResponse) =>
             response.end();
           } else {
             response.writeHead("status" in variant ? variant.status : createFixture.status, {
-              "cOnTent-TyPe":
-                "contentType" in variant
-                  ? variant.contentType
-                  : createFixture.cases[0]!.contentType,
+              ...("contentType" in variant && variant.contentType === null
+                ? {}
+                : {
+                    "cOnTent-TyPe":
+                      "contentType" in variant
+                        ? variant.contentType
+                        : createFixture.cases[0]!.contentType,
+                  }),
               Location:
                 "location" in variant
                   ? variant.location
@@ -107,6 +130,7 @@ const fixture = (variant: CreateResponse) =>
       });
       const ws = new NodeWS.WebSocketServer({ server: http });
       const sideband: string[] = [];
+      const sidebandClosed = Promise.withResolvers<void>();
       ws.on("connection", (socket, request) => {
         requests.push({
           url: request.url!,
@@ -114,6 +138,7 @@ const fixture = (variant: CreateResponse) =>
           body: "",
         });
         socket.on("message", (frame) => sideband.push(frame.toString()));
+        socket.on("close", () => sidebandClosed.resolve());
         socket.send(
           '{"type":"session.started","session":{"id":"fake-native-session","model":"gpt-live-1.1-codex"}}',
         );
@@ -122,7 +147,14 @@ const fixture = (variant: CreateResponse) =>
       const address = http.address();
       if (!address || typeof address === "string")
         throw new Error("Missing fictional loopback port");
-      return { http, ws, requests, sideband, origin: `http://127.0.0.1:${address.port}` };
+      return {
+        http,
+        ws,
+        requests,
+        sideband,
+        sidebandClosed: sidebandClosed.promise,
+        origin: `http://127.0.0.1:${address.port}`,
+      };
     }),
     (up) =>
       Effect.promise(async () => {
@@ -141,7 +173,7 @@ const authLayer = EnvironmentAuth.layer.pipe(
   Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
 );
 
-it.live.each(responses)(
+it.live.each([...responses, ...plainResponses])(
   "real route + source-backed HTTP response $name + owned cleanup; no private response material",
   (variant) =>
     Effect.scoped(
@@ -298,7 +330,17 @@ it.live.each(responses)(
           ).toBe(true);
           expect(seen.some((event) => event.type === "live.answer")).toBe(false);
           expect(up.sideband).toEqual([]);
+        } else {
+          expect(seen.filter((event) => event.type === "live.answer")).toEqual([
+            expect.objectContaining({ answerSdp: createFixture.body }),
+          ]);
+          expect(
+            seen.some((event) => event.type === "live.status" && event.phase === "error"),
+          ).toBe(false);
+          expect(JSON.stringify(logs)).not.toContain("failurePhase");
+          yield* Effect.promise(() => up.sidebandClosed);
         }
+        expect(up.ws.clients.size).toBe(0);
         expect(
           up.requests.every((request) => request.authorization === "Bearer fictional-selected-key"),
         ).toBe(true);
