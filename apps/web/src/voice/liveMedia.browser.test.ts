@@ -1,0 +1,179 @@
+import { expect, it, vi } from "vite-plus/test";
+import { browserLiveMedia } from "./liveMedia";
+
+class Track extends EventTarget {
+  enabled = true;
+  kind = "audio";
+  stop = vi.fn();
+}
+class Peer extends EventTarget {
+  connectionState = "new";
+  iceGatheringState = "complete";
+  localDescription: RTCSessionDescriptionInit | null = null;
+  onconnectionstatechange: (() => void) | null = null;
+  ontrack: ((event: { track: MediaStreamTrack; streams: MediaStream[] }) => void) | null = null;
+  channel = {
+    readyState: "connecting",
+    onopen: null as (() => void) | null,
+    onclose: null as (() => void) | null,
+    onerror: null as (() => void) | null,
+    close: vi.fn(),
+  };
+  addTrack = vi.fn();
+  createDataChannel = vi.fn(() => this.channel);
+  createOffer = vi.fn(async () => ({ type: "offer" as const, sdp: "v=0\r\ns=fictional\r\n" }));
+  setLocalDescription = vi.fn(async (description: RTCSessionDescriptionInit) => {
+    this.localDescription = description;
+  });
+  setRemoteDescription = vi.fn(async (_description: RTCSessionDescriptionInit) => {});
+  close = vi.fn();
+}
+function setup(grant?: Promise<MediaStream>) {
+  const track = new Track();
+  const stream = {
+    getTracks: () => [track],
+    getAudioTracks: () => [track],
+  } as unknown as MediaStream;
+  const peers: Peer[] = [];
+  const rtc = vi.spyOn(window, "RTCPeerConnection").mockImplementation(function () {
+    const peer = new Peer();
+    peers.push(peer);
+    return peer as unknown as RTCPeerConnection;
+  });
+  const microphone = vi
+    .spyOn(navigator.mediaDevices, "getUserMedia")
+    .mockReturnValue(grant ?? Promise.resolve(stream));
+  const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue();
+  const pause = vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+  const abort = new AbortController();
+  const owned: Array<() => void> = [];
+  const peer = vi.fn();
+  const fail = vi.fn();
+  return {
+    track,
+    stream,
+    peers,
+    microphone,
+    play,
+    pause,
+    abort,
+    owned,
+    peer,
+    fail,
+    options: {
+      signal: abort.signal,
+      alive: () => !abort.signal.aborted,
+      own: (release: () => void) => {
+        owned.push(release);
+      },
+      peer,
+      fail,
+    },
+    [Symbol.dispose]() {
+      abort.abort();
+      owned.forEach((release) => release());
+      rtc.mockRestore();
+      microphone.mockRestore();
+      play.mockRestore();
+      pause.mockRestore();
+    },
+  };
+}
+it("captures disabled tracks, gates on PC and channel, and uses an actual audio element without PCM", async () => {
+  using h = setup();
+  const audioCount = document.querySelectorAll("audio").length;
+  const media = await browserLiveMedia(h.options);
+  expect(h.track.enabled).toBe(false);
+  expect(document.querySelectorAll("audio").length).toBe(audioCount + 1);
+  const audio = [...document.querySelectorAll("audio")].at(-1)!;
+  expect(audio).toBeInstanceOf(HTMLAudioElement);
+  expect(audio.muted).toBe(true);
+  const peer = h.peers[0]!;
+  expect(await media.offer()).toContain("v=0");
+  await media.answer("v=0\r\ns=fictional-answer\r\n");
+  expect(peer.setRemoteDescription).toHaveBeenCalledWith({
+    type: "answer",
+    sdp: "v=0\r\ns=fictional-answer\r\n",
+  });
+  media.microphone(true);
+  expect(h.track.enabled).toBe(false);
+  peer.connectionState = "connected";
+  peer.onconnectionstatechange!();
+  expect(h.peer).not.toHaveBeenCalled();
+  peer.channel.readyState = "open";
+  peer.channel.onopen!();
+  expect(h.peer).toHaveBeenCalledWith("connected");
+  media.microphone(true);
+  expect(h.track.enabled).toBe(true);
+  media.microphone(false);
+  const remote = new MediaStream();
+  peer.ontrack!({ track: { kind: "audio" } as MediaStreamTrack, streams: [remote] });
+  expect(audio.srcObject).toBe(remote);
+  await media.playback(true);
+  expect(audio.muted).toBe(false);
+  expect(h.play).toHaveBeenCalled();
+  media.dispose();
+  media.dispose();
+  expect(h.track.stop).toHaveBeenCalledTimes(1);
+  expect(peer.close).toHaveBeenCalledTimes(1);
+  expect(peer.channel.close).toHaveBeenCalledTimes(1);
+  expect(peer.ontrack).toBeNull();
+  expect(audio.srcObject).toBeNull();
+  expect(document.querySelectorAll("audio").length).toBe(audioCount);
+});
+it("reports rejected autoplay visibly through safe reason, and data-channel closure releases readiness", async () => {
+  using h = setup();
+  const media = await browserLiveMedia(h.options);
+  const peer = h.peers[0]!;
+  await media.playback(true);
+  h.play.mockRejectedValue(Error("sensitive-browser-detail"));
+  peer.ontrack!({ track: { kind: "audio" } as MediaStreamTrack, streams: [new MediaStream()] });
+  await vi.waitFor(() => expect(h.fail).toHaveBeenCalledWith("playback-blocked"));
+  peer.channel.onclose!();
+  expect(h.peer).toHaveBeenCalledWith("failed");
+  media.dispose();
+});
+it("stops a permission grant delivered after cancellation, without creating a peer", async () => {
+  let grant!: (stream: MediaStream) => void;
+  const pending = new Promise<MediaStream>((resolve) => {
+    grant = resolve;
+  });
+  using h = setup(pending);
+  const result = browserLiveMedia(h.options);
+  h.abort.abort();
+  grant(h.stream);
+  await expect(result).rejects.toThrow("Live media stopped");
+  expect(h.track.stop).toHaveBeenCalledTimes(1);
+  expect(h.peers).toHaveLength(0);
+});
+it("does not apply a stale createOffer result to a disposed peer", async () => {
+  using h = setup();
+  const media = await browserLiveMedia(h.options);
+  const peer = h.peers[0]!;
+  let resolve!: (description: { type: "offer"; sdp: string }) => void;
+  peer.createOffer.mockImplementationOnce(
+    () =>
+      new Promise((yes) => {
+        resolve = yes;
+      }) as Promise<{ type: "offer"; sdp: string }>,
+  );
+  const result = media.offer();
+  media.dispose();
+  resolve({ type: "offer", sdp: "v=0\\r\\ns=stale\\r\\n" });
+  await expect(result).rejects.toThrow("Live media stopped");
+  expect(peer.setLocalDescription).not.toHaveBeenCalled();
+});
+it("dispose cancels pending ICE gathering and ignores stale track callbacks", async () => {
+  using h = setup();
+  const media = await browserLiveMedia(h.options);
+  const peer = h.peers[0]!;
+  const trackCallback = peer.ontrack!;
+  peer.iceGatheringState = "gathering";
+  const result = media.offer();
+  await vi.waitFor(() => expect(peer.setLocalDescription).toHaveBeenCalled());
+  media.dispose();
+  await expect(result).rejects.toThrow("Live media stopped");
+  trackCallback({ track: { kind: "audio" } as MediaStreamTrack, streams: [new MediaStream()] });
+  expect(h.play).not.toHaveBeenCalled();
+  expect(h.track.enabled).toBe(false);
+});

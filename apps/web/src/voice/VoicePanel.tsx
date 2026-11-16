@@ -1,20 +1,18 @@
-import { getEnvironmentRealtimeVoiceUrl } from "@t3tools/client-runtime/voice-input";
+import { getEnvironmentLiveVoiceUrl } from "@t3tools/client-runtime/voice-input";
 import {
-  VoiceController,
-  INITIAL_VOICE_STATE,
-  type VoiceState,
+  LiveVoiceController,
+  INITIAL_LIVE_VOICE_STATE,
+  type LiveVoiceState,
 } from "@t3tools/client-runtime/voice-conversation";
 import {
   AuthOrchestrationOperateScope,
   type EnvironmentId,
   type ThreadId,
-  type ProjectId,
   type ModelSelection,
-  type RuntimeMode,
-  type ProviderInteractionMode,
+  type LiveVoiceDraft,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { useEnvironmentScope, usePreparedConnection } from "../state/session";
 import { runEnvironmentSpeech } from "../speech/runEnvironmentSpeech";
@@ -30,95 +28,142 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../components/ui/tooltip"
 import { Popover, PopoverPopup, PopoverTitle, PopoverTrigger } from "../components/ui/popover";
 import { Button } from "../components/ui/button";
 import { cn } from "../lib/utils";
-import { browserMedia } from "./media.js";
+import { browserLiveMedia } from "./liveMedia";
+import { liveCaptionKey, liveCaptions } from "./liveCaptions";
 
 interface Props {
   environmentId: EnvironmentId;
   threadId?: ThreadId | undefined;
+  draftId?: string | undefined;
   modelSelection?: ModelSelection | undefined;
-  draft?:
-    | {
-        projectId?: ProjectId;
-        modelSelection: ModelSelection;
-        runtimeMode: RuntimeMode;
-        interactionMode: ProviderInteractionMode;
-      }
-    | undefined;
+  draft?: LiveVoiceDraft | undefined;
   disabled: boolean;
 }
 function supported() {
   if (typeof navigator === "undefined" || typeof window === "undefined") return false;
-  const ios =
-    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  const mobile =
+    /Android|iPad|iPhone|iPod/.test(navigator.userAgent) ||
     (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
   return (
-    !ios &&
+    !mobile &&
     window.isSecureContext &&
-    typeof AudioContext !== "undefined" &&
-    typeof AudioWorkletNode !== "undefined" &&
+    typeof RTCPeerConnection !== "undefined" &&
     !!navigator.mediaDevices?.getUserMedia
   );
 }
 
-/** Binding stays on the draft until Stop: first speech can launch without losing the microphone to navigation. */
 export function useComposerLiveVoice({
   environmentId,
   threadId,
+  draftId,
   modelSelection,
   draft,
   disabled,
 }: Props) {
   const prepared = Option.getOrNull(usePreparedConnection(environmentId));
   const canOperate = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
-  const binding = JSON.stringify({
-    environmentId,
-    modelSelection,
-    ...(threadId ? { threadId } : { draft }),
-  });
+  const binding = JSON.stringify({ environmentId, threadId, draftId, modelSelection, draft });
+  const selection = JSON.stringify(modelSelection ?? draft?.modelSelection);
   const [snapshot, setSnapshot] = useState<{
-    controller: VoiceController | null;
-    value: VoiceState;
-  }>({ controller: null, value: INITIAL_VOICE_STATE });
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- This effect owns and disposes the external microphone/socket, including StrictMode replay.
+    controller: LiveVoiceController | null;
+    value: LiveVoiceState;
+  }>({ controller: null, value: INITIAL_LIVE_VOICE_STATE });
+  const owner = useRef<{
+    prepared: typeof prepared;
+    binding: string;
+    selection: string;
+    environmentId: EnvironmentId;
+    promotedThread?: ThreadId;
+    controller: LiveVoiceController;
+    token: symbol;
+    target: { threadId?: ThreadId | undefined; draft?: LiveVoiceDraft | undefined };
+  } | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Unmount and StrictMode replay release the external control socket and microphone owner.
+  useEffect(
+    () => () => {
+      if (owner.current) {
+        liveCaptions.clear(owner.current.token);
+        owner.current.controller.dispose();
+        owner.current = null;
+      }
+    },
+    [],
+  );
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Synchronize environment/binding with the external owner; authoritative draft promotion is not a new session.
   useEffect(() => {
-    if (!prepared) {
-      // eslint-disable-next-line react/set-state-in-effect -- Clear the disposed external audio owner on disconnect.
-      setSnapshot({ controller: null, value: INITIAL_VOICE_STATE });
+    const previous = owner.current;
+    const promotion =
+      previous &&
+      threadId &&
+      previous.promotedThread === threadId &&
+      previous.environmentId === environmentId &&
+      previous.selection === selection;
+    if (previous && previous.prepared === prepared && (previous.binding === binding || promotion)) {
+      previous.binding = binding;
+      previous.target = { threadId, draft };
       return;
     }
-    const owner = new VoiceController(
+    if (previous) {
+      liveCaptions.clear(previous.token);
+      previous.controller.dispose();
+      owner.current = null;
+    }
+    if (!prepared) {
+      // oxlint-disable-next-line react/set-state-in-effect -- Publish loss of the external connection owner to its controls.
+      setSnapshot({ controller: null, value: INITIAL_LIVE_VOICE_STATE });
+      return;
+    }
+    const token = Symbol("Live owner");
+    let showingCaptions = false;
+    const target = { threadId, draft };
+    const controller = new LiveVoiceController(
       {
-        continuous: true,
-        media: browserMedia,
+        media: browserLiveMedia,
         socket: (url) => new WebSocket(url),
         url: async (signal) => {
           const url = new URL(
-            await runEnvironmentSpeech(getEnvironmentRealtimeVoiceUrl(prepared), { signal }),
+            await runEnvironmentSpeech(getEnvironmentLiveVoiceUrl(prepared), { signal }),
           );
-          url.searchParams.set("continuous", "1");
-          const target = JSON.parse(binding) as { threadId?: string; draft?: Props["draft"] };
-          if (target.threadId) url.searchParams.set("threadId", target.threadId);
-          else url.searchParams.set("draft", JSON.stringify(target.draft));
+          const current = owner.current?.controller === controller ? owner.current.target : target;
+          if (current.threadId) url.searchParams.set("threadId", current.threadId);
+          else url.searchParams.set("draft", JSON.stringify(current.draft));
           return url.toString();
         },
+        event: (event) => {
+          if (event.type === "live.caption") liveCaptions.caption(token, event);
+          if (event.type === "live.bound" && owner.current?.controller === controller) {
+            owner.current.promotedThread = event.threadId;
+            owner.current.target = { threadId: event.threadId };
+            liveCaptions.bind(token, liveCaptionKey(environmentId, event.threadId));
+          }
+        },
       },
-      (value) => setSnapshot({ controller: owner, value }),
+      (value) => {
+        if (value.phase === "connecting" && !showingCaptions) {
+          showingCaptions = true;
+          const current = owner.current?.target ?? target;
+          liveCaptions.begin(token, liveCaptionKey(environmentId, current.threadId, draftId));
+        }
+        if (value.phase === "idle" || value.phase === "error") {
+          showingCaptions = false;
+          liveCaptions.finish(token);
+        }
+        setSnapshot({ controller, value });
+      },
     );
-    setSnapshot({ controller: owner, value: INITIAL_VOICE_STATE });
-    return () => owner.dispose();
-  }, [prepared, binding]);
+    owner.current = { prepared, binding, selection, environmentId, controller, token, target };
+    setSnapshot({ controller, value: INITIAL_LIVE_VOICE_STATE });
+  }, [prepared, binding, selection, environmentId, threadId, draftId, draft]);
   const controller = snapshot.controller;
   const voice = snapshot.value;
   const allowed = !disabled && canOperate && !!prepared && !!controller && supported();
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Permission/connection loss must release the external audio resources.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Permission/connection loss must release external media resources.
   useEffect(() => {
-    if (!allowed) void controller?.stop();
+    if (!allowed) controller?.stop();
   }, [allowed, controller]);
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Browser visibility events release microphone and playback.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Browser lifecycle events release microphone and playback.
   useEffect(() => {
-    const stop = () => {
-      void controller?.stop();
-    };
+    const stop = () => controller?.stop();
     const visibility = () => {
       if (document.hidden) stop();
     };
@@ -130,7 +175,7 @@ export function useComposerLiveVoice({
     };
   }, [controller]);
   const unavailableReason = !supported()
-    ? "Live voice requires a secure desktop browser with microphone support"
+    ? "Live voice requires a secure desktop browser with WebRTC and microphone support"
     : !canOperate
       ? "Live voice requires permission to operate this environment"
       : !prepared
@@ -199,10 +244,9 @@ export function ComposerLiveVoiceControls({ live }: { live: LiveVoice }) {
         () => void controller?.mute(),
         voice.muted ? <MicOffIcon aria-hidden="true" /> : <MicIcon aria-hidden="true" />,
         {
-          disabled: voice.phase !== "active" || voice.busy,
+          disabled: voice.phase === "stopping",
           pressed: voice.muted,
           muted: voice.muted,
-          busy: voice.busy,
         },
       )}
       {button("Stop live voice", () => void controller?.stop(), <XIcon aria-hidden="true" />)}
@@ -217,11 +261,13 @@ export function ComposerLiveVoiceFeedback({ live }: { live: LiveVoice }) {
     <>
       <span role="status" className="sr-only">
         {active
-          ? voice.phase !== "active"
-            ? "Connecting voice…"
-            : voice.muted
-              ? "Mic muted"
-              : "Listening"
+          ? voice.phase === "refresh_wait"
+            ? "Waiting for the selected provider to refresh. You can stop voice at any time."
+            : voice.phase !== "connected"
+              ? "Connecting voice…"
+              : voice.muted
+                ? "Mic muted"
+                : "Listening"
           : ""}
       </span>
       <span role="alert" className="sr-only">
@@ -262,14 +308,14 @@ export function ComposerLiveVoiceFeedback({ live }: { live: LiveVoice }) {
               <Link
                 to="/$environmentId/$threadId"
                 params={{ environmentId, threadId: voice.threadId }}
-                aria-label="Open chat (stops voice)"
+                aria-label="Open chat (keeps voice)"
                 className={cn(voiceButtonClassName, "text-muted-foreground hover:bg-accent")}
               />
             }
           >
             <MessageSquareIcon aria-hidden="true" />
           </TooltipTrigger>
-          <TooltipPopup>Open chat (stops voice)</TooltipPopup>
+          <TooltipPopup>Open chat (keeps voice)</TooltipPopup>
         </Tooltip>
       ) : null}
     </>

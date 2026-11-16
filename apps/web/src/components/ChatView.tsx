@@ -3375,6 +3375,11 @@ export default function ChatView(props: ChatViewProps) {
             >
               <WorkspaceMutationIdContext value={workspaceMutationId}>
                 <ThreadTimeline
+                  liveCaptionScope={{
+                    environmentId,
+                    threadId: isServerThread ? activeThread.id : undefined,
+                    draftId: draftId ?? undefined,
+                  }}
                   pendingApprovals={pendingApprovals}
                   heldApprovalRequestIds={heldApprovalRequestIds}
                   respondingRequestIds={respondingRequestIds}

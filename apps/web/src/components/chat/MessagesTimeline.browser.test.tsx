@@ -37,6 +37,7 @@ import { environmentThreadDetails } from "../../state/threads";
 import { act, fakeTimers, render, stubGlobal } from "../../../test/render";
 import { ChangedFilesCard } from "./ChangedFilesTree";
 import { MessagesTimeline } from "./MessagesTimeline";
+import { liveCaptionKey, liveCaptions } from "../../voice/liveCaptions";
 import { makeStreamingTimelineFixture } from "../../test-fixtures";
 import {
   type PendingApproval,
@@ -437,6 +438,98 @@ describe("MessagesTimeline work rows", () => {
 });
 
 describe("MessagesTimeline messages", () => {
+  it("renders concurrent Live revisions in main chat and deduplicates only by canonical message identity", async () => {
+    const token = Symbol("timeline test");
+    const scope = { environmentId: ENVIRONMENT_ID, threadId: "live-thread" };
+    liveCaptions.begin(token, liveCaptionKey(ENVIRONMENT_ID, scope.threadId));
+    onTestFinished(() => liveCaptions.clear(token));
+    const props = { ...baseProps(), liveCaptionScope: scope };
+    const entries = [message("Existing chat")];
+    await using screen = await renderElement(
+      <MessagesTimeline {...props} timelineEntries={entries} />,
+    );
+    await expect.element(screen.getByText("Existing chat", { exact: true })).toBeVisible();
+    await act(() => {
+      liveCaptions.caption(token, {
+        type: "live.caption",
+        sessionId: "live_session",
+        role: "user",
+        segmentId: "input",
+        revision: 1,
+        text: "Input partial",
+        committed: false,
+      });
+      liveCaptions.caption(token, {
+        type: "live.caption",
+        sessionId: "live_session",
+        role: "assistant",
+        segmentId: "output",
+        revision: 1,
+        text: "Output partial",
+        committed: false,
+      });
+    });
+    await expect.element(screen.getByText("Input partial", { exact: true })).toBeVisible();
+    await expect.element(screen.getByText("Output partial", { exact: true })).toBeVisible();
+    await page.screenshot({
+      element: screen.container,
+      path: "../../../../.t3/t3voice-live-client-mainchat-partials.png",
+    });
+    await act(() => {
+      liveCaptions.caption(token, {
+        type: "live.caption",
+        sessionId: "live_session",
+        role: "user",
+        segmentId: "input",
+        revision: 3,
+        text: "Corrected input",
+        messageId: MessageId.make("canonical_input"),
+        committed: true,
+      });
+      liveCaptions.caption(token, {
+        type: "live.caption",
+        sessionId: "live_session",
+        role: "user",
+        segmentId: "input",
+        revision: 2,
+        text: "Stale revision",
+        committed: false,
+      });
+    });
+    await expect.element(screen.getByText("Corrected input", { exact: true })).toBeVisible();
+    expect(screen.text()).not.toContain("Input partial");
+    expect(screen.text()).not.toContain("Stale revision");
+    // Equal text in another message is not authority to drop an ephemeral segment.
+    await screen.rerender(
+      <MessagesTimeline
+        {...props}
+        timelineEntries={[...entries, message("Corrected input", {}, "unrelated_input")]}
+      />,
+    );
+    expect(screen.container.querySelector('[data-live-caption="user"]')).not.toBeNull();
+    await screen.rerender(
+      <MessagesTimeline
+        {...props}
+        timelineEntries={[...entries, message("Corrected input", {}, "canonical_input")]}
+      />,
+    );
+    expect(screen.container.querySelector('[data-live-caption="user"]')).toBeNull();
+    await expect.element(screen.getByText("Corrected input", { exact: true })).toBeVisible();
+    await expect.element(screen.getByText("Output partial", { exact: true })).toBeVisible();
+    await page.screenshot({
+      element: screen.container,
+      path: "../../../../.t3/t3voice-live-client-mainchat-reconciled.png",
+    });
+    await screen.rerender(
+      <MessagesTimeline
+        {...props}
+        liveCaptionScope={{ ...scope, threadId: "other-thread" }}
+        timelineEntries={[]}
+      />,
+    );
+    expect(screen.text()).not.toContain("Output partial");
+    await act(() => liveCaptions.clear(token));
+  });
   it("settles when equally long messages have very different rendered heights", async () => {
     const props = baseProps();
     const tall = message("a\n\n".repeat(6000), { role: "assistant" }, "tall");

@@ -1836,6 +1836,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const liveVoice = useComposerLiveVoice({
     environmentId,
     modelSelection: selectedModelSelection,
+    draftId: draftId ?? undefined,
     threadId: routeKind === "server" ? (activeThreadId ?? undefined) : undefined,
     draft:
       routeKind === "draft"

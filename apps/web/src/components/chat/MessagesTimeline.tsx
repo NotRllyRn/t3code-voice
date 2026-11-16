@@ -1,4 +1,5 @@
 import { threadEnvironment } from "../../state/threads";
+import { useLiveCaptionRows, type LiveCaptionScope } from "../../voice/LiveCaptionRows";
 import { useAtomCommand } from "../../state/use-atom-command";
 import type { ToolCallDiffTarget } from "../../diffPanelStore";
 import { AudioPreviewUnmountContext } from "../files/AudioPreview";
@@ -216,6 +217,7 @@ export interface MessagesTimelineHistoryControls {
 }
 
 interface MessagesTimelineProps {
+  liveCaptionScope?: LiveCaptionScope | undefined;
   pendingApprovals?: ReadonlyArray<PendingApproval>;
   heldApprovalRequestIds?: ReadonlySet<string> | undefined;
   respondingRequestIds?: TimelineRowSharedState["respondingRequestIds"];
@@ -320,12 +322,28 @@ interface MessagesTimelineProps {
 }
 
 export function MessagesTimeline(props: MessagesTimelineProps) {
+  const liveCaptionRows = useLiveCaptionRows(
+    props.liveCaptionScope,
+    new Set(
+      props.timelineEntries.flatMap((entry) =>
+        entry.kind === "message" ? [entry.message.id] : [],
+      ),
+    ),
+  );
   const find = useContext(ThreadFindTimelineContext);
   const findOpen = find?.findOpen ?? props.findOpen;
   return (
     <ConversationTimeline
       {...props}
       {...find}
+      footer={
+        liveCaptionRows || props.footer ? (
+          <>
+            {liveCaptionRows}
+            {props.footer}
+          </>
+        ) : null
+      }
       liveFollowEnabled={!findOpen && props.liveFollowEnabled}
     />
   );

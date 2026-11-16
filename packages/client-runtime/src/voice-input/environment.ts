@@ -2,7 +2,12 @@ import { encodeSpeechPcmRequest } from "@t3tools/shared/speech";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
-import { CloudSpeechError, REALTIME_VOICE_PATH, SPEECH_STREAM_PATH } from "@t3tools/contracts";
+import {
+  CloudSpeechError,
+  LIVE_VOICE_PATH,
+  REALTIME_VOICE_PATH,
+  SPEECH_STREAM_PATH,
+} from "@t3tools/contracts";
 import type {
   CloudSpeechModelId,
   CloudSpeechProvider,
@@ -161,7 +166,7 @@ export const transcribeCloudPcm = (
 
 const getEnvironmentMediaStreamUrl = (
   prepared: PreparedConnection,
-  path: typeof SPEECH_STREAM_PATH | typeof REALTIME_VOICE_PATH,
+  path: typeof SPEECH_STREAM_PATH | typeof REALTIME_VOICE_PATH | typeof LIVE_VOICE_PATH,
 ) => {
   let endpoint = prepared.httpBaseUrl;
   return request({
@@ -188,6 +193,9 @@ export const getEnvironmentSpeechStreamUrl = (prepared: PreparedConnection) =>
 
 export const getEnvironmentRealtimeVoiceUrl = (prepared: PreparedConnection) =>
   getEnvironmentMediaStreamUrl(prepared, REALTIME_VOICE_PATH);
+
+export const getEnvironmentLiveVoiceUrl = (prepared: PreparedConnection) =>
+  getEnvironmentMediaStreamUrl(prepared, LIVE_VOICE_PATH);
 
 export const getEnvironmentSpeechModels = (
   prepared: PreparedConnection,
