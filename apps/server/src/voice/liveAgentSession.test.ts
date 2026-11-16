@@ -1219,6 +1219,7 @@ it.effect.each(["reordered", "interleaved", "unassociated", "handoff-replay"] as
           yield* done("two");
           yield* delegate("aliased-item", "two", "shared-handoff");
           yield* delegate("one", "two", "different-handoff");
+          expect((yield* threads.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(1);
           yield* delegate("two", "two", "new-handoff");
         }
         const records = yield* threads.getThreadRecords(threadId, ["runs", "messages"]);
