@@ -1,0 +1,58 @@
+{
+  "evidence": "Selected inbound lifecycle frames from synthetic fictional alpha R7; only IDs replaced. No call identity, SDP, credentials or real user data. Sequence gaps omit audio and incremental transcripts.",
+  "sourceSha256": "2abdaf847bf2cd084f21640876a5a03ed03161ff659e4a92184c217069fb4745",
+  "frames": [
+    {
+      "sequence": 21,
+      "payload": {
+        "type": "turn.created",
+        "turn": {
+          "id": "turn_1",
+          "end_ms": 1400,
+          "role": "user",
+          "start_ms": 1200,
+          "transcript": " Read the only"
+        }
+      }
+    },
+    {
+      "sequence": 225,
+      "payload": {
+        "type": "turn.done",
+        "turn": {
+          "id": "turn_1",
+          "end_ms": 14400,
+          "role": "user",
+          "start_ms": 1200,
+          "transcript": " Read the only text file in this workspace , tell me the lighthouse color actually the paper kite code instead, and include the fictional data caveat, this is one task; use the fixture file path already provided in the thread"
+        }
+      }
+    },
+    {
+      "sequence": 226,
+      "payload": {
+        "type": "turn.created",
+        "turn": {
+          "id": "turn_2",
+          "end_ms": 14400,
+          "role": "assistant",
+          "start_ms": 14200,
+          "transcript": "Understood, I'll take care"
+        }
+      }
+    },
+    {
+      "sequence": 252,
+      "payload": {
+        "type": "turn.done",
+        "turn": {
+          "id": "turn_2",
+          "end_ms": 16800,
+          "role": "assistant",
+          "start_ms": 14200,
+          "transcript": "Understood, I'll take care of that."
+        }
+      }
+    }
+  ]
+}

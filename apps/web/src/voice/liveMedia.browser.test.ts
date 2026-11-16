@@ -1,5 +1,7 @@
 import { expect, it, vi } from "vite-plus/test";
 import { browserLiveMedia } from "./liveMedia";
+import { LiveVoiceController, type VoiceSocket } from "@t3tools/client-runtime/voice-conversation";
+import type { LiveVoiceServerEvent } from "@t3tools/contracts";
 
 class Track extends EventTarget {
   enabled = true;
@@ -142,6 +144,65 @@ it("reports rejected autoplay visibly through safe reason, and data-channel clos
   peer.channel.onclose!();
   expect(h.peer).toHaveBeenCalledWith("failed");
   media.dispose();
+});
+it("remote data-channel close during Stop preserves control until cleanup is acknowledged", async () => {
+  using h = setup();
+  const socket = Object.assign(new EventTarget(), {
+    readyState: 1,
+    bufferedAmount: 0,
+    send: vi.fn(),
+    close: vi.fn(),
+  });
+  const event = (value: LiveVoiceServerEvent) =>
+    socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(value) }));
+  const controller = new LiveVoiceController(
+    {
+      media: browserLiveMedia,
+      socket: () => socket as unknown as VoiceSocket,
+      url: async () => "wss://fixture.invalid/live",
+    },
+    () => {},
+  );
+  try {
+    await controller.start();
+    event({ type: "live.status", phase: "connecting", sessionId: "session", attemptId: "attempt" });
+    await vi.waitFor(() =>
+      expect(
+        socket.send.mock.calls.some(([frame]) => JSON.parse(frame).type === "live.start"),
+      ).toBe(true),
+    );
+    const peer = h.peers[0]!;
+    event({
+      type: "live.answer",
+      sessionId: "session",
+      attemptId: "attempt",
+      answerSdp: "v=0\r\ns=fictional-answer\r\n",
+    });
+    peer.connectionState = "connected";
+    peer.channel.readyState = "open";
+    peer.channel.onopen!();
+    event({ type: "live.status", phase: "connected", sessionId: "session", attemptId: "attempt" });
+    await vi.waitFor(() => expect(h.track.enabled).toBe(true));
+    controller.stop();
+    expect(h.track.stop).toHaveBeenCalledTimes(1);
+    expect(peer.close).not.toHaveBeenCalled();
+    peer.channel.onclose!();
+    expect(peer.close).toHaveBeenCalledTimes(1);
+    expect(controller.state.phase).toBe("stopping");
+    expect(controller.state.cleanupResult).toBeUndefined();
+    expect(socket.close).not.toHaveBeenCalled();
+    await controller.start();
+    expect(h.peers).toHaveLength(1);
+    event({ type: "live.cleanup", sessionId: "session", result: "acknowledged" });
+    expect(controller.state.phase).toBe("idle");
+    expect(controller.state.cleanupResult).toBe("acknowledged");
+    expect(socket.close).toHaveBeenCalledTimes(1);
+    expect(peer.close).toHaveBeenCalledTimes(1);
+    expect(h.track.enabled).toBe(false);
+  } finally {
+    controller.dispose();
+    event({ type: "live.cleanup", sessionId: "session", result: "unknown" });
+  }
 });
 it("stops a permission grant delivered after cancellation, without creating a peer", async () => {
   let grant!: (stream: MediaStream) => void;

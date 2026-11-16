@@ -27,6 +27,7 @@ import { sendRecordedVoiceMessage } from "../orchestration-v2/VoiceConversation.
 import { makeLiveAgentSession } from "./liveAgentSession.ts";
 import { decodeNativeLiveEvent, type NativeLiveAppend } from "./liveProtocol.ts";
 import parentCapture from "./fixtures/live-native/parent-association.json" with { type: "json" };
+import stallCapture from "./fixtures/live-native/handoff-stall.json" with { type: "json" };
 
 const services = Layer.mergeAll(
   VoiceFixture.layer,
@@ -34,6 +35,37 @@ const services = Layer.mergeAll(
   Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
     namedProjectsRoot: "/fixture/projects",
   }),
+);
+
+it.effect("captured request and acknowledgement without delegation never submit work", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread:captured-stall");
+      yield* VoiceFixture.create(threadId);
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const agent = yield* makeLiveAgentSession({
+        binding: { threadId },
+        sessionId: "captured-stall",
+        onBound: () => {},
+        send: () => Effect.void,
+        append: () => Effect.void,
+      });
+      for (const frame of stallCapture.frames) {
+        const event = decodeNativeLiveEvent(JSON.stringify(frame.payload));
+        if (event) yield* agent.receive(event);
+      }
+      yield* TestClock.adjust("140 seconds");
+      yield* agent.poll;
+      const records = yield* threads.getThreadRecords(threadId, ["runs", "messages"]);
+      expect(records.runs).toHaveLength(0);
+      expect(records.messages.map((message) => message.text)).toEqual(
+        stallCapture.frames
+          .filter((frame) => frame.payload.type === "turn.done")
+          .map((frame) => frame.payload.turn.transcript),
+      );
+      expect(records.messages.every((message) => message.runId === null)).toBe(true);
+    }),
+  ).pipe(Effect.provide(services)),
 );
 
 it.effect(
