@@ -23,6 +23,7 @@ export {
   getEnvironmentSpeechStreamUrl,
   getEnvironmentRealtimeVoiceUrl,
   getEnvironmentLiveVoiceUrl,
+  supportsEnvironmentNativeLiveVoice,
   linkEnvironmentSpeechModels,
   postProcessEnvironmentTranscript,
   removeEnvironmentSpeechModel,
