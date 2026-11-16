@@ -12,8 +12,13 @@ import {
   ProjectId,
   DEFAULT_RUNTIME_MODE,
   type LiveVoiceServerEvent,
+  type ServerConfig,
 } from "@t3tools/contracts";
+import * as voiceInput from "@t3tools/client-runtime/voice-input";
 import { DEFAULT_INTERACTION_MODE } from "../types";
+import { serverEnvironment } from "../state/server";
+import { AppAtomRegistryProvider, appAtomRegistry } from "../rpc/atomRegistry";
+import { runEnvironmentSpeech } from "../speech/runEnvironmentSpeech";
 import { act, render } from "../../test/render";
 import { ThreadRouteView } from "../components/ThreadRouteView";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
@@ -53,9 +58,25 @@ vi.mock("../state/threads", () => ({
   useEnvironmentThread: () => ({ status: "loading", data: Option.none() }),
 }));
 vi.mock("../state/session", () => {
-  const prepared = {};
-  return { usePreparedConnection: () => Option.some(prepared), useEnvironmentScope: () => true };
+  const prepared = new Map<string, { environmentId: string }>();
+  const readPreparedConnection = (environmentId: string) => {
+    if (!prepared.has(environmentId)) prepared.set(environmentId, { environmentId });
+    return prepared.get(environmentId)!;
+  };
+  return {
+    readPreparedConnection,
+    usePreparedConnection: (environmentId: string) =>
+      Option.some(readPreparedConnection(environmentId)),
+    useEnvironmentScope: () => true,
+  };
 });
+vi.mock("../state/server", () => ({
+  serverEnvironment: {
+    configValueAtom: Atom.family((environmentId: string) =>
+      Atom.make({ environment: { environmentId, capabilities: { nativeLiveVoice: true } } }),
+    ),
+  },
+}));
 vi.mock("../hooks/useSettings", () => ({
   useEnvironmentIdentificationMode: () => "none",
   useClientSettings: () => false,
@@ -65,9 +86,10 @@ vi.mock("../components/SidebarStageBackdrop", () => ({
   useSidebarStageBackdropVariant: () => null,
 }));
 vi.mock("../speech/runEnvironmentSpeech", () => ({
-  runEnvironmentSpeech: async () => "wss://voice.example/api/voice/live",
+  runEnvironmentSpeech: vi.fn(async () => "wss://voice.example/api/voice/live"),
 }));
 vi.mock("./liveMedia", { spy: true });
+vi.mock("@t3tools/client-runtime/voice-input", { spy: true });
 
 function VoiceComposer({
   owner = "thread_1",
@@ -239,6 +261,59 @@ function setup(acquire?: (value: LiveMedia) => Promise<LiveMedia>) {
     },
   };
 }
+
+it.each(["loading", "legacy", "unsupported", "wrong environment"] as const)(
+  "blocks %s capability without requesting a live ticket, then accepts the selected server",
+  async (mode) => {
+    using h = setup();
+    const environmentId = EnvironmentId.make("env_remote");
+    const config = (capabilities: object, id = environmentId) =>
+      ({ environment: { environmentId: id, capabilities } }) as unknown as ServerConfig;
+    const initial =
+      mode === "loading"
+        ? null
+        : config(
+            mode === "legacy" ? {} : { nativeLiveVoice: mode === "wrong environment" },
+            mode === "wrong environment" ? EnvironmentId.make("env_local") : environmentId,
+          );
+    const configAtom = Atom.make<ServerConfig | null>(initial);
+    using _config = vi.spyOn(serverEnvironment, "configValueAtom").mockReturnValue(configAtom);
+    vi.mocked(runEnvironmentSpeech).mockClear();
+    vi.mocked(voiceInput.getEnvironmentLiveVoiceUrl).mockClear();
+    await using screen = await render(
+      <AppAtomRegistryProvider>
+        <VoiceComposer environment={environmentId} />
+      </AppAtomRegistryProvider>,
+    );
+    const start = screen.getByRole("button", { name: "Start live voice" });
+    await expect.element(start).toBeDisabled();
+    expect(runEnvironmentSpeech).not.toHaveBeenCalled();
+    expect(voiceInput.getEnvironmentLiveVoiceUrl).not.toHaveBeenCalled();
+    expect(h.sockets).toHaveLength(0);
+    await userEvent.hover(start.element().parentElement!);
+    await expect
+      .element(
+        page.getByText(
+          mode === "loading"
+            ? "Waiting for this environment's live voice capabilities"
+            : mode === "wrong environment"
+              ? "The environment connection changed. Reconnect and try live voice again."
+              : "This server does not support native live voice. Update T3 Code on this environment and reconnect.",
+          { exact: true },
+        ),
+      )
+      .toBeVisible();
+    await act(() => appAtomRegistry.set(configAtom, config({ nativeLiveVoice: true })));
+    await userEvent.click(start);
+    await h.authorize();
+    expect(runEnvironmentSpeech).toHaveBeenCalledOnce();
+    expect(voiceInput.getEnvironmentLiveVoiceUrl).toHaveBeenCalledWith(
+      expect.objectContaining({ environmentId }),
+      config({ nativeLiveVoice: true }).environment,
+    );
+    expect(h.socketFactory.mock.calls.at(-1)?.[0]).toContain("threadId=thread_1");
+  },
+);
 
 it.each([
   "text",

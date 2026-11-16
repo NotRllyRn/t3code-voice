@@ -1,4 +1,8 @@
-import { getEnvironmentLiveVoiceUrl } from "@t3tools/client-runtime/voice-input";
+import { useAtomValue } from "@effect/atom-react";
+import {
+  getEnvironmentLiveVoiceUrl,
+  supportsEnvironmentNativeLiveVoice,
+} from "@t3tools/client-runtime/voice-input";
 import {
   LiveVoiceController,
   INITIAL_LIVE_VOICE_STATE,
@@ -6,6 +10,7 @@ import {
 } from "@t3tools/client-runtime/voice-conversation";
 import {
   AuthOrchestrationOperateScope,
+  LiveVoiceStartupError,
   type EnvironmentId,
   type ThreadId,
   type ModelSelection,
@@ -14,7 +19,13 @@ import {
 import * as Option from "effect/Option";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
-import { useEnvironmentScope, usePreparedConnection } from "../state/session";
+import {
+  readPreparedConnection,
+  useEnvironmentScope,
+  usePreparedConnection,
+} from "../state/session";
+import { serverEnvironment } from "../state/server";
+import { appAtomRegistry } from "../rpc/atomRegistry";
 import { runEnvironmentSpeech } from "../speech/runEnvironmentSpeech";
 import {
   MicIcon,
@@ -64,6 +75,9 @@ export function useComposerLiveVoice({
 }: Props) {
   const prepared = Option.getOrNull(usePreparedConnection(environmentId));
   const canOperate = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
+  const descriptor = useAtomValue(serverEnvironment.configValueAtom(environmentId))?.environment;
+  const nativeLiveSupported =
+    descriptor?.environmentId === environmentId && supportsEnvironmentNativeLiveVoice(descriptor);
   const binding = JSON.stringify({ environmentId, threadId, draftId, modelSelection, draft });
   const selection = JSON.stringify(modelSelection ?? draft?.modelSelection);
   const [snapshot, setSnapshot] = useState<{
@@ -123,8 +137,16 @@ export function useComposerLiveVoice({
         media: browserLiveMedia,
         socket: (url) => new WebSocket(url),
         url: async (signal) => {
+          if (readPreparedConnection(environmentId) !== prepared) {
+            throw new LiveVoiceStartupError({ reason: "connection-changed" });
+          }
+          const currentDescriptor = appAtomRegistry.get(
+            serverEnvironment.configValueAtom(environmentId),
+          )?.environment;
           const url = new URL(
-            await runEnvironmentSpeech(getEnvironmentLiveVoiceUrl(prepared), { signal }),
+            await runEnvironmentSpeech(getEnvironmentLiveVoiceUrl(prepared, currentDescriptor), {
+              signal,
+            }),
           );
           const current = owner.current?.controller === controller ? owner.current.target : target;
           if (current.threadId) url.searchParams.set("threadId", current.threadId);
@@ -164,7 +186,8 @@ export function useComposerLiveVoice({
   }, [prepared, binding, selection, environmentId, threadId, draftId, draft]);
   const controller = snapshot.controller;
   const voice = snapshot.value;
-  const allowed = !disabled && canOperate && !!prepared && !!controller && supported();
+  const allowed =
+    !disabled && canOperate && !!prepared && !!controller && supported() && nativeLiveSupported;
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Permission/connection loss must release external media resources.
   useEffect(() => {
     if (!allowed) controller?.stop();
@@ -188,9 +211,15 @@ export function useComposerLiveVoice({
       ? "Live voice requires permission to operate this environment"
       : !prepared
         ? "Connect to use live voice"
-        : disabled
-          ? "Live voice is unavailable for the current composer"
-          : null;
+        : !descriptor
+          ? "Waiting for this environment's live voice capabilities"
+          : descriptor.environmentId !== environmentId
+            ? "The environment connection changed. Reconnect and try live voice again."
+            : !nativeLiveSupported
+              ? "This server does not support native live voice. Update T3 Code on this environment and reconnect."
+              : disabled
+                ? "Live voice is unavailable for the current composer"
+                : null;
   return { controller, voice, allowed, unavailableReason, environmentId, threadId };
 }
 
