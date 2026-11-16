@@ -553,9 +553,9 @@ it.effect.each(["terminal", "stop-wait"] as const)("%s never retries or admits c
   ),
 );
 
-it.effect(
-  "does not lose typed acknowledgments or terminal tracking when more than eight runs accumulate",
-  () =>
+it.effect.each([false, true])(
+  "does not lose typed acknowledgments or terminal tracking when more than eight runs accumulate (join existing: %s)",
+  (joinExisting) =>
     Effect.scoped(
       Effect.gen(function* () {
         const id = ThreadId.make("thread:fictional-nine-typed");
@@ -576,10 +576,10 @@ it.effect(
               appends.push(event);
             }),
         });
-        yield* agent.seed;
+        if (!joinExisting) yield* agent.seed;
         const accepted: Array<Awaited<Effect.Success<ReturnType<typeof threads.sendToThread>>>> =
           [];
-        for (let n = 0; n < 9; n++) {
+        for (let n = 0; n < (joinExisting ? 10 : 9); n++) {
           accepted.push(
             yield* threads.sendToThread({
               projectId: VoiceFixture.projectId,
@@ -593,8 +593,9 @@ it.effect(
               creationSource: "web",
             }),
           );
-          if (n === 4) yield* agent.poll;
+          if (!joinExisting && n === 4) yield* agent.poll;
         }
+        if (joinExisting) yield* agent.seed;
         yield* agent.poll;
         for (const queued of accepted.slice(1)) {
           yield* threads.dispatch({
@@ -607,7 +608,9 @@ it.effect(
         // Free all queued tracker slots, then read again: an admission cap must defer, not forget.
         yield* agent.poll;
         yield* agent.poll;
-        expect((yield* threads.getThreadRecords(id, ["runs"])).runs).toHaveLength(9);
+        expect((yield* threads.getThreadRecords(id, ["runs"])).runs).toHaveLength(
+          joinExisting ? 10 : 9,
+        );
         const acknowledgments = events.filter(
           (event) => event.type === "live.agent" && ["accepted", "queued"].includes(event.status),
         );
@@ -625,9 +628,9 @@ it.effect(
               append.text.includes("T3 accepted the typed request"),
           ).length,
         }).toEqual({
-          acknowledgmentIds: accepted.map((sent) => sent.run.id),
+          acknowledgmentIds: joinExisting ? [] : accepted.map((sent) => sent.run.id),
           terminalIds: accepted.slice(1).map((sent) => sent.run.id),
-          speakableAcknowledgments: 9,
+          speakableAcknowledgments: joinExisting ? 0 : 9,
         });
       }),
     ).pipe(Effect.provide(agentServices)),
