@@ -74,6 +74,7 @@ export const LiveVoiceReason = Schema.Literals([
   "quota",
   "rate-limited",
   "unsupported-provider",
+  "unsupported-server",
   "unsupported-endpoint",
   "unsupported-model",
   "incompatible-protocol",

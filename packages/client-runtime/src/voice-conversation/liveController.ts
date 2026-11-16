@@ -47,6 +47,7 @@ const reasons: Record<LiveVoiceReason, string> = {
   quota: "The selected voice provider has no available quota.",
   "rate-limited": "The selected voice provider is rate limited. Try again later.",
   "unsupported-provider": "Live voice requires a supported configured Codex provider.",
+  "unsupported-server": "This environment needs a compatible T3 Code Voice server.",
   "unsupported-endpoint": "The selected provider does not support native Live voice.",
   "unsupported-model": "The selected provider does not support the requested Live model.",
   "incompatible-protocol": "The provider's Live protocol is not supported. Voice stopped safely.",

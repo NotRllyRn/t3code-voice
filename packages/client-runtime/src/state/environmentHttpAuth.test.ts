@@ -664,55 +664,89 @@ describe("authenticated environment HTTP requests", () => {
   );
 });
 
-it.effect.each(["supported", "revoked", "unavailable"] as const)(
-  "Live media-ticket startup distinguishes %s without exposing credentials",
-  (state) =>
-    Effect.gen(function* () {
-      const harness = makeHarness(() =>
-        state === "revoked"
-          ? credentialRejectedResponse()
-          : state === "unavailable"
-            ? Response.json({}, { status: 503 })
-            : Response.json({
-                ticket: "fictional-media-ticket",
-                expiresAt: "2099-01-01T00:00:00.000Z",
-              }),
+it.effect.each([
+  "supported",
+  "revoked",
+  "unavailable",
+  "legacy",
+  "disabled",
+  "different-environment",
+  "legacy-different-environment",
+] as const)("Live media-ticket startup distinguishes %s without exposing credentials", (state) =>
+  Effect.gen(function* () {
+    const harness = makeHarness(() =>
+      state === "revoked"
+        ? credentialRejectedResponse()
+        : state === "unavailable"
+          ? Response.json({}, { status: 503 })
+          : Response.json({
+              ticket: "fictional-media-ticket",
+              expiresAt: "2099-01-01T00:00:00.000Z",
+            }),
+    );
+    const descriptor = {
+      environmentId:
+        state === "different-environment" || state === "legacy-different-environment"
+          ? EnvironmentId.make("other-environment")
+          : PREPARED.environmentId,
+      capabilities: {
+        repositoryIdentity: false,
+        ...(state === "legacy" || state === "legacy-different-environment"
+          ? {}
+          : { nativeLiveVoice: state !== "disabled" }),
+      },
+    };
+    const result = yield* getEnvironmentLiveVoiceUrl(PREPARED, descriptor).pipe(
+      Effect.provide(harness.httpLayer),
+      Effect.provideService(
+        ManagedRelay.ManagedRelayDpopSigner,
+        Option.getOrThrow(harness.input.signer),
+      ),
+      Effect.provideService(
+        RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization,
+        harness.remoteAuthorization,
+      ),
+      Effect.result,
+    );
+    if (state === "supported") {
+      expect(result._tag).toBe("Success");
+      if (result._tag === "Success")
+        expect(new URL(result.success).pathname).toBe("/api/voice/live");
+    } else {
+      expect(result).toMatchObject({
+        _tag: "Failure",
+        failure: {
+          _tag: "LiveVoiceStartupError",
+          reason:
+            state === "revoked"
+              ? "environment-auth-required"
+              : state === "legacy" || state === "disabled"
+                ? "unsupported-server"
+                : state === "different-environment" || state === "legacy-different-environment"
+                  ? "connection-changed"
+                  : "temporarily-unavailable",
+        },
+      });
+      expect(JSON.stringify(result)).not.toMatch(
+        /current-token|renewed-token|previous\.example|headers|Authorization/,
       );
-      const result = yield* getEnvironmentLiveVoiceUrl(PREPARED).pipe(
-        Effect.provide(harness.httpLayer),
-        Effect.provideService(
-          ManagedRelay.ManagedRelayDpopSigner,
-          Option.getOrThrow(harness.input.signer),
-        ),
-        Effect.provideService(
-          RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization,
-          harness.remoteAuthorization,
-        ),
-        Effect.result,
-      );
-      if (state === "supported") {
-        expect(result._tag).toBe("Success");
-        if (result._tag === "Success")
-          expect(new URL(result.success).pathname).toBe("/api/voice/live");
-      } else {
-        expect(result).toMatchObject({
-          _tag: "Failure",
-          failure: {
-            _tag: "LiveVoiceStartupError",
-            reason: state === "revoked" ? "environment-auth-required" : "temporarily-unavailable",
-          },
-        });
-        expect(JSON.stringify(result)).not.toMatch(
-          /current-token|renewed-token|previous\.example|headers|Authorization/,
-        );
-      }
-      expect(harness.calls).toHaveLength(state === "revoked" ? 2 : 1);
-      expect(
-        harness.calls.every(
-          (call) =>
-            new URL(call.url).pathname === "/api/auth/websocket-ticket/media" &&
-            call.init.redirect === "error",
-        ),
-      ).toBe(true);
-    }),
+    }
+    expect(harness.calls).toHaveLength(
+      state === "legacy" ||
+        state === "disabled" ||
+        state === "different-environment" ||
+        state === "legacy-different-environment"
+        ? 0
+        : state === "revoked"
+          ? 2
+          : 1,
+    );
+    expect(
+      harness.calls.every(
+        (call) =>
+          new URL(call.url).pathname === "/api/auth/websocket-ticket/media" &&
+          call.init.redirect === "error",
+      ),
+    ).toBe(true);
+  }),
 );
