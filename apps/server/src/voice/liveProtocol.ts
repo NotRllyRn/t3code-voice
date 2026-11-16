@@ -1,4 +1,9 @@
-import { LIVE_VOICE_REQUESTED_MODEL, LiveVoiceSdp, type LiveVoiceReason } from "@t3tools/contracts";
+import {
+  LIVE_VOICE_MAX_SDP_BYTES,
+  LIVE_VOICE_REQUESTED_MODEL,
+  LiveVoiceSdp,
+  type LiveVoiceReason,
+} from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
 export const NATIVE_LIVE_ALPHA_HEADER = "quicksilver=v2";
@@ -234,12 +239,71 @@ export function nativeLiveCallId(location: string): string {
   throw invalid();
 }
 
-export function decodeNativeLiveCreateResponse(input: {
+type NativeLiveCreateResponse = {
   readonly status: number;
   readonly contentType: string | null;
   readonly location: string | null;
   readonly body: string;
-}) {
+};
+
+export function nativeLiveMimeCategory(contentType: string | null) {
+  switch (contentType?.split(";", 1)[0]?.trim().toLowerCase()) {
+    case undefined:
+    case "":
+      return "missing";
+    case "application/sdp":
+      return "sdp";
+    case "text/plain":
+      return "plain";
+    case "application/json":
+      return "json";
+    case "text/html":
+      return "html";
+    default:
+      return "other";
+  }
+}
+
+// Allowlisted facts only: never include Location, headers, SDP values or schema errors.
+export function nativeLiveCreateResponseDiagnostics(input: NativeLiveCreateResponse) {
+  let failurePhase: "accepted" | "status" | "mime" | "location" | "sdp" = "accepted";
+  const mimeCategory = nativeLiveMimeCategory(input.contentType);
+  if (input.status !== 201) failurePhase = "status";
+  else if (mimeCategory !== "sdp") failurePhase = "mime";
+  else {
+    try {
+      if (input.location === null) throw invalid();
+      nativeLiveCallId(input.location);
+    } catch {
+      failurePhase = "location";
+    }
+    if (failurePhase === "accepted") {
+      try {
+        decodeSdp(input.body);
+      } catch {
+        failurePhase = "sdp";
+      }
+    }
+  }
+  const bodyBytes = Buffer.byteLength(input.body, "utf8");
+  return {
+    failurePhase,
+    mimeCategory,
+    bodyBytes,
+    sdpPrefix: /^v=0\r?\n/.test(input.body),
+    sdpAscii: /^[\x09\x0a\x0d\x20-\x7e]+$/.test(input.body),
+    sdpWithinLimit: bodyBytes > 0 && bodyBytes <= LIVE_VOICE_MAX_SDP_BYTES,
+    sdpLineEndings: !/\r(?!\n)/.test(input.body) && input.body.endsWith("\n"),
+    sdpVersionLine: /(?:^|\n)v=0\r?(?:\n|$)/.test(input.body),
+    sdpOriginLine: /(?:^|\n)o=/.test(input.body),
+    sdpSessionLine: /(?:^|\n)s=/.test(input.body),
+    sdpTimingLine: /(?:^|\n)t=/.test(input.body),
+    sdpAudioLine: /(?:^|\n)m=audio /.test(input.body),
+    sdpApplicationLine: /(?:^|\n)m=application /.test(input.body),
+  };
+}
+
+export function decodeNativeLiveCreateResponse(input: NativeLiveCreateResponse) {
   try {
     if (
       input.status !== 201 ||

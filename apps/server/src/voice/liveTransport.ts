@@ -23,6 +23,8 @@ import {
   encodeNativeLiveCreate,
   nativeLiveCallId,
   nativeLiveCallUrls,
+  nativeLiveCreateResponseDiagnostics,
+  nativeLiveMimeCategory,
   NATIVE_LIVE_MAX_FRAME_BYTES,
 } from "./liveProtocol.ts";
 import { MAX_BUFFER_BYTES, MAX_BUFFER_FRAMES } from "./transport.ts";
@@ -185,7 +187,14 @@ export const acquireLiveCall = Effect.fn("LiveTransport.acquireCall")(function* 
   const result = yield* Effect.try({
     try: () => decodeNativeLiveCreateResponse({ ...response, body }),
     catch: () => new LiveConnectionError({ reason: "incompatible-protocol" }),
-  });
+  }).pipe(
+    Effect.tapError(() =>
+      Effect.logWarning(
+        "Live create response rejected",
+        nativeLiveCreateResponseDiagnostics({ ...response, body }),
+      ),
+    ),
+  );
   callId = result.callId;
   const urls = nativeLiveCallUrls(connection.createUrl, callId);
   const socket = yield* network.sideband(connection, urls.sidebandUrl);
@@ -194,26 +203,43 @@ export const acquireLiveCall = Effect.fn("LiveTransport.acquireCall")(function* 
 
 const safeFailure = () => new LiveConnectionError({ reason: "temporarily-unavailable" });
 const boundedBody = (response: Response) =>
-  Effect.tryPromise({
-    try: async () => {
-      if (!response.body) return "";
-      const reader = response.body.getReader();
-      const chunks: Uint8Array[] = [];
-      let size = 0;
-      try {
-        while (true) {
-          const next = await reader.read();
-          if (next.done) break;
-          size += next.value.byteLength;
-          if (size > 73728) throw safeFailure();
-          chunks.push(next.value);
+  Effect.suspend(() => {
+    let bodyBytes = 0;
+    let failurePhase: "body-read" | "body-size" | "body-utf8" = "body-read";
+    return Effect.tryPromise({
+      try: async () => {
+        if (!response.body) return "";
+        const reader = response.body.getReader();
+        const chunks: Uint8Array[] = [];
+        try {
+          while (true) {
+            const next = await reader.read();
+            if (next.done) break;
+            bodyBytes += next.value.byteLength;
+            if (bodyBytes > 73728) {
+              failurePhase = "body-size";
+              throw safeFailure();
+            }
+            chunks.push(next.value);
+          }
+          failurePhase = "body-utf8";
+          return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
+        } finally {
+          await reader.cancel().catch(() => undefined);
         }
-        return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
-      } finally {
-        await reader.cancel().catch(() => undefined);
-      }
-    },
-    catch: safeFailure,
+      },
+      catch: safeFailure,
+    }).pipe(
+      Effect.tapError(() =>
+        response.status === 201
+          ? Effect.logWarning("Live create response rejected", {
+              failurePhase,
+              mimeCategory: nativeLiveMimeCategory(response.headers.get("content-type")),
+              bodyBytes,
+            })
+          : Effect.void,
+      ),
+    );
   });
 
 /** Node boundary. Redirects and compression are never credential forwarding mechanisms. */

@@ -40,51 +40,97 @@ import { liveVoiceRouteLayer } from "./liveRoute.ts";
 import { VoiceOwners } from "./owner.ts";
 import { VoiceWebSocket } from "./transport.ts";
 import { connection, sdp } from "./liveTestkit.ts";
+import createFixture from "./fixtures/live-create-http.json" with { type: "json" };
 
-const fixture = Effect.acquireRelease(
-  Effect.promise(async () => {
-    const requests: { url: string; authorization: string | undefined; body: string }[] = [];
-    const http = NodeHttp.createServer((request, response) => {
-      let body = "";
-      request.setEncoding("utf8");
-      request.on("data", (chunk) => {
-        body += chunk;
-      });
-      request.on("end", () => {
-        requests.push({ url: request.url!, authorization: request.headers.authorization, body });
-        if (request.url?.endsWith("/hangup")) {
-          response.writeHead(200);
-          response.end();
-        } else {
-          response.writeHead(201, {
-            "Content-Type": "application/sdp",
-            Location: "https://never-follow.example.test/live/fake-owned",
-          });
-          response.end(sdp);
-        }
-      });
-    });
-    const ws = new NodeWS.WebSocketServer({ server: http });
-    const sideband: string[] = [];
-    ws.on("connection", (socket, request) => {
-      requests.push({ url: request.url!, authorization: request.headers.authorization, body: "" });
-      socket.on("message", (frame) => sideband.push(frame.toString()));
-      socket.send(
-        '{"type":"session.started","session":{"id":"fake-native-session","model":"gpt-live-1.1-codex"}}',
-      );
-    });
-    await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
-    const address = http.address();
-    if (!address || typeof address === "string") throw new Error("Missing fictional loopback port");
-    return { http, ws, requests, sideband, origin: `http://127.0.0.1:${address.port}` };
-  }),
-  (up) =>
+const responses = [
+  { name: "source SDP", phase: null },
+  { name: "MIME case and parameters", contentType: "Application/SDP; charset=utf-8", phase: null },
+  { name: "source plain text", contentType: createFixture.cases[1]!.contentType, phase: "mime" },
+  { name: "non-ASCII", body: createFixture.body.replace("s=-", "s=é"), phase: "sdp" },
+  { name: "HTML", body: "<html>fictional-private-response</html>", phase: "sdp" },
+  { name: "JSON envelope", body: JSON.stringify({ sdp: createFixture.body }), phase: "sdp" },
+  { name: "SDP limit", body: "v=0\r\ns=" + "x".repeat(65536), phase: "sdp" },
+  { name: "body limit", body: "v=0\r\ns=" + "x".repeat(73728), phase: "body-size" },
+  { name: "invalid UTF-8", body: Buffer.from([0x76, 0x3d, 0x30, 0x0a, 0xff]), phase: "body-utf8" },
+  {
+    name: "redirect",
+    status: 307,
+    location: "/redirect-must-not-follow",
+    phase: null,
+    rejected: true,
+    unknownCall: true,
+  },
+  {
+    name: "error 200",
+    status: 200,
+    body: "<html>fictional-private-response</html>",
+    phase: null,
+    rejected: true,
+  },
+  {
+    name: "invalid call ID",
+    location: "/v1/live/..%2Fpoison",
+    phase: "location",
+    unknownCall: true,
+  },
+] as const;
+type CreateResponse = (typeof responses)[number];
+const fixture = (variant: CreateResponse) =>
+  Effect.acquireRelease(
     Effect.promise(async () => {
-      up.ws.clients.forEach((client) => client.terminate());
-      await new Promise<void>((resolve) => up.http.close(() => resolve()));
-      up.ws.close();
+      const requests: { url: string; authorization: string | undefined; body: string }[] = [];
+      const http = NodeHttp.createServer((request, response) => {
+        let body = "";
+        request.setEncoding("utf8");
+        request.on("data", (chunk) => {
+          body += chunk;
+        });
+        request.on("end", () => {
+          requests.push({ url: request.url!, authorization: request.headers.authorization, body });
+          if (request.url?.endsWith("/hangup")) {
+            response.writeHead(200);
+            response.end();
+          } else {
+            response.writeHead("status" in variant ? variant.status : createFixture.status, {
+              "cOnTent-TyPe":
+                "contentType" in variant
+                  ? variant.contentType
+                  : createFixture.cases[0]!.contentType,
+              Location:
+                "location" in variant
+                  ? variant.location
+                  : "https://never-follow.example.test/live/fake-owned",
+            });
+            response.end("body" in variant ? variant.body : createFixture.body);
+          }
+        });
+      });
+      const ws = new NodeWS.WebSocketServer({ server: http });
+      const sideband: string[] = [];
+      ws.on("connection", (socket, request) => {
+        requests.push({
+          url: request.url!,
+          authorization: request.headers.authorization,
+          body: "",
+        });
+        socket.on("message", (frame) => sideband.push(frame.toString()));
+        socket.send(
+          '{"type":"session.started","session":{"id":"fake-native-session","model":"gpt-live-1.1-codex"}}',
+        );
+      });
+      await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
+      const address = http.address();
+      if (!address || typeof address === "string")
+        throw new Error("Missing fictional loopback port");
+      return { http, ws, requests, sideband, origin: `http://127.0.0.1:${address.port}` };
     }),
-);
+    (up) =>
+      Effect.promise(async () => {
+        up.ws.clients.forEach((client) => client.terminate());
+        await new Promise<void>((resolve) => up.http.close(() => resolve()));
+        up.ws.close();
+      }),
+  );
 
 const authLayer = EnvironmentAuth.layer.pipe(
   Layer.provide(ManagedPolicy.layerTest()),
@@ -95,12 +141,12 @@ const authLayer = EnvironmentAuth.layer.pipe(
   Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
 );
 
-it.live(
-  "real route + HTTP bootstrap + sideband + Stop cleanup; browser never sees selected credentials or Location",
-  () =>
+it.live.each(responses)(
+  "real route + source-backed HTTP response $name + owned cleanup; no private response material",
+  (variant) =>
     Effect.scoped(
       Effect.gen(function* () {
-        const up = yield* fixture;
+        const up = yield* fixture(variant);
         const logs: unknown[] = [];
         const owners = new Set<string>();
         const selected = { ...connection, createUrl: `${up.origin}/prefix/v1/live` };
@@ -237,20 +283,35 @@ it.live(
               browser.on("close", () => resolve());
             }),
         );
+        const rejected = variant.phase !== null || "rejected" in variant;
         expect(up.requests.map((request) => request.url)).toEqual([
           "/prefix/v1/live",
-          "/prefix/v1/live/fake-owned",
-          "/prefix/v1/realtime/calls/fake-owned/hangup",
+          ...(!rejected ? ["/prefix/v1/live/fake-owned"] : []),
+          ...(!("unknownCall" in variant) ? ["/prefix/v1/realtime/calls/fake-owned/hangup"] : []),
         ]);
+        if (variant.phase !== null) {
+          expect(JSON.stringify(logs)).toContain(`"failurePhase":"${variant.phase}"`);
+        }
+        if (rejected) {
+          expect(
+            seen.some((event) => event.type === "live.status" && event.phase === "error"),
+          ).toBe(true);
+          expect(seen.some((event) => event.type === "live.answer")).toBe(false);
+          expect(up.sideband).toEqual([]);
+        }
         expect(
           up.requests.every((request) => request.authorization === "Bearer fictional-selected-key"),
         ).toBe(true);
         expect(JSON.parse(up.requests[0]!.body).session.delegation).toEqual({ type: "client" });
         expect(
           seen.some((event) => event.type === "live.status" && event.phase === "connected"),
-        ).toBe(true);
-        expect(JSON.stringify({ seen, logs })).not.toMatch(
-          /fictional-selected-key|never-follow|fake-owned/,
+        ).toBe(!rejected);
+        // The answer itself must reach the browser; response material must never enter logs,
+        // status/error events, or any rejected answer.
+        expect(
+          JSON.stringify({ seen: seen.filter((event) => event.type !== "live.answer"), logs }),
+        ).not.toMatch(
+          /fictional-selected-key|never-follow|fake-owned|fictional-private-response|fictionalUfrag|fictionalPassword|123456789|AA:AA|0\.0\.0\.0/,
         );
         expect(JSON.stringify(logs)).not.toContain("127.0.0.1");
         expect(owners.size).toBe(0);
