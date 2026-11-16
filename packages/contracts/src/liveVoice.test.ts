@@ -1,0 +1,118 @@
+import { describe, expect, it } from "vite-plus/test";
+import * as Schema from "effect/Schema";
+import {
+  LIVE_VOICE_MAX_FRAME_BYTES,
+  LIVE_VOICE_MAX_SDP_BYTES,
+  decodeLiveVoiceClientEvent,
+  decodeLiveVoiceServerEvent,
+} from "./liveVoice.ts";
+import { OrchestrationV2VoiceMessage } from "./orchestrationV2.ts";
+
+const offerSdp = "v=0\r\ns=Fictional offer\r\n";
+describe("Live control boundary", () => {
+  it.each([
+    { type: "live.start", attemptId: "attempt-1", offerSdp },
+    { type: "live.peer", attemptId: "attempt-1", state: "connected" },
+    { type: "live.peer", attemptId: "attempt-1", state: "failed" },
+    { type: "live.stop" },
+    { type: "live.mute", muted: true },
+    { type: "live.heartbeat" },
+  ])("decodes the bounded control $type", (event) => {
+    expect(decodeLiveVoiceClientEvent(JSON.stringify(event))).toEqual(event);
+  });
+
+  it.each([
+    { type: "live.start", attemptId: "attempt-1", offerSdp, endpoint: "https://poison.invalid" },
+    { type: "live.start", attemptId: "attempt-1", offerSdp, apiKey: "fictional-poison-key" },
+    { type: "live.start", attemptId: "attempt-1", offerSdp, model: "other-model" },
+    { type: "live.start", attemptId: "attempt-1", offerSdp, taskText: "Do not execute this." },
+    { type: "live.peer", attemptId: "attempt-1", state: "ready" },
+    { type: "live.peer", attemptId: "attempt-1", state: "connected", delegationId: "task-1" },
+    { type: "delegation.created", item: {} },
+    { type: "live.mute", muted: "true" },
+    { type: "live.stop", session: { headers: { authorization: "fictional-poison-key" } } },
+    { type: "live.start", attemptId: "../bad", offerSdp },
+    { type: "live.start", attemptId: "attempt-1", offerSdp: "not SDP" },
+    {
+      type: "live.start",
+      attemptId: "attempt-1",
+      offerSdp: "v=0\n" + "x".repeat(LIVE_VOICE_MAX_SDP_BYTES),
+    },
+    null,
+    [],
+  ])("rejects malformed controls and extra authority %#", (event) => {
+    expect(() => decodeLiveVoiceClientEvent(JSON.stringify(event))).toThrow(
+      "Invalid Live control frame",
+    );
+  });
+
+  it("bounds whole frames in UTF-8 bytes and hides raw decoder errors", () => {
+    for (const frame of [
+      "x".repeat(LIVE_VOICE_MAX_FRAME_BYTES + 1),
+      JSON.stringify({ type: "live.stop", poison: "界".repeat(LIVE_VOICE_MAX_FRAME_BYTES / 2) }),
+      '{"fictional-poison-key":',
+    ]) {
+      expect(() => decodeLiveVoiceClientEvent(frame)).toThrow(/^Invalid Live control frame$/);
+    }
+  });
+
+  it("keeps server failures finite and credential-free, and captions revisioned", () => {
+    const status = {
+      type: "live.status",
+      sessionId: "app-session",
+      phase: "refresh_wait",
+      reason: "refresh-pending",
+      attemptId: "attempt-2",
+      retryAt: 90_000,
+      deadlineAt: 180_000,
+      capability: {
+        environmentId: "environment-fictional",
+        providerInstanceId: "codex",
+        protocol: "cpa-codex-live",
+        requestedModel: "gpt-live-1.1-codex",
+        effectiveModel: null,
+      },
+    };
+    const caption = {
+      type: "live.caption",
+      sessionId: "app-session",
+      role: "user",
+      segmentId: "segment-1",
+      revision: 2,
+      text: "Fictional correction",
+      committed: false,
+    };
+    expect(decodeLiveVoiceServerEvent(JSON.stringify(status))).toEqual(status);
+    expect(decodeLiveVoiceServerEvent(JSON.stringify(caption))).toEqual(caption);
+    for (const event of [
+      { ...status, reason: "refresh_failed: fictional-poison-key" },
+      { ...status, headers: { authorization: "fictional-poison-key" } },
+      { ...status, capability: { ...status.capability, createUrl: "https://poison.invalid" } },
+      { ...caption, revision: -1 },
+      { ...caption, startMs: Infinity },
+      { ...caption, role: "system" },
+      { ...caption, text: "界".repeat(6_000) },
+    ]) {
+      expect(() => decodeLiveVoiceServerEvent(JSON.stringify(event))).toThrow(
+        /^Invalid Live control frame$/,
+      );
+    }
+  });
+
+  it("preserves legacy voice records while distinguishing application-frozen Live windows", () => {
+    const decode = Schema.decodeUnknownSync(OrchestrationV2VoiceMessage);
+    const legacy = {
+      sessionId: "session-fictional",
+      itemId: "item-fictional",
+      sequence: 0,
+      textKind: "final_user_transcript",
+      delivery: "unknown",
+    };
+    expect(decode(legacy)).toMatchObject(legacy);
+    expect(decode({ ...legacy, transcriptFinality: "application_frozen" })).toMatchObject({
+      ...legacy,
+      transcriptFinality: "application_frozen",
+    });
+    expect(() => decode({ ...legacy, transcriptFinality: "heard" })).toThrow();
+  });
+});

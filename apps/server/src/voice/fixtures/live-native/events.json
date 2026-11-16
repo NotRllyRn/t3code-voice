@@ -1,0 +1,62 @@
+{
+  "started": { "type": "session.started", "session": { "id": "session-fictional" } },
+  "updated": { "type": "session.updated", "session": { "id": "session-fictional" } },
+  "input": {
+    "type": "input_transcript.added",
+    "item": {
+      "id": "input-fictional",
+      "type": "input_transcript",
+      "text": "Please rename the sample."
+    }
+  },
+  "output": { "type": "output_transcript.added", "item": { "text": "I can help with that." } },
+  "done": {
+    "type": "turn.done",
+    "turn": { "id": "turn-fictional", "role": "user", "transcript": "Please rename the sample." }
+  },
+  "delegation": {
+    "type": "delegation.created",
+    "offset_ms": 1000,
+    "item": {
+      "id": "delegation-fictional",
+      "type": "delegation",
+      "target": "client",
+      "content": [{ "type": "input_text", "text": "Please rename the sample." }]
+    }
+  },
+  "error": {
+    "type": "error",
+    "error": { "message": "Fictional private upstream diagnostic; do not forward." }
+  },
+  "create": {
+    "status": 201,
+    "contentType": "application/sdp",
+    "location": "https://relay.invalid/v1/live/call-fictional",
+    "body": "v=0\r\ns=Fictional answer, not a usable media session\r\n"
+  },
+  "createRequest": {
+    "sdp": "v=0\r\ns=Fictional offer, not a usable media session\r\n",
+    "session": {
+      "model": "gpt-live-1.1-codex",
+      "instructions": "Fictional session context.",
+      "audio": { "output": { "voice": "alloy" } },
+      "delegation": { "type": "client" }
+    }
+  },
+  "quietAppend": {
+    "type": "session.context.append",
+    "channel": "commentary",
+    "content": [{ "type": "input_text", "text": "Fictional context." }]
+  },
+  "taskAppend": {
+    "type": "delegation.context.append",
+    "delegation_item_id": "delegation-fictional",
+    "channel": "speakable",
+    "content": [{ "type": "input_text", "text": "Fictional feedback." }]
+  },
+  "hangup": { "method": "POST", "status": 200 },
+  "routes": {
+    "sidebandUrl": "wss://relay.invalid/prefix/v1/live/call-fictional",
+    "hangupUrl": "https://relay.invalid/prefix/v1/realtime/calls/call-fictional/hangup"
+  }
+}

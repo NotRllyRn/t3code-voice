@@ -1321,6 +1321,8 @@ export const OrchestrationV2VoiceMessage = Schema.Struct({
   contentIndex: Schema.optional(NonNegativeInt),
   predecessorItemId: Schema.optional(TrimmedNonEmptyString),
   textKind: Schema.Literals(["final_user_transcript", "generated_voice_reply"]),
+  // Live history windows are application-frozen, not provider-final transcript promises.
+  transcriptFinality: Schema.optional(Schema.Literals(["application_frozen", "provider_final"])),
   delivery: Schema.Literals(["pending", "drained", "interrupted", "unknown"]),
   playedAudioMs: Schema.optional(NonNegativeInt),
   sourceRunId: Schema.optional(RunId),
