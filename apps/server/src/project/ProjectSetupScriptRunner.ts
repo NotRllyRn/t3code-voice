@@ -66,6 +66,7 @@ export interface ProjectSetupScriptRunnerInput {
   readonly projectCwd?: string;
   readonly worktreePath: string;
   readonly trigger?: "setup" | "settle";
+  readonly enforceNoSetupScripts?: boolean;
   readonly project?: {
     readonly id: ProjectId;
     readonly workspaceRoot: string;
@@ -115,7 +116,17 @@ export class ProjectSetupScriptUnsupportedShellError extends Schema.TaggedError<
   }
 }
 
+export class ProjectSetupScriptsForbiddenError extends Schema.TaggedError<ProjectSetupScriptsForbiddenError>()(
+  "ProjectSetupScriptsForbiddenError",
+  { projectId: ProjectId },
+) {
+  override get message(): string {
+    return "This launch requires an empty effective project scripts configuration.";
+  }
+}
+
 export const ProjectSetupScriptRunnerError = Schema.Union([
+  ProjectSetupScriptsForbiddenError,
   ProjectSetupScriptOperationError,
   ProjectSetupScriptProjectNotFoundError,
   ProjectSetupScriptUnsupportedShellError,
@@ -370,11 +381,13 @@ export const make = Effect.gen(function* () {
     );
     if (thread?.linkOrigin !== undefined && linkOriginIsFenced(thread.linkOrigin))
       return { status: "skipped-for-link" } as const;
-    const suppliedProject = input.project;
+    // Guarded launches must not trust the project snapshot captured before preparation.
+    const suppliedProject = input.enforceNoSetupScripts === true ? undefined : input.project;
+    const projectId = input.projectId ?? input.project?.id;
     const projectById =
       suppliedProject ??
-      (input.projectId
-        ? yield* projects.getById(ProjectId.make(input.projectId)).pipe(
+      (projectId
+        ? yield* projects.getById(ProjectId.make(projectId)).pipe(
             Effect.map(Option.getOrUndefined),
             Effect.mapError(
               (cause) =>
@@ -419,6 +432,12 @@ export const make = Effect.gen(function* () {
     );
     const trigger = input.trigger ?? "setup";
     const scripts = resolveProjectScripts(settings, project);
+    if (input.enforceNoSetupScripts === true) {
+      if (scripts.length > 0)
+        return yield* new ProjectSetupScriptsForbiddenError({ projectId: project.id });
+      // Never enter terminal execution, even if configuration changes after this read.
+      return { status: "no-script" } as const;
+    }
     const script =
       trigger === "settle" ? settleProjectScript(scripts) : setupProjectScript(scripts);
     if (!script) {

@@ -2,6 +2,7 @@ import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import { resolveProjectScripts } from "@t3tools/shared/projectScripts";
 import {
   CommandId,
   type ChatAttachment,
@@ -13,6 +14,7 @@ import {
   type OrchestrationV2LinkOrigin,
   type OrchestrationV2ProviderThreadNativeMetadata,
   type OrchestrationV2ThreadProjection,
+  type OrchestrationV2ThreadLaunchWorkspaceStrategy,
   type ProviderDriverKind,
   type ProviderInteractionMode,
   ProjectId,
@@ -54,19 +56,7 @@ import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
 import { DispatchModeLimit } from "./DispatchModeLimit.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 
-export type ThreadLaunchWorkspaceStrategy =
-  | { readonly type: "root"; readonly branch?: string | undefined }
-  | {
-      readonly type: "existing_worktree";
-      readonly worktreePath: string;
-      readonly branch?: string | undefined;
-    }
-  | {
-      readonly type: "worktree";
-      readonly baseRef: string;
-      readonly branch?: string | undefined;
-      readonly startFromOrigin?: boolean | undefined;
-    };
+export type ThreadLaunchWorkspaceStrategy = OrchestrationV2ThreadLaunchWorkspaceStrategy;
 
 export interface ThreadLaunchInitialMessage {
   readonly messageId?: MessageId;
@@ -88,6 +78,7 @@ export interface ThreadLaunchInput {
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
   readonly workspaceStrategy: ThreadLaunchWorkspaceStrategy;
+  readonly enforceNoSetupScripts?: boolean;
   readonly initialMessage?: ThreadLaunchInitialMessage;
   readonly importedNativeThread?: {
     readonly ref: {
@@ -123,6 +114,7 @@ export interface ThreadLaunchResult {
   readonly projection: OrchestrationV2ThreadProjection;
   /** The launch's last write (the initial message, else the thread claim) was accepted before this call. */
   readonly resumed: boolean;
+  readonly enforceNoSetupScripts?: true;
   readonly sequence?: number;
 }
 
@@ -230,6 +222,29 @@ const make = Effect.gen(function* () {
         cause,
       });
 
+  const assertNoScripts = Effect.fn("ThreadLaunchService.assertNoScripts")(function* (
+    input: PreparationInput,
+  ) {
+    if (input.workspaceStrategy.enforceNoSetupScripts !== true) return;
+    const project = yield* projects.getById(input.projectId).pipe(
+      Effect.mapError(mapError(input, "resolve-project")),
+      Effect.flatMap(
+        Option.match({
+          onNone: () => Effect.fail(mapError(input, "resolve-project")("Project not found.")),
+          onSome: Effect.succeed,
+        }),
+      ),
+    );
+    const settings = yield* serverSettings.getSettings.pipe(
+      Effect.mapError(mapError(input, "resolve-project")),
+    );
+    if (resolveProjectScripts(settings, project).length > 0)
+      return yield* mapError(
+        input,
+        "resolve-project",
+      )(new ProjectSetupScriptRunner.ProjectSetupScriptsForbiddenError({ projectId: project.id }));
+  });
+
   const readReceipt = (input: ThreadLaunchInput, commandId: CommandId) =>
     receipts
       .getByCommandId(commandId)
@@ -334,6 +349,7 @@ const make = Effect.gen(function* () {
       });
     }
     yield* Effect.gen(function* () {
+      yield* assertNoScripts(input);
       const initialMessage = input.initialMessage;
       const generateBranchNameFor = Effect.fn("ThreadLaunchService.generateBranchNameFor")(
         function* (cwd: string, message: ThreadLaunchInitialMessage) {
@@ -582,6 +598,7 @@ const make = Effect.gen(function* () {
           })
           .pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
       }
+      yield* assertNoScripts(input);
       yield* setupTracker.stageStatus(threadId, "setup-script", "running");
       const setup =
         worktreePath === null
@@ -592,6 +609,9 @@ const make = Effect.gen(function* () {
                 projectId: input.projectId,
                 projectCwd: project.workspaceRoot,
                 worktreePath,
+                ...(input.workspaceStrategy.enforceNoSetupScripts === true
+                  ? { enforceNoSetupScripts: true }
+                  : {}),
                 ...(tracked
                   ? {
                       observeCompletion: {
@@ -837,11 +857,19 @@ const make = Effect.gen(function* () {
     function* (request) {
       // Scratch has no Git repository. Normalize before folder allocation so
       // durable preparation and retries use the thread's own Scratch folder.
-      const input: ThreadLaunchInput =
+      const normalizedStrategy: ThreadLaunchWorkspaceStrategy =
         request.workspaceStrategy.type === "worktree" &&
         (yield* managedFolders.isScratchProject(request.projectId))
-          ? { ...request, workspaceStrategy: { type: "root" } }
-          : request;
+          ? { type: "root", enforceNoSetupScripts: request.workspaceStrategy.enforceNoSetupScripts }
+          : request.workspaceStrategy;
+      const input: ThreadLaunchInput = {
+        ...request,
+        workspaceStrategy: {
+          ...normalizedStrategy,
+          ...(request.enforceNoSetupScripts === true ? { enforceNoSetupScripts: true } : {}),
+        },
+      };
+      yield* assertNoScripts(input);
       yield* ProjectCloneTracker.rejectCommandsDuringClone(cloneTracker, {
         type: "thread.create",
         projectId: input.projectId,
@@ -916,7 +944,13 @@ const make = Effect.gen(function* () {
                   .pipe(Effect.mapError(mapError(input, "provision-worktree", candidateThreadId))),
                 {
                   onNone: () => input.workspaceStrategy,
-                  onSome: (worktreePath) => ({ type: "existing_worktree", worktreePath }),
+                  onSome: (worktreePath) => ({
+                    type: "existing_worktree",
+                    worktreePath,
+                    ...(input.workspaceStrategy.enforceNoSetupScripts === true
+                      ? { enforceNoSetupScripts: true }
+                      : {}),
+                  }),
                 },
               )
             : input.workspaceStrategy;
@@ -974,6 +1008,29 @@ const make = Effect.gen(function* () {
           const messageCommandId = CommandId.make(`${input.commandId}:initial-message`);
           const messageReceipt = yield* readReceipt(input, messageCommandId);
           messageWasAlreadyAccepted = Option.isSome(messageReceipt);
+          if (
+            input.workspaceStrategy.enforceNoSetupScripts === true &&
+            (Option.isSome(launchReceipt) || claimed.replayed === true || messageWasAlreadyAccepted)
+          ) {
+            const priorRun = Option.isSome(messageReceipt)
+              ? yield* threads.streamStoredEventsFrom({ threadId, eventType: "run.created" }).pipe(
+                  Stream.filter((stored) => stored.commandId === messageCommandId),
+                  Stream.runHead,
+                  Effect.mapError(mapError(input, "read-receipt", threadId)),
+                )
+              : Option.none();
+            if (
+              Option.isNone(priorRun) ||
+              priorRun.value.event.type !== "run.created" ||
+              priorRun.value.event.payload.workspacePreparation?.enforceNoSetupScripts !== true
+            ) {
+              return yield* mapError(
+                input,
+                "resolve-project",
+                threadId,
+              )("The previous launch did not durably acknowledge the no-setup-scripts guard.");
+            }
+          }
           const messageId =
             input.initialMessage.messageId ??
             (yield* ids.allocate
@@ -1032,9 +1089,22 @@ const make = Effect.gen(function* () {
         const projection = yield* threads
           .getThreadProjection(threadId)
           .pipe(Effect.mapError(mapError(input, "create-thread", threadId)));
-        const runIsPreparing =
-          runId !== null &&
-          projection.runs.some((run) => run.id === runId && run.status === "preparing");
+        if (
+          input.workspaceStrategy.enforceNoSetupScripts === true &&
+          (Option.isSome(launchReceipt) ||
+            claimed.replayed === true ||
+            messageWasAlreadyAccepted) &&
+          !projection.runs.some(
+            (run) => run.id === runId && run.workspacePreparation?.enforceNoSetupScripts === true,
+          )
+        )
+          return yield* mapError(
+            input,
+            "resolve-project",
+            threadId,
+          )("The previous launch did not durably acknowledge the no-setup-scripts guard.");
+        const preparationRun = projection.runs.find((run) => run.id === runId);
+        const runIsPreparing = preparationRun?.status === "preparing";
         const shouldSchedule = runId === null ? Option.isNone(launchReceipt) : runIsPreparing;
         const boundWorktreePath = projection.thread.worktreePath;
         const preparationStrategy: ThreadLaunchWorkspaceStrategy =
@@ -1045,6 +1115,9 @@ const make = Effect.gen(function* () {
                 type: "existing_worktree",
                 worktreePath: boundWorktreePath,
                 branch: workspaceStrategy.branch,
+                ...(workspaceStrategy.enforceNoSetupScripts === true
+                  ? { enforceNoSetupScripts: true }
+                  : {}),
               }
             : workspaceStrategy;
         if (shouldSchedule) {
@@ -1061,11 +1134,20 @@ const make = Effect.gen(function* () {
                       Effect.mapError(mapError(input, "update-thread", threadId)),
                     );
               if (preparationStillRequired) {
-                yield* schedulePreparation(
-                  { ...input, workspaceStrategy: preparationStrategy },
-                  threadId,
-                  runId,
-                );
+                if (preparationRun?.workspacePreparation !== undefined) {
+                  yield* scheduleRunPreparation(
+                    { commandId: input.commandId, threadId, runId: preparationRun.id },
+                    projection.thread,
+                    preparationRun,
+                    preparationRun.workspacePreparation,
+                  ).pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)));
+                } else {
+                  yield* schedulePreparation(
+                    { ...input, workspaceStrategy: preparationStrategy },
+                    threadId,
+                    runId,
+                  );
+                }
               } else {
                 yield* releasePreparation(input.commandId);
               }
@@ -1076,6 +1158,9 @@ const make = Effect.gen(function* () {
         return {
           threadId,
           projection,
+          ...(input.workspaceStrategy.enforceNoSetupScripts === true
+            ? { enforceNoSetupScripts: true as const }
+            : {}),
           // An attempt that failed after claiming the thread recorded nothing, so
           // only a repeat of the final write counts as resumed.
           resumed:
@@ -1140,6 +1225,9 @@ const make = Effect.gen(function* () {
               type: "existing_worktree" as const,
               worktreePath: thread.worktreePath,
               branch: thread.branch,
+              ...(workspacePreparation.enforceNoSetupScripts === true
+                ? { enforceNoSetupScripts: true }
+                : {}),
             },
             reusedWorktree: { baseRef: workspacePreparation.baseRef },
           }

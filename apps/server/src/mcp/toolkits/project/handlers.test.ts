@@ -45,6 +45,7 @@ const clientLaunchHarness = (input: {
   readonly defaultRuntimeMode?: RuntimeMode;
   readonly fallbackModel?: ModelSelection;
   readonly providers?: readonly ServerProvider[];
+  readonly serverSettings?: Parameters<typeof ServerSettings.layerTest>[0];
   /** Where Settings saves a project's model; the legacy project field stays null. */
   readonly overrideModel?: ModelSelection;
   readonly launched: Array<ThreadLaunch.ThreadLaunchInput>;
@@ -68,6 +69,7 @@ const clientLaunchHarness = (input: {
       getProviders: Effect.succeed(input.providers ?? []),
     }),
     ServerSettings.layerTest({
+      ...input.serverSettings,
       fallbackModelSelection: input.fallbackModel ?? null,
       ...(input.defaultRuntimeMode === undefined
         ? {}
@@ -143,6 +145,7 @@ const clientLaunchHarness = (input: {
             runs: [],
           },
           resumed: false,
+          ...(launch.enforceNoSetupScripts === true ? { enforceNoSetupScripts: true } : {}),
         } as unknown as ThreadLaunch.ThreadLaunchResult);
       },
     }),
@@ -154,6 +157,11 @@ const clientLaunchHarness = (input: {
                 id,
                 workspaceRoot: input.workspaceRoot ?? "/projects/client-target",
                 defaultModelSelection: projectDefaults.model,
+                title: "Project",
+                scripts: [],
+                createdAt: "2026-01-01T00:00:00.000Z",
+                updatedAt: "2026-01-01T00:00:00.000Z",
+                deletedAt: null,
               } as unknown as ProjectRecord)
             : Option.none(),
         ),
@@ -173,6 +181,46 @@ const clientLaunchHarness = (input: {
   );
   return { projectId, modelSelection, projectDefaults, dependencies: layerDependencies };
 };
+
+it.effect(
+  "reports effective inherited scripts and launch guard support with an explicit guarded acknowledgement",
+  () =>
+    Effect.gen(function* () {
+      const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+      const script = {
+        id: "setup",
+        name: "Setup",
+        command: "echo setup",
+        icon: "configure",
+        runOnWorktreeCreate: true,
+      } as const;
+      const { projectId, dependencies } = clientLaunchHarness({
+        runtimeModeCeiling: "full-access",
+        launched,
+        serverSettings: { defaultProjectScripts: [script] },
+      });
+      const toolkit = yield* ProjectToolkit.pipe(
+        Effect.provide(
+          McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+            Layer.provide(dependencies),
+          ),
+        ),
+      );
+      const read = yield* toolkit
+        .handle("t3_project_read", { projectId })
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+      expect(read.at(-1)?.result).toMatchObject({
+        scripts: [],
+        effectiveScripts: [script],
+        launchCapabilities: { enforceNoSetupScripts: true },
+      });
+      const result = yield* toolkit
+        .handle("t3_thread_launch", { projectId, title: "Guarded", enforceNoSetupScripts: true })
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+      expect(launched[0]?.enforceNoSetupScripts).toBe(true);
+      expect(result.at(-1)?.result).toMatchObject({ enforceNoSetupScripts: true });
+    }),
+);
 
 it.effect(
   "a client launches with the project's default model and mode, capped at its ceiling",

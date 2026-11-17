@@ -11,6 +11,7 @@ import {
   RuntimeMode,
   ProviderInteractionMode,
   Project,
+  ProjectScript,
   ProjectCreatePayload,
   ProjectUpdatePayload,
   ProjectId,
@@ -66,7 +67,13 @@ const ProjectListTool = Tool.make("t3_project_list", {
   .annotate(Tool.Destructive, false);
 const ProjectReadTool = Tool.make("t3_project_read", {
   ...shared,
-  description: "Read one project: workspace and saved scripts.",
+  description: "Read one project: workspace, saved and effective scripts, and launch capabilities.",
+  success: Schema.Struct({
+    ...Project.fields,
+    effectiveScripts: Schema.Array(ProjectScript),
+    launchCapabilities: Schema.Struct({ enforceNoSetupScripts: Schema.Literal(true) }),
+  }),
+  dependencies: [...shared.dependencies, ServerSettings.ServerSettingsService],
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     projectId: ProjectId,
@@ -150,6 +157,12 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
       }),
     ),
     attachments: Schema.optional(Schema.Array(McpAttachmentInput).check(Schema.isMaxLength(8))),
+    enforceNoSetupScripts: Schema.optional(
+      Schema.Boolean.annotate({
+        description:
+          "Require empty effective project scripts and never execute setup during this launch, including preparation retries. Check project_read.launchCapabilities before relying on this guard.",
+      }),
+    ),
     clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
     /** Set by a linked environment launching its agent's delegated task here; ignored otherwise. */
     delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
@@ -161,6 +174,7 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     modelSelection: ModelSelection,
     runId: Schema.NullOr(RunId),
     status: Schema.NullOr(OrchestrationV2RunStatus),
+    enforceNoSetupScripts: Schema.optional(Schema.Literal(true)),
   }),
   dependencies: [
     ...shared.dependencies,

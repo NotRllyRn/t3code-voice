@@ -26,6 +26,8 @@ import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as DateTime from "effect/DateTime";
 import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import { resolveProjectScripts } from "@t3tools/shared/projectScripts";
+import { ProjectSetupScriptsForbiddenError } from "../../../project/ProjectSetupScriptRunner.ts";
 import { resolveRuntimeMode } from "../../delegatedTaskModes.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
@@ -33,6 +35,7 @@ import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../t
 import { ProjectToolkit } from "./tools.ts";
 
 const isAboveCeilingError = Schema.is(OrchestratorRuntimeModeAboveCeilingError);
+const isSetupScriptsForbiddenError = Schema.is(ProjectSetupScriptsForbiddenError);
 
 function projectFailure(error: Project.ProjectServiceError) {
   if (error._tag === "ProjectOperationError") return unavailable();
@@ -234,6 +237,9 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           runtimeMode: startedRuntimeMode,
           interactionMode,
           workspaceStrategy: input.workspaceStrategy ?? { type: "root" },
+          ...(input.enforceNoSetupScripts === undefined
+            ? {}
+            : { enforceNoSetupScripts: input.enforceNoSetupScripts }),
           ...(input.message === undefined && attachments.length === 0
             ? {}
             : {
@@ -263,6 +269,14 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 message: error.message,
               });
             }
+            if (
+              error._tag === "ThreadLaunchError" &&
+              isSetupScriptsForbiddenError(error.cause)
+            )
+              return new OrchestratorMcpFailure({
+                code: "invalid_request",
+                message: error.cause.message,
+              });
             // The administrator's ceiling refuses the mode; say so rather than "unavailable".
             if (error._tag === "ThreadLaunchError" && isAboveCeilingError(error.cause)) {
               return new OrchestratorMcpFailure({
@@ -282,6 +296,9 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           modelSelection: thread.modelSelection,
           runId: run?.id ?? null,
           status: run?.status ?? null,
+          ...(result.enforceNoSetupScripts === true
+            ? { enforceNoSetupScripts: true as const }
+            : {}),
         };
       }),
     // The launched thread carries the caller's link, if it has one.
@@ -305,7 +322,15 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           code: "invalid_request",
           message: "The project was not found.",
         });
-      return result.value;
+      const settings = yield* ServerSettings.ServerSettingsService.pipe(
+        Effect.flatMap((service) => service.getSettings),
+        Effect.mapError(unavailable),
+      );
+      return {
+        ...result.value,
+        effectiveScripts: resolveProjectScripts(settings, result.value),
+        launchCapabilities: { enforceNoSetupScripts: true as const },
+      };
     }),
   ),
   t3_project_create: McpToolAccess.writesEnvironment(

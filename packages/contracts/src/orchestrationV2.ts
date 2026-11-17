@@ -663,17 +663,20 @@ export const OrchestrationV2ThreadLaunchWorkspaceStrategy = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("root"),
     branch: Schema.optional(TrimmedNonEmptyString),
+    enforceNoSetupScripts: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     type: Schema.Literal("existing_worktree"),
     worktreePath: TrimmedNonEmptyString,
     branch: Schema.optional(TrimmedNonEmptyString),
+    enforceNoSetupScripts: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     type: Schema.Literal("worktree"),
     baseRef: TrimmedNonEmptyString,
     branch: Schema.optional(TrimmedNonEmptyString),
     startFromOrigin: Schema.optional(Schema.Boolean),
+    enforceNoSetupScripts: Schema.optional(Schema.Boolean),
   }),
 ]);
 export type OrchestrationV2ThreadLaunchWorkspaceStrategy =
