@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - Tests use Node's glob matcher to verify electron-builder exclusions.
 import * as NodeCrypto from "node:crypto";
 import * as NodePath from "node:path";
+import * as NodeModule from "node:module";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { createPackageWithOptions, extractFile } from "@electron/asar";
@@ -506,6 +507,106 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }),
   );
 
+  it.effect("publishes latest-mac only for an explicit signed Voice stable configuration", () =>
+    Effect.gen(function* () {
+      const voice = {
+        track: "voice-stable" as const,
+        feedUrl: "https://github.com/NotRllyRn/t3code-voice/releases/download/voice-stable/",
+        publisherSha1: "a".repeat(40),
+      };
+      const config = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "0.1.10-voice.1",
+        true,
+        false,
+        4141,
+        undefined,
+        undefined,
+        "arm64",
+        voice,
+      );
+      assert.deepEqual(config.publish, {
+        provider: "generic",
+        url: voice.feedUrl,
+        channel: "latest",
+      });
+      assert.deepEqual(config.extraMetadata, { t3VoiceUpdate: voice });
+      assert.equal(config.generateUpdatesFilesForAllChannels, false);
+      assert.include((config.mac as { sign: string }).sign, "sign-voice-macos.ts");
+      assert.equal((config.mac as { hardenedRuntime: boolean }).hardenedRuntime, true);
+      assert.equal((config.mac as { identity: string }).identity, "-");
+      assert.nestedPropertyVal(config, "mac.bundleShortVersion", "0.1.10001");
+      assert.nestedPropertyVal(config, "mac.extendInfo.ElectronSquirrelPreventDowngrades", true);
+      // Exercise installed builder field selection, not a mirror of its plist assignments.
+      const desktopRequire = NodeModule.createRequire(
+        new URL("../apps/desktop/package.json", import.meta.url),
+      );
+      const builderRequire = NodeModule.createRequire(
+        desktopRequire.resolve("electron-builder/package.json"),
+      );
+      builderRequire("app-builder-lib");
+      const { MacPackager } = builderRequire("app-builder-lib/out/macPackager.js") as {
+        MacPackager: {
+          prototype: {
+            applyCommonInfo(this: object, plist: object, contents: string): Promise<void>;
+          };
+        };
+      };
+      const plist: Record<string, unknown> = {};
+      yield* Effect.promise(() =>
+        MacPackager.prototype.applyCommonInfo.call(
+          {
+            appInfo: {
+              productFilename: "Voice",
+              productName: "Voice",
+              version: "0.1.10-voice.1",
+              buildVersion: "77.88.99",
+            },
+            platformSpecificBuildOptions: config.mac,
+            config: {},
+            getIconPath: async () => null,
+          },
+          plist,
+          "/unused",
+        ),
+      );
+      assert.equal(plist.CFBundleShortVersionString, "0.1.10001");
+      assert.equal(plist.CFBundleVersion, "77.88.99");
+      assert.equal(plist.ElectronSquirrelPreventDowngrades, true);
+      const overflow = yield* Effect.result(
+        createBuildConfig(
+          "mac",
+          "zip",
+          "0.1.10-voice.1000",
+          true,
+          false,
+          undefined,
+          undefined,
+          false,
+          "arm64",
+          voice,
+        ),
+      );
+      assert.equal(overflow._tag, "Failure");
+      const unsigned = yield* Effect.flip(
+        createBuildConfig(
+          "mac",
+          "dmg",
+          "0.1.10-voice.1",
+          false,
+          false,
+          4141,
+          undefined,
+          undefined,
+          "arm64",
+          voice,
+        ),
+      );
+      assert.match(unsigned.message, /Invalid Voice/);
+    }),
+  );
+
   it.effect("isolates macOS identity and refuses all inferred or mock update feeds", () =>
     Effect.gen(function* () {
       for (const version of [
@@ -537,6 +638,11 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           assert.notProperty(
             (config.mac as { extendInfo: object }).extendInfo,
             "CFBundleDocumentTypes",
+          );
+          assert.notProperty(config.mac, "bundleShortVersion");
+          assert.notProperty(
+            (config.mac as { extendInfo: object }).extendInfo,
+            "ElectronSquirrelPreventDowngrades",
           );
         }
       }

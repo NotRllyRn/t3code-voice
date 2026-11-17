@@ -178,7 +178,8 @@ function AboutVersionSection() {
   const checkProviderUpdates = useCheckProviderUpdates();
 
   const hasDesktopBridge = typeof window !== "undefined" && Boolean(window.desktopBridge);
-  const manualVoiceUpdates = hasDesktopBridge && FORK_DESKTOP.manualUpdatesOnly;
+  const manualVoiceUpdates =
+    hasDesktopBridge && FORK_DESKTOP.manualUpdatesOnly && updateState?.enabled !== true;
   const selectedUpdateChannel = updateState?.channel ?? "latest";
   // The desktop updates this machine, whose policy the primary environment reports.
   const primaryPolicy = usePrimaryManagedPolicy();

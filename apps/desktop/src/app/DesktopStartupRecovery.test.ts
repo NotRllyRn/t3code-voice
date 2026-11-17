@@ -30,10 +30,22 @@ const updateState = (patch: Partial<DesktopUpdateState>): DesktopUpdateState => 
 });
 
 describe("resolveStartupRecoveryOffer", () => {
+  it("keeps native-identity-gated updates usable in recovery", () => {
+    const state = updateState({ status: "downloaded", downloadedVersion: "0.1.10-voice.2" });
+    expect(resolveStartupRecoveryOffer(state, "0.1.10-voice.1")).toEqual({
+      _tag: "Update",
+      version: "0.1.10-voice.2",
+    });
+  });
   it.each(["available", "downloaded", "checking", "up-to-date", "disabled"] as const)(
     "offers only manual fork releases, never an upstream replacement (%s)",
     (status) => {
-      const state = updateState({ status, availableVersion: "0.1.4", downloadedVersion: "0.1.4" });
+      const state = updateState({
+        enabled: false,
+        status,
+        availableVersion: "0.1.4",
+        downloadedVersion: "0.1.4",
+      });
       expect(resolveStartupRecoveryOffer(state, "0.1.2")).toEqual({ _tag: "Releases" });
       expect(resolveStartupRecoveryOffer(state, null)).toEqual({ _tag: "Releases" });
       expect(resolveStartupRecoveryOffer(state, "0.1.2", true)).toEqual({ _tag: "ManagedPolicy" });

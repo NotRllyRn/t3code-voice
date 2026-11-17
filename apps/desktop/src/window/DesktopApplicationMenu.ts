@@ -128,11 +128,11 @@ const checkForUpdatesFromMenu = Effect.gen(function* () {
 }).pipe(Effect.withSpan("desktop.menu.checkForUpdates"));
 
 const handleCheckForUpdatesMenuClick = Effect.gen(function* () {
-  if (FORK_DESKTOP.manualUpdatesOnly) {
+  const updates = yield* DesktopUpdates.DesktopUpdates;
+  if (FORK_DESKTOP.manualUpdatesOnly && !(yield* updates.getState).enabled) {
     yield* checkManualVoiceUpdate();
     return;
   }
-  const updates = yield* DesktopUpdates.DesktopUpdates;
   const electronDialog = yield* ElectronDialog.ElectronDialog;
   const disabledReason = yield* updates.disabledReason;
   if (Option.isSome(disabledReason)) {

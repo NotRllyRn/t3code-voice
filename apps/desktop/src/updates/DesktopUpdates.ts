@@ -10,6 +10,12 @@ import {
   type DesktopUpdateState,
 } from "@t3tools/contracts";
 import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
+import {
+  isVoiceUpdateCandidate,
+  parseVoiceUpdateConfig,
+  type VoiceUpdateConfig,
+} from "./voiceUpdateConfig.ts";
+import { verifyVoiceMacIdentity } from "./voiceMacIdentity.ts";
 import { errorTag } from "@t3tools/shared/observability";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -27,6 +33,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
+import { ChildProcessSpawner } from "effect/process";
 
 import * as DesktopBackendManager from "../backend/DesktopBackendManager.ts";
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
@@ -383,10 +390,14 @@ export const make = Effect.gen(function* () {
   const electronWindow = yield* ElectronWindow.ElectronWindow;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const fileSystem = yield* FileSystem.FileSystem;
+  const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
   const policy = yield* DesktopUpdatePolicy.DesktopUpdatePolicy;
   // Any user can set the mock flag, so it never replaces an administrator's update source.
-  const mockUpdates = config.mockUpdates && policy.message === null;
+  const mockUpdates =
+    !FORK_DESKTOP.manualUpdatesOnly && config.mockUpdates && policy.message === null;
+  let voiceUpdateConfig: VoiceUpdateConfig | null = null;
+  const manualOnly = () => FORK_DESKTOP.manualUpdatesOnly && voiceUpdateConfig === null;
 
   const appUpdateYmlConfigRef = yield* Ref.make<Option.Option<AppUpdateYmlConfig>>(Option.none());
   const activeUpdateActionRef = yield* Ref.make<Option.Option<UpdateAction>>(Option.none());
@@ -405,7 +416,9 @@ export const make = Effect.gen(function* () {
     Ref.get(releaseFloorRef).pipe(
       Effect.map(
         (floor) =>
-          desktopUpdateChannelOf(version) === state.channel &&
+          (voiceUpdateConfig !== null
+            ? isVoiceUpdateCandidate(environment.appVersion, version, state.channel)
+            : desktopUpdateChannelOf(version) === state.channel) &&
           (Option.isSome(floor)
             ? compareSemverVersions(version, floor.value) >= 0
             : desktopUpdateChannelOf(environment.appVersion) === state.channel),
@@ -468,12 +481,15 @@ export const make = Effect.gen(function* () {
   const hasUpdateFeedConfig = Ref.get(appUpdateYmlConfigRef).pipe(
     Effect.map(
       (appUpdateYmlConfig) =>
-        Option.isSome(appUpdateYmlConfig) || mockUpdates || policy.feedUrl !== undefined,
+        voiceUpdateConfig !== null ||
+        Option.isSome(appUpdateYmlConfig) ||
+        mockUpdates ||
+        policy.feedUrl !== undefined,
     ),
   );
 
   const resolveDisabledReason = Effect.gen(function* () {
-    if (FORK_DESKTOP.manualUpdatesOnly) return Option.some(FORK_DESKTOP.manualUpdatesReason);
+    if (manualOnly()) return Option.some(FORK_DESKTOP.manualUpdatesReason);
     const hasFeedConfig = yield* hasUpdateFeedConfig;
     return Option.fromNullishOr(
       getAutoUpdateDisabledReason({
@@ -492,7 +508,7 @@ export const make = Effect.gen(function* () {
   // Without nightly, an install on that channel stays put until its user picks stable: moving it
   // silently would be a downgrade nobody asked for, and checking nightly would break the policy.
   const channelBlockedReason = (channel: DesktopUpdateChannel): Option.Option<string> =>
-    channel === "nightly" && !policy.allowNightly
+    channel === "nightly" && (voiceUpdateConfig !== null || !policy.allowNightly)
       ? Option.some(
           `${policy.message ?? "Nightly updates are turned off on this machine."} Switch to the stable channel to keep getting updates.`,
         )
@@ -545,8 +561,8 @@ export const make = Effect.gen(function* () {
     channel: DesktopUpdateChannel,
   ) {
     yield* Effect.annotateCurrentSpan({ channel });
-    const allowsPrerelease = channel === "nightly";
-    yield* electronUpdater.setChannel(channel);
+    const allowsPrerelease = voiceUpdateConfig !== null || channel === "nightly";
+    yield* electronUpdater.setChannel(voiceUpdateConfig !== null ? "latest" : channel);
     yield* electronUpdater.setAllowPrerelease(allowsPrerelease);
     // An older build can lack migrations this one ran. Only a guarded track switch's own check
     // may offer one.
@@ -1255,7 +1271,43 @@ export const make = Effect.gen(function* () {
       Effect.flatMap((state) => resolveStateDisabledReason(state.channel)),
     ),
     configure: Effect.gen(function* () {
-      if (FORK_DESKTOP.manualUpdatesOnly) {
+      if (
+        FORK_DESKTOP.manualUpdatesOnly &&
+        environment.platform === "darwin" &&
+        environment.isPackaged &&
+        !environment.isDevelopment
+      ) {
+        voiceUpdateConfig = yield* fileSystem
+          .readFileString(environment.path.join(environment.appPath, "package.json"))
+          .pipe(
+            Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown))),
+            Effect.map((pkg) =>
+              parseVoiceUpdateConfig(
+                typeof pkg === "object" && pkg !== null && "t3VoiceUpdate" in pkg
+                  ? pkg.t3VoiceUpdate
+                  : null,
+                environment.appVersion,
+              ),
+            ),
+            Effect.flatMap((candidate) =>
+              candidate === null
+                ? Effect.succeed(null)
+                : verifyVoiceMacIdentity(
+                    environment.path.resolve(environment.resourcesPath, "../.."),
+                    candidate.publisherSha1,
+                    environment.appVersion,
+                  ).pipe(
+                    Effect.provideService(
+                      ChildProcessSpawner.ChildProcessSpawner,
+                      childProcessSpawner,
+                    ),
+                    Effect.as(candidate),
+                  ),
+            ),
+            Effect.orElseSucceed(() => null),
+          );
+      }
+      if (manualOnly()) {
         yield* electronUpdater.setAutoDownload(false);
         yield* electronUpdater.setAutoInstallOnAppQuit(false);
         const settings = yield* desktopSettings.get;
@@ -1287,7 +1339,9 @@ export const make = Effect.gen(function* () {
         });
       }
 
-      if (mockUpdates) {
+      if (voiceUpdateConfig !== null) {
+        yield* electronUpdater.setFeedURL({ provider: "generic", url: voiceUpdateConfig.feedUrl });
+      } else if (mockUpdates) {
         yield* electronUpdater.setFeedURL({
           provider: "generic",
           url: `http://localhost:${config.mockUpdateServerPort}`,
@@ -1358,7 +1412,7 @@ export const make = Effect.gen(function* () {
       options?: { readonly minimumVersion?: string | undefined },
     ) {
       yield* Effect.annotateCurrentSpan({ channel: nextChannel });
-      if (FORK_DESKTOP.manualUpdatesOnly) return yield* Ref.get(updateStateRef);
+      if (manualOnly()) return yield* Ref.get(updateStateRef);
       if (Option.isSome(channelBlockedReason(nextChannel))) {
         return yield* new DesktopUpdateChannelManagedError({
           channel: nextChannel,

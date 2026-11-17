@@ -6,6 +6,8 @@ import * as FileSystem from "effect/FileSystem";
 import * as PlatformError from "effect/PlatformError";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import { Sink, Stream } from "effect";
+import { ChildProcessSpawner } from "effect/process";
 
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
@@ -35,8 +37,13 @@ export interface UpdatesHarnessOptions {
   readonly backendDesiredRunning?: boolean;
   readonly backendInstances?: ReadonlyArray<DesktopBackendPool.DesktopBackendInstance>;
   readonly env?: Record<string, string | undefined>;
-  readonly platform?: NodeJS.Platform;
+  readonly platform?: NodeJS.Platform | undefined;
   readonly packageType?: string | undefined;
+  readonly packageJson?: string;
+  readonly isPackaged?: boolean | undefined;
+  readonly nativeIdentityAccepted?: boolean;
+  readonly nativeBundleShortVersion?: string;
+  readonly nativePreventDowngrades?: boolean | string;
   readonly installRecord?: string | undefined;
   readonly policy?: DesktopUpdatePolicy.UpdatePolicy;
   readonly appVersion?: string;
@@ -53,6 +60,8 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
   let allowDowngrade = false;
   const checkAllowedDowngrade: boolean[] = [];
   let fullChangelog = false;
+  let allowPrerelease = false;
+  let updateChannel = "";
   const feedUrls: ElectronUpdater.ElectronUpdaterFeedUrl[] = [];
   const listeners = new Map<string, Set<(...args: readonly unknown[]) => void>>();
   const sentStates: DesktopUpdateState[] = [];
@@ -82,8 +91,14 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
       }),
     setAutoDownload: () => Effect.void,
     setAutoInstallOnAppQuit: () => Effect.void,
-    setChannel: () => Effect.void,
-    setAllowPrerelease: () => Effect.void,
+    setChannel: (value) =>
+      Effect.sync(() => {
+        updateChannel = value;
+      }),
+    setAllowPrerelease: (value) =>
+      Effect.sync(() => {
+        allowPrerelease = value;
+      }),
     allowDowngrade: Effect.sync(() => allowDowngrade),
     setAllowDowngrade: (value) =>
       Effect.sync(() => {
@@ -186,7 +201,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     processArch: "x64",
     appVersion: options.appVersion ?? "1.2.3",
     appPath: "/repo",
-    isPackaged: true,
+    isPackaged: options.isPackaged ?? true,
     resourcesPath: "/missing/resources",
     runningUnderArm64Translation: false,
   }).pipe(
@@ -251,6 +266,8 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     path.endsWith(DesktopUpdates.DESKTOP_UPDATE_INSTALL_RECORD_FILE);
   const layerFileSystem = FileSystem.layerNoop({
     readFileString: (path) => {
+      if (path === "/repo/package.json" && options.packageJson !== undefined)
+        return Effect.succeed(options.packageJson);
       const installRecord = isInstallRecord(path)
         ? (installRecords.get(path) ?? previousInstallRecord)
         : undefined;
@@ -291,6 +308,39 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
   });
 
   const layer = DesktopUpdates.layer.pipe(
+    Layer.provide(
+      options.nativeIdentityAccepted === undefined
+        ? Layer.empty
+        : Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() =>
+              Effect.succeed(
+                ChildProcessSpawner.makeHandle({
+                  pid: ChildProcessSpawner.ProcessId(1),
+                  exitCode: Effect.succeed(
+                    ChildProcessSpawner.ExitCode(options.nativeIdentityAccepted ? 0 : 1),
+                  ),
+                  isRunning: Effect.succeed(false),
+                  kill: () => Effect.void,
+                  unref: Effect.succeed(Effect.void),
+                  stdin: Sink.drain,
+                  stdout: Stream.make(
+                    new TextEncoder().encode(
+                      JSON.stringify({
+                        CFBundleShortVersionString: options.nativeBundleShortVersion ?? "0.1.10001",
+                        ElectronSquirrelPreventDowngrades: options.nativePreventDowngrades ?? true,
+                      }),
+                    ),
+                  ),
+                  stderr: Stream.empty,
+                  all: Stream.empty,
+                  getInputFd: () => Sink.drain,
+                  getOutputFd: () => Stream.empty,
+                }),
+              ),
+            ),
+          ),
+    ),
     Layer.provide(layerFileSystem),
     Layer.provide(DesktopUpdatePolicy.layerTest(options.policy)),
     Layer.provideMerge(layerUpdater),
@@ -324,6 +374,8 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     downloadCount: () => downloadCount,
     feedUrls: (): ElectronUpdater.ElectronUpdaterFeedUrl[] => feedUrls,
     fullChangelog: () => fullChangelog,
+    allowPrerelease: () => allowPrerelease,
+    updateChannel: () => updateChannel,
     /** Whether each feed check could offer an older release, and the flag now. */
     checkAllowedDowngrade,
     allowDowngrade: () => allowDowngrade,

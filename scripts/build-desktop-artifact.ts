@@ -18,6 +18,12 @@ import {
 import { fromYaml } from "@t3tools/shared/schemaYaml";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
+import { resolveVoiceMacUpdate, VoiceMacSigningError } from "./lib/voice-mac-signing.ts";
+import { encodeVoiceMacVersion } from "../apps/desktop/src/updates/voiceMacVersion.ts";
+import {
+  parseVoiceUpdateConfig,
+  type VoiceUpdateConfig,
+} from "../apps/desktop/src/updates/voiceUpdateConfig.ts";
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import rootPackageJson from "../package.json" with { type: "json" };
@@ -2798,7 +2804,26 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     | undefined,
   wslRuntimeBundled = false,
   arch?: typeof BuildArch.Type,
+  voiceUpdate?: VoiceUpdateConfig,
 ) {
+  if (
+    voiceUpdate &&
+    (platform !== "mac" ||
+      !signed ||
+      !["dmg", "zip"].includes(target) ||
+      !parseVoiceUpdateConfig(voiceUpdate, version))
+  ) {
+    return yield* new VoiceMacSigningError({
+      message: "Invalid Voice self-update build configuration",
+    });
+  }
+  const nativeVoiceVersion = voiceUpdate
+    ? yield* Effect.try({
+        try: () => encodeVoiceMacVersion(version),
+        catch: () =>
+          new VoiceMacSigningError({ message: "Unsupported Voice native macOS version" }),
+      })
+    : undefined;
   const buildConfig: Record<string, unknown> = {
     afterPack: (yield* Path.Path).join(yield* RepoRoot, "scripts/prepare-server-compile-cache.cjs"),
     appId: DESKTOP_APP_ID,
@@ -2830,7 +2855,13 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   };
   const updateChannel = resolveDesktopUpdateChannel(version);
   // Never infer an upstream feed from repository metadata, CI variables, or mock flags.
-  buildConfig.publish = null;
+  buildConfig.publish = voiceUpdate
+    ? { provider: "generic", url: voiceUpdate.feedUrl, channel: "latest" }
+    : null;
+  if (voiceUpdate) {
+    buildConfig.extraMetadata = { t3VoiceUpdate: voiceUpdate };
+    buildConfig.generateUpdatesFilesForAllChannels = false;
+  }
 
   if (platform === "mac") {
     const path = yield* Path.Path;
@@ -2839,7 +2870,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       target: target === "dmg" ? [target, "zip"] : [target],
       icon: "icon.icns",
       category: "public.app-category.developer-tools",
+      ...(voiceUpdate ? { bundleShortVersion: nativeVoiceVersion } : {}),
       extendInfo: {
+        ...(voiceUpdate ? { ElectronSquirrelPreventDowngrades: true } : {}),
         // macOS 26 offers Messages/Mail codes in every text field unless opted out.
         NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac: true,
         NSLocalNetworkUsageDescription:
@@ -2863,7 +2896,16 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
           schemes: [FORK_DESKTOP.scheme, FORK_DESKTOP.developmentScheme],
         },
       ],
-      ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
+      ...(signed
+        ? {
+            sign: path.join(
+              repoRoot,
+              voiceUpdate ? "scripts/sign-voice-macos.ts" : "scripts/sign-macos.ts",
+            ),
+          }
+        : {}),
+      // Builder needs a non-null identity to dispatch a custom signer without a keychain.
+      ...(voiceUpdate ? { identity: "-", notarize: false, hardenedRuntime: true } : {}),
       ...(macPasskeySigning
         ? {
             entitlements: macPasskeySigning.entitlementsPath,
@@ -3844,8 +3886,15 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   const stageProdResourcesDir = path.join(stageAppDir, "apps/desktop/prod-resources");
   yield* fs.copy(stageResourcesDir, stageProdResourcesDir);
 
+  const voiceUpdate = yield* resolveVoiceMacUpdate(process.env, {
+    platform: options.platform,
+    target: options.target,
+    version: appVersion,
+    signed: options.signed,
+    repoRoot,
+  });
   const configuredMacPasskeySigning =
-    options.platform === "mac" && options.signed
+    options.platform === "mac" && options.signed && !voiceUpdate
       ? yield* Effect.try({
           try: () => resolveMacPasskeySigningConfiguration(loadRepoEnv({ repoRoot })),
           catch: MacPasskeySigningConfigurationResolutionError.fromCause,
@@ -3931,6 +3980,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
         : undefined,
       bundlesWslRuntime({ platform: options.platform, runtimeArchivePath: options.wslRuntime }),
       options.arch,
+      voiceUpdate,
     ),
     dependencies: stageDependencies,
     devDependencies: {

@@ -45,7 +45,7 @@ export function resolveStartupRecoveryOffer(
   lastStartedVersion: string | null,
   managedPolicy = false,
 ): StartupRecoveryOffer {
-  if (FORK_DESKTOP.manualUpdatesOnly) {
+  if (FORK_DESKTOP.manualUpdatesOnly && !update.enabled) {
     return managedPolicy ? { _tag: "ManagedPolicy" } : { _tag: "Releases" };
   }
   if (update.status === "downloading" && update.availableVersion !== null) {
