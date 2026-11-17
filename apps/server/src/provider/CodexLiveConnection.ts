@@ -9,6 +9,14 @@ import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as SecureRandom from "effect/crypto/SecureRandom";
+import { CODEX_APP_SERVER_THREAD_UNLOAD_DELAY_SECS } from "./codexLaunchArgs.ts";
+
+const decodeOwnedSessionConfig = Schema.decodeUnknownSync(
+  Schema.Struct({
+    thread_unload_delay_secs: Schema.Literal(CODEX_APP_SERVER_THREAD_UNLOAD_DELAY_SECS),
+  }),
+  { onExcessProperty: "error" },
+);
 
 const Source = Schema.Struct({
   name: Schema.Struct({
@@ -22,6 +30,7 @@ const Config = Schema.Struct({
   config: Schema.Struct({
     model_provider: Schema.String,
     model_providers: Schema.Record(Schema.String, Schema.Unknown),
+    thread_unload_delay_secs: Schema.optional(Schema.Unknown),
   }),
   origins: Schema.Record(Schema.String, Source),
   layers: Schema.optional(
@@ -30,6 +39,8 @@ const Config = Schema.Struct({
         Schema.Struct({
           name: Schema.Struct({ type: Schema.String }),
           disabledReason: Schema.optional(Schema.NullOr(Schema.String)),
+          config: Schema.optional(Schema.Unknown),
+          version: Schema.optional(Schema.String),
         }),
       ),
     ),
@@ -108,11 +119,36 @@ export const makeCodexLiveConnection = Effect.fn("CodexLiveConnection.make")(fun
           const key = config.config.model_provider;
           if (!/^[A-Za-z0-9_-]{1,128}$/.test(key) || key === "openai")
             throw new LiveConnectionError({ reason: "unsupported-provider" });
+          const sessionLayers =
+            config.layers?.filter(
+              (layer) => !layer.disabledReason && layer.name.type === "sessionFlags",
+            ) ?? [];
+          const sessionOrigins = Object.entries(config.origins).filter(
+            ([, origin]) => origin.name.type === "sessionFlags",
+          );
+          const sessionLayer = sessionLayers[0];
+          // Only our unload override may originate in sessionFlags; provider/key origins stay user-owned.
+          const ownedSessionFlags =
+            sessionLayers.length === 1 &&
+            !!sessionLayer?.version &&
+            Object.is(
+              decodeOwnedSessionConfig(sessionLayer?.config).thread_unload_delay_secs,
+              CODEX_APP_SERVER_THREAD_UNLOAD_DELAY_SECS,
+            ) &&
+            Object.is(
+              config.config.thread_unload_delay_secs,
+              CODEX_APP_SERVER_THREAD_UNLOAD_DELAY_SECS,
+            ) &&
+            sessionOrigins.length === 1 &&
+            sessionOrigins[0]?.[0] === "thread_unload_delay_secs" &&
+            sessionOrigins[0][1].version === sessionLayer?.version;
           if (
+            (sessionOrigins.length > 0 && !ownedSessionFlags) ||
             config.layers?.some(
               (layer) =>
                 !layer.disabledReason &&
-                !["user", "system", "packagedDefaults"].includes(layer.name.type),
+                !["user", "system", "packagedDefaults"].includes(layer.name.type) &&
+                !(layer.name.type === "sessionFlags" && ownedSessionFlags),
             )
           )
             throw new LiveConnectionError({ reason: "unsupported-provider" });

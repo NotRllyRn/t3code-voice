@@ -2,6 +2,7 @@ import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 import { makeCodexLiveConnection } from "./CodexLiveConnection.ts";
+import sessionConfig from "./testFixtures/codex-0.166.0-live-config.json" with { type: "json" };
 import normalizedConfig from "./testFixtures/codex-0.169.0-live-config.json" with { type: "json" };
 
 const fixture = (overrides: Record<string, unknown> = {}) => ({
@@ -41,6 +42,12 @@ it.effect(
   "accepts the normalized Codex provider while keeping null and absent fields equivalent",
   () =>
     Effect.gen(function* () {
+      // Sanitized native 0.166.0 config/read with normal app-server args; unrelated defaults omitted.
+      const session = yield* (yield* make(sessionConfig, {
+        SELECTED_KEY: "fictional-instance",
+      })).resolveLiveConnection();
+      expect(session.createUrl).toBe("https://relay.example.test/prefix/v1/live");
+      expect(Redacted.value(session.headers).Authorization).toBe("Bearer fictional-instance");
       const actual = normalizedConfig.config.model_providers.fixture;
       for (const provider of [
         actual,
@@ -68,6 +75,92 @@ it.effect(
         expect(JSON.stringify(connection)).not.toContain("fictional-private-bearer");
       }
     }),
+);
+
+it.effect("only accepts the app-owned session override with matching effective provenance", () =>
+  Effect.gen(function* () {
+    const session = sessionConfig.layers[0]!;
+    const origin = sessionConfig.origins.thread_unload_delay_secs;
+    const configs = [
+      undefined,
+      null,
+      {},
+      [],
+      { thread_unload_delay_secs: 1 },
+      { thread_unload_delay_secs: -0 },
+      { thread_unload_delay_secs: "0" },
+      ...[
+        { model_provider: "poison" },
+        ...["base_url", "auth", "credential_file", "env_key", "experimental_bearer_token"].map(
+          (key) => ({ model_providers: { fixture: { [key]: "poison" } } }),
+        ),
+        { shell_environment_policy: { set: { SELECTED_KEY: "poison" } } },
+        { env: { SELECTED_KEY: "poison" } },
+      ].map((override) => ({ thread_unload_delay_secs: 0, ...override })),
+    ];
+    for (const config of [
+      ...configs.map((config) => ({
+        ...sessionConfig,
+        layers: [{ ...session, config }, ...sessionConfig.layers.slice(1)],
+      })),
+      ...[undefined, ""].map((version) => ({
+        ...sessionConfig,
+        layers: [{ ...session, version }, ...sessionConfig.layers.slice(1)],
+      })),
+      { ...sessionConfig, layers: [session, session] },
+      {
+        ...sessionConfig,
+        origins: { ...sessionConfig.origins, thread_unload_delay_secs: undefined },
+      },
+      {
+        ...sessionConfig,
+        origins: {
+          ...sessionConfig.origins,
+          thread_unload_delay_secs: { ...origin, version: "other" },
+        },
+      },
+      ...[1, -0, undefined].map((thread_unload_delay_secs) => ({
+        ...sessionConfig,
+        config: { ...sessionConfig.config, thread_unload_delay_secs },
+      })),
+      { ...sessionConfig, layers: undefined },
+      { ...sessionConfig, layers: sessionConfig.layers.slice(1) },
+      ...[
+        "model_provider",
+        "model_providers",
+        "model_providers.fixture",
+        "model_providers.fixture.base_url",
+        "model_providers.fixture.auth",
+        "model_providers.fixture.credential_file",
+        "model_providers.fixture.env_key",
+        "shell_environment_policy",
+        "env.SELECTED_KEY",
+      ].map((path) => ({
+        ...sessionConfig,
+        origins: { ...sessionConfig.origins, [path]: origin },
+      })),
+      { ...sessionConfig, layers: [...sessionConfig.layers, { name: { type: "project" } }] },
+    ]) {
+      const result = yield* (yield* make(config, { SELECTED_KEY: "fictional-instance" }))
+        .resolveLiveConnection()
+        .pipe(Effect.result);
+      expect(result._tag).toBe("Failure");
+      if (result._tag === "Failure") expect(result.failure.reason).toBe("unsupported-provider");
+    }
+    for (const launchArgs of [
+      "-c thread_unload_delay_secs=0",
+      "-c model_provider=poison",
+      "--profile unsafe",
+    ]) {
+      const resolver = yield* makeCodexLiveConnection({
+        homePath: "/fixture/shadow",
+        launchArgs,
+        environment: { SELECTED_KEY: "fictional-instance" },
+        readConfig: Effect.succeed(Redacted.make(sessionConfig)),
+      });
+      expect((yield* resolver.resolveLiveConnection().pipe(Effect.result))._tag).toBe("Failure");
+    }
+  }),
 );
 
 it.effect("binds each selected home/environment and never borrows a global key", () =>

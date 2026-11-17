@@ -10,10 +10,12 @@ export const resolveCodexLaunchArgs = (
 const codexLaunchArgv = (launchArgs?: string): ReadonlyArray<string> => tokenizeCliArgs(launchArgs);
 
 // T3 unsubscribes only when it unloads a thread; Codex's own unload delay would stack on that.
+export const CODEX_APP_SERVER_THREAD_UNLOAD_DELAY_SECS = 0;
+
 export const codexAppServerArgs = (launchArgs?: string) => [
   "app-server",
   "-c",
-  "thread_unload_delay_secs=0",
+  `thread_unload_delay_secs=${CODEX_APP_SERVER_THREAD_UNLOAD_DELAY_SECS}`,
   ...codexLaunchArgv(launchArgs),
 ];
 
