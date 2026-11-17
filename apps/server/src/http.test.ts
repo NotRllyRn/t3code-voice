@@ -25,7 +25,7 @@ import {
   injectMcpAppThemeBootstrap,
   MCP_APP_MAX_HTML_BYTES,
 } from "@t3tools/shared/mcpApp";
-import { ORCHESTRATION_PROTOCOL_HEADER } from "@t3tools/contracts";
+import { CLIENT_CAPABILITIES_HEADER, ORCHESTRATION_PROTOCOL_HEADER } from "@t3tools/contracts";
 
 import * as ServerConfig from "./config.ts";
 
@@ -119,6 +119,7 @@ describe("browser API CORS", () => {
             "access-control-request-method": "GET",
             "access-control-request-headers": [
               ORCHESTRATION_PROTOCOL_HEADER,
+              CLIENT_CAPABILITIES_HEADER,
               "authorization",
               "dpop",
             ].join(", "),
@@ -134,6 +135,7 @@ describe("browser API CORS", () => {
           .map((header) => header.trim().toLowerCase()),
       );
       expect(allowedHeaders.has(ORCHESTRATION_PROTOCOL_HEADER)).toBe(true);
+      expect(allowedHeaders.has(CLIENT_CAPABILITIES_HEADER)).toBe(true);
       expect(allowedHeaders.has("authorization")).toBe(true);
       expect(allowedHeaders.has("dpop")).toBe(true);
     } finally {

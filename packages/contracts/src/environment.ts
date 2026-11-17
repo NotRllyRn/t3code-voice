@@ -10,13 +10,16 @@ import {
 } from "./baseSchemas.ts";
 import { SourceControlProviderKind } from "./sourceControl.ts";
 
-export const ORCHESTRATION_PROTOCOL_VERSION = 2;
-export const ORCHESTRATION_PROTOCOL_VERSION_TEXT = "2";
+export const ORCHESTRATION_PROTOCOL_VERSION = 3;
+export const ORCHESTRATION_PROTOCOL_VERSION_TEXT = "3";
 export const ORCHESTRATION_PROTOCOL_QUERY_PARAM = "orchestrationProtocol";
 export const ORCHESTRATION_PROTOCOL_HEADER = "x-t3-orchestration-protocol";
 
-/** Wire shapes a client understands, comma-separated; a client that omits one gets the older shape. */
+/** Wire capabilities a client understands, comma-separated. */
 export const CLIENT_CAPABILITIES_QUERY_PARAM = "clientCapabilities";
+export const CLIENT_CAPABILITIES_HEADER = "x-t3-client-capabilities";
+/** Required fork history schema; protocol numbers alone can collide with upstream. */
+export const VOICE_HISTORY_CAPABILITY = "voiceHistoryV1";
 /** Secret fields may hold a secret provider reference instead of a string. */
 export const SETTINGS_SECRET_REFERENCES_CAPABILITY = "settingsSecretReferences";
 
@@ -186,6 +189,7 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   cloudVoiceTranscription: Schema.optionalKey(Schema.Boolean),
   /** Serves native Live transport; the selected provider is checked at session start. */
   nativeLiveVoice: Schema.optionalKey(Schema.Boolean),
+  voiceHistoryV1: Schema.optionalKey(Schema.Boolean),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;
 

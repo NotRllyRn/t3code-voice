@@ -16,7 +16,7 @@ const descriptor = (orchestrationProtocolVersion?: number): ExecutionEnvironment
   platform: { os: "darwin", arch: "arm64" },
   serverVersion: "9.0.0",
   ...(orchestrationProtocolVersion === undefined ? {} : { orchestrationProtocolVersion }),
-  capabilities: { repositoryIdentity: true },
+  capabilities: { repositoryIdentity: true, voiceHistoryV1: true },
 });
 
 describe("orchestration protocol compatibility", () => {
@@ -31,9 +31,23 @@ describe("orchestration protocol compatibility", () => {
     expect(socketUrl.searchParams.get("orchestrationProtocol")).toBe(
       String(ORCHESTRATION_PROTOCOL_VERSION),
     );
-    expect(socketUrl.searchParams.get("clientCapabilities")).toBe("settingsSecretReferences");
+    expect(socketUrl.searchParams.get("clientCapabilities")).toBe(
+      "settingsSecretReferences,voiceHistoryV1",
+    );
     expect(socketUrl.searchParams.get("wsTicket")).toBe("secret");
     expect(socketUrl.searchParams.get("connectionMethod")).toBe("relay");
+  });
+
+  it("rejects upstream protocol collisions and old Voice previews without the history marker", () => {
+    for (const protocol of [2, 3]) {
+      const error = orchestrationProtocolCompatibilityError({
+        ...descriptor(protocol),
+        capabilities: { repositoryIdentity: true, serverSelfUpdate: "boot-service" },
+      });
+      expect(error).toMatchObject({ reason: "unsupported" });
+      expect(error?.message).toContain("compatible T3 Code Voice server");
+      expect(error).not.toHaveProperty("serverUpdateRequired");
+    }
   });
 
   it("treats missing metadata as protocol 1", () => {
@@ -57,7 +71,10 @@ describe("orchestration protocol compatibility", () => {
   it("offers a remote update only for an older host that can update itself", () => {
     const older = descriptor(ORCHESTRATION_PROTOCOL_VERSION - 1);
     const withCapabilities = (capabilities: ExecutionEnvironmentDescriptor["capabilities"]) =>
-      orchestrationProtocolCompatibilityError({ ...older, capabilities });
+      orchestrationProtocolCompatibilityError({
+        ...older,
+        capabilities: { ...capabilities, voiceHistoryV1: true },
+      });
 
     expect(
       withCapabilities({ repositoryIdentity: true, serverSelfUpdate: "boot-service" }),

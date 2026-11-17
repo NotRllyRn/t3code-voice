@@ -141,7 +141,7 @@ const makeDependencies = Effect.fn("TestConnectionResolver.makeDependencies")((o
             : options.descriptorProtocolVersion === null
               ? {}
               : { orchestrationProtocolVersion: options.descriptorProtocolVersion }),
-          capabilities: { repositoryIdentity: true },
+          capabilities: { repositoryIdentity: true, voiceHistoryV1: true },
         }),
       )) satisfies typeof fetch),
     Layer.succeed(
@@ -203,7 +203,7 @@ describe("ConnectionResolver", () => {
         label: "Primary",
         httpBaseUrl: "http://127.0.0.1:3777",
         socketUrl:
-          "ws://127.0.0.1:3777/ws?clientSurface=web&clientDeviceType=desktop&connectionMethod=direct&orchestrationProtocol=2&clientCapabilities=settingsSecretReferences",
+          "ws://127.0.0.1:3777/ws?clientSurface=web&clientDeviceType=desktop&connectionMethod=direct&orchestrationProtocol=3&clientCapabilities=settingsSecretReferences%2CvoiceHistoryV1",
         httpAuthorization: null,
         target,
       });

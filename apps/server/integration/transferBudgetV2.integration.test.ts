@@ -6,6 +6,8 @@ import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeHttpPlatform from "@effect/platform-node/NodeHttpPlatform";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  CLIENT_CAPABILITIES_HEADER,
+  VOICE_HISTORY_CAPABILITY,
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION,
   AuthSessionId,
@@ -289,7 +291,10 @@ it.live("reports V2 thread HTTP and WebSocket transfer budgets", () =>
           const base = `http://127.0.0.1:${address.port}`;
           const threadSnapshot = yield* measureHttpGet({
             url: `${base}/api/orchestration/threads/${THREAD_ID}`,
-            headers: { [ORCHESTRATION_PROTOCOL_HEADER]: String(ORCHESTRATION_PROTOCOL_VERSION) },
+            headers: {
+              [ORCHESTRATION_PROTOCOL_HEADER]: String(ORCHESTRATION_PROTOCOL_VERSION),
+              [CLIENT_CAPABILITIES_HEADER]: VOICE_HISTORY_CAPABILITY,
+            },
           });
           assert.equal(
             threadSnapshot.status,
@@ -305,7 +310,10 @@ it.live("reports V2 thread HTTP and WebSocket transfer budgets", () =>
           assert.notInclude(Buffer.from(threadSnapshot.decodedBody).toString(), "digest=");
           const shellSnapshot = yield* measureHttpGet({
             url: `${base}/api/orchestration/shell`,
-            headers: { [ORCHESTRATION_PROTOCOL_HEADER]: String(ORCHESTRATION_PROTOCOL_VERSION) },
+            headers: {
+              [ORCHESTRATION_PROTOCOL_HEADER]: String(ORCHESTRATION_PROTOCOL_VERSION),
+              [CLIENT_CAPABILITIES_HEADER]: VOICE_HISTORY_CAPABILITY,
+            },
           });
           assert.equal(shellSnapshot.status, 200);
           const decodedShell = yield* decodeShellSnapshot(
@@ -384,7 +392,10 @@ it.live("reports V2 thread HTTP and WebSocket transfer budgets", () =>
           const get = (path: string) =>
             measureHttpGet({
               url: `${base}${path}`,
-              headers: { [ORCHESTRATION_PROTOCOL_HEADER]: String(ORCHESTRATION_PROTOCOL_VERSION) },
+              headers: {
+                [ORCHESTRATION_PROTOCOL_HEADER]: String(ORCHESTRATION_PROTOCOL_VERSION),
+                [CLIENT_CAPABILITIES_HEADER]: VOICE_HISTORY_CAPABILITY,
+              },
             }).pipe(Effect.tap((http) => Effect.sync(() => assert.equal(http.status, 200))));
           const decoded = (http: HttpTransferMeasurement) =>
             Buffer.from(http.decodedBody).toString();

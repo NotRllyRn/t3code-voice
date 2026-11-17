@@ -705,7 +705,7 @@ describe("EnvironmentRegistry", () => {
         platform: { os: "linux", arch: "x64" },
         serverVersion: "1.0.0",
         orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
-        capabilities: { repositoryIdentity: true },
+        capabilities: { repositoryIdentity: true, voiceHistoryV1: true },
       });
       const discovered = (
         value: ExecutionEnvironmentDescriptor,
@@ -868,7 +868,7 @@ describe("EnvironmentRegistry", () => {
               platform: { os: "darwin", arch: "arm64" },
               serverVersion: "2.0.0",
               orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION + 1,
-              capabilities: { repositoryIdentity: true },
+              capabilities: { repositoryIdentity: true, voiceHistoryV1: true },
             },
           }),
           error: Option.none(),

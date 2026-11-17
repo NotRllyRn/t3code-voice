@@ -38,9 +38,11 @@ import {
   ServerAuthSessionMethod,
 } from "./auth.ts";
 import {
+  CLIENT_CAPABILITIES_HEADER,
   ExecutionEnvironmentDescriptor,
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+  VOICE_HISTORY_CAPABILITY,
 } from "./environment.ts";
 import {
   DpopFailureReason,
@@ -99,6 +101,7 @@ const OrchestrationProtocolHeaders = Schema.Struct({
   authorization: Schema.optionalKey(Schema.String),
   dpop: Schema.optionalKey(Schema.String),
   [ORCHESTRATION_PROTOCOL_HEADER]: Schema.Literal(ORCHESTRATION_PROTOCOL_VERSION_TEXT),
+  [CLIENT_CAPABILITIES_HEADER]: Schema.Literal(VOICE_HISTORY_CAPABILITY),
 });
 
 const OptionalDpopProofHeaders = Schema.Struct({

@@ -5,6 +5,7 @@ import {
   CheckpointId,
   CheckpointRef,
   CheckpointScopeId,
+  CLIENT_CAPABILITIES_HEADER,
   EnvironmentAuthenticatedAuth,
   EnvironmentAuthenticatedPrincipal,
   EnvironmentHttpApi,
@@ -23,6 +24,7 @@ import {
   RunId,
   ThreadId,
   TurnItemId,
+  VOICE_HISTORY_CAPABILITY,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2StoredEvent,
   type OrchestrationV2Subagent,
@@ -422,6 +424,7 @@ const withHttp = <A>(use: (get: (path: string) => Promise<Response>) => Promise<
               new Request(`http://environment.test${path}`, {
                 headers: {
                   [ORCHESTRATION_PROTOCOL_HEADER]: String(ORCHESTRATION_PROTOCOL_VERSION),
+                  [CLIENT_CAPABILITIES_HEADER]: VOICE_HISTORY_CAPABILITY,
                 },
               }),
             ),

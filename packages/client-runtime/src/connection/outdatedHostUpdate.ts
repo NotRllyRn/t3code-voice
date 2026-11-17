@@ -1,5 +1,4 @@
 import {
-  ORCHESTRATION_PROTOCOL_VERSION,
   type EnvironmentId,
   type ExecutionEnvironmentDescriptor,
   type ServerSelfUpdateInput,
@@ -21,6 +20,7 @@ import * as RpcSerialization from "effect/rpc/RpcSerialization";
 import * as Socket from "effect/socket/Socket";
 
 import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
+import { orchestrationProtocolCompatibilityError } from "./compatibility.ts";
 import { makeWsRpcProtocolClient, PING_TIMEOUT } from "../rpc/protocol.ts";
 import { isLegacyUpdateHandoffLoss, resolveServerUpdateProgressResult } from "../state/server.ts";
 import * as RelayEnvironmentDiscovery from "../relay/discovery.ts";
@@ -101,6 +101,12 @@ export const updateOutdatedHost = Effect.fn("clientRuntime.connection.updateOutd
     }
 
     const capabilities = descriptor.capabilities;
+    if (capabilities.voiceHistoryV1 !== true) {
+      return yield* new OutdatedHostUpdateError({
+        environmentId,
+        message: `Install a compatible T3 Code Voice server on ${descriptor.label} manually. Its current updater is not verified for the Voice fork. Back up its state first.`,
+      });
+    }
     if (
       capabilities.serverSelfUpdate === undefined ||
       (capabilities.serverSelfUpdate === "desktop-managed" &&
@@ -239,5 +245,5 @@ export const updateOutdatedHost = Effect.fn("clientRuntime.connection.updateOutd
 );
 
 function isCompatibleDescriptor(descriptor: ExecutionEnvironmentDescriptor): boolean {
-  return (descriptor.orchestrationProtocolVersion ?? 1) === ORCHESTRATION_PROTOCOL_VERSION;
+  return orchestrationProtocolCompatibilityError(descriptor) === null;
 }

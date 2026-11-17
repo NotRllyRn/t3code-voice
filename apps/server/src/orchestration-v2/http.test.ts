@@ -5,9 +5,11 @@ import {
   EnvironmentAuthenticatedPrincipal,
   EnvironmentHttpApi,
   EnvironmentId,
+  CLIENT_CAPABILITIES_HEADER,
   EventId,
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+  VOICE_HISTORY_CAPABILITY,
   OrchestrationV2AppThread,
   OrchestrationV2TurnItem,
   OrchestrationV2ThreadTranscript,
@@ -168,7 +170,10 @@ it.effect("exports full history with size, scope, and missing-thread checks", ()
       Effect.promise(() =>
         handler(
           new Request(`http://localhost/api/orchestration/threads/${threadId}/transcript`, {
-            headers: { [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT },
+            headers: {
+              [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+              [CLIENT_CAPABILITIES_HEADER]: VOICE_HISTORY_CAPABILITY,
+            },
           }),
         ),
       );
@@ -250,6 +255,46 @@ it.effect("exports full history with size, scope, and missing-thread checks", ()
   }),
 );
 
+it.effect("requires protocol 3 and voice history capability on every orchestration read", () =>
+  Effect.gen(function* () {
+    const { handler } = yield* serveOrchestrationHttp(() => true);
+    const cursor = Buffer.from(
+      JSON.stringify({ v: 1, seq: 0, st: String(thread.id), si: "item-0", p: 0 }),
+    ).toString("base64url");
+    const paths = [
+      "/api/orchestration/shell",
+      `/api/orchestration/threads/${thread.id}`,
+      `/api/orchestration/threads/${thread.id}/transcript`,
+      `/api/orchestration/threads/${thread.id}/bounded`,
+      `/api/orchestration/threads/${thread.id}/history?cursor=${cursor}`,
+    ];
+    const protocol3 = {
+      [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+      [CLIENT_CAPABILITIES_HEADER]: VOICE_HISTORY_CAPABILITY,
+    };
+    const oldProtocol = {
+      [ORCHESTRATION_PROTOCOL_HEADER]: "2",
+      [CLIENT_CAPABILITIES_HEADER]: VOICE_HISTORY_CAPABILITY,
+    };
+    const missingCapability = {
+      [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+    };
+
+    for (const path of paths) {
+      const accepted = yield* Effect.promise(() =>
+        handler(new Request(`http://localhost${path}`, { headers: protocol3 })),
+      );
+      expect(accepted.status, path).toBe(200);
+      for (const headers of [oldProtocol, missingCapability]) {
+        const rejected = yield* Effect.promise(() =>
+          handler(new Request(`http://localhost${path}`, { headers })),
+        );
+        expect(rejected.status, path).toBe(400);
+      }
+    }
+  }),
+);
+
 it.effect("leaves older settled threads out of the HTTP shell only when asked", () =>
   Effect.gen(function* () {
     const { eventSink, handler } = yield* serveOrchestrationHttp(() => true);
@@ -275,7 +320,10 @@ it.effect("leaves older settled threads out of the HTTP shell only when asked", 
       Effect.promise(async () => {
         const response = await handler(
           new Request(`http://localhost/api/orchestration/shell${query}`, {
-            headers: { [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT },
+            headers: {
+              [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+              [CLIENT_CAPABILITIES_HEADER]: VOICE_HISTORY_CAPABILITY,
+            },
           }),
         );
         return (await response.json()) as {

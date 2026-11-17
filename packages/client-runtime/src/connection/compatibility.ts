@@ -3,6 +3,7 @@ import {
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
   ORCHESTRATION_PROTOCOL_VERSION,
   SETTINGS_SECRET_REFERENCES_CAPABILITY,
+  VOICE_HISTORY_CAPABILITY,
   type ExecutionEnvironmentDescriptor,
 } from "@t3tools/contracts";
 
@@ -11,6 +12,12 @@ import { ConnectionBlockedError } from "./model.ts";
 export function orchestrationProtocolCompatibilityError(
   descriptor: ExecutionEnvironmentDescriptor,
 ): ConnectionBlockedError | null {
+  if (descriptor.capabilities.voiceHistoryV1 !== true) {
+    return new ConnectionBlockedError({
+      reason: "unsupported",
+      detail: `This environment needs a compatible T3 Code Voice server. Install the Voice fork on ${descriptor.label}, and update all connected clients. Back up its state before upgrading.`,
+    });
+  }
   // Servers shipped before negotiation use the original wire protocol.
   const serverProtocolVersion = descriptor.orchestrationProtocolVersion ?? 1;
   if (serverProtocolVersion === ORCHESTRATION_PROTOCOL_VERSION) {
@@ -39,6 +46,9 @@ function canSelfUpdate(descriptor: ExecutionEnvironmentDescriptor): boolean {
 export function appendOrchestrationProtocol(socketUrl: string): string {
   const url = new URL(socketUrl);
   url.searchParams.set(ORCHESTRATION_PROTOCOL_QUERY_PARAM, String(ORCHESTRATION_PROTOCOL_VERSION));
-  url.searchParams.set(CLIENT_CAPABILITIES_QUERY_PARAM, SETTINGS_SECRET_REFERENCES_CAPABILITY);
+  url.searchParams.set(
+    CLIENT_CAPABILITIES_QUERY_PARAM,
+    [SETTINGS_SECRET_REFERENCES_CAPABILITY, VOICE_HISTORY_CAPABILITY].join(","),
+  );
   return url.toString();
 }

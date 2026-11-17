@@ -1,8 +1,10 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
+  CLIENT_CAPABILITIES_HEADER,
   EnvironmentId,
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+  VOICE_HISTORY_CAPABILITY,
   ProjectId,
   ThreadId,
   type AuthSessionState,
@@ -304,6 +306,9 @@ describe("authenticated environment HTTP requests", () => {
       if (loader.path.startsWith("/api/orchestration/")) {
         expect(new Headers(call.init.headers).get(ORCHESTRATION_PROTOCOL_HEADER)).toBe(
           ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+        );
+        expect(new Headers(call.init.headers).get(CLIENT_CAPABILITIES_HEADER)).toBe(
+          VOICE_HISTORY_CAPABILITY,
         );
       }
       expect(harness.authorizations).toEqual([{ expectedEnvironmentId: TARGET.environmentId }]);

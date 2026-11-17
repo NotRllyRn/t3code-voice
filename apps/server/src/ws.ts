@@ -57,6 +57,7 @@ import {
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
   CLIENT_CAPABILITIES_QUERY_PARAM,
   SETTINGS_SECRET_REFERENCES_CAPABILITY,
+  VOICE_HISTORY_CAPABILITY,
   ORCHESTRATION_PROTOCOL_VERSION,
   OrchestrationV2DispatchCommandError,
   OrchestrationV2GetShellSnapshotError,
@@ -738,10 +739,13 @@ const MAX_CLIENT_APP_VERSION_LENGTH = 64;
 const MAX_CLIENT_BROWSER_LENGTH = 64;
 const MAX_CLIENT_DEVICE_MODEL_LENGTH = 80;
 
-function hasCompatibleOrchestrationProtocol(url: URL): boolean {
+export function hasCompatibleOrchestrationProtocol(url: URL): boolean {
   return (
     url.searchParams.get(ORCHESTRATION_PROTOCOL_QUERY_PARAM) ===
-    String(ORCHESTRATION_PROTOCOL_VERSION)
+      String(ORCHESTRATION_PROTOCOL_VERSION) &&
+    (url.searchParams.get(CLIENT_CAPABILITIES_QUERY_PARAM)?.split(",") ?? []).includes(
+      VOICE_HISTORY_CAPABILITY,
+    )
   );
 }
 
@@ -3547,7 +3551,8 @@ export const layer = Layer.unwrap(
           return HttpServerResponse.jsonUnsafe(
             {
               code: "orchestration_protocol_incompatible",
-              message: `Update this client to one that supports orchestration protocol ${ORCHESTRATION_PROTOCOL_VERSION}.`,
+              message: `Update to a compatible T3 Code Voice client supporting protocol ${ORCHESTRATION_PROTOCOL_VERSION} and ${VOICE_HISTORY_CAPABILITY}. Older clients cannot read Voice history.`,
+              requiredCapability: VOICE_HISTORY_CAPABILITY,
               orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
             },
             { status: 426 },

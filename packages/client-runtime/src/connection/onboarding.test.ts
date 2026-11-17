@@ -87,6 +87,7 @@ function layerPairingHttp(
           orchestrationProtocolVersion: options?.protocolVersion ?? ORCHESTRATION_PROTOCOL_VERSION,
           capabilities: {
             repositoryIdentity: true,
+            voiceHistoryV1: true,
             ...(options?.selfUpdate === true ? { serverSelfUpdate: "boot-service" } : {}),
           },
         }),

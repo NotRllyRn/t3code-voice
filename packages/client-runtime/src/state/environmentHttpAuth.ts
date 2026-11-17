@@ -1,8 +1,10 @@
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import {
+  CLIENT_CAPABILITIES_HEADER,
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+  VOICE_HISTORY_CAPABILITY,
 } from "@t3tools/contracts";
 import * as Result from "effect/Result";
 import * as SubscriptionRef from "effect/SubscriptionRef";
@@ -31,10 +33,12 @@ export function withOrchestrationProtocolHeader(
   headers: EnvironmentHttpAuthHeaders,
 ): EnvironmentHttpAuthHeaders & {
   readonly [ORCHESTRATION_PROTOCOL_HEADER]: typeof ORCHESTRATION_PROTOCOL_VERSION_TEXT;
+  readonly [CLIENT_CAPABILITIES_HEADER]: typeof VOICE_HISTORY_CAPABILITY;
 } {
   return {
     ...headers,
     [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+    [CLIENT_CAPABILITIES_HEADER]: VOICE_HISTORY_CAPABILITY,
   };
 }
 
