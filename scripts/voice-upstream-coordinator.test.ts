@@ -96,6 +96,7 @@ test("claims once before returning fixed worktree request; child ID recorded exp
     NodeAssert.equal(state.active.phase, "launching");
     NodeAssert.equal(state.active.threadId, null);
     NodeAssert.equal(state.active.deadline, "2026-11-16T14:00:00.000Z");
+    NodeAssert.ok(request.message.includes(`absolute deadline ${state.active.deadline}`));
     await NodeAssert.rejects(claimCandidate(candidate, opts(dir)), /Active run/);
     await NodeAssert.rejects(
       overdueInterruptRequest(dir, new Date("2026-11-16T14:00:00.000Z")),
@@ -112,7 +113,33 @@ test("claims once before returning fixed worktree request; child ID recorded exp
       threadId: id,
       reason: "Voice upgrade two-hour deadline reached",
     });
-    await NodeAssert.rejects(recordChildThread(dir, id), /No launch/);
+    const recorded = await NodeFSP.readFile(statePath, "utf8");
+    await recordChildThread(dir, id);
+    NodeAssert.equal(await NodeFSP.readFile(statePath, "utf8"), recorded);
+    await NodeAssert.rejects(
+      recordChildThread(dir, "mcp:00000000-0000-4000-8000-000000000003"),
+      /different thread/,
+    );
+    NodeAssert.equal(await NodeFSP.readFile(statePath, "utf8"), recorded);
+    await NodeAssert.rejects(claimCandidate(candidate, opts(dir)), /Active run/);
+  }));
+
+test("preparation delays do not reset the absolute deadline already delivered in the prompt", async () =>
+  fixture(async (dir) => {
+    const request = await claimCandidate(candidate, opts(dir));
+    const state = JSON.parse(await NodeFSP.readFile(NodePath.join(dir, "state.json"), "utf8"));
+    NodeAssert.ok(request.message.includes(`absolute deadline ${state.active.deadline}`));
+    const id = "mcp:00000000-0000-4000-8000-000000000002";
+    // Recording after preparation must not start a fresh two-hour window.
+    await recordChildThread(dir, id);
+    NodeAssert.deepEqual(await overdueInterruptRequest(dir, new Date("2026-11-16T14:10:00Z")), {
+      threadId: id,
+      reason: "Voice upgrade two-hour deadline reached",
+    });
+    NodeAssert.equal(
+      JSON.parse(await NodeFSP.readFile(NodePath.join(dir, "state.json"), "utf8")).active.deadline,
+      state.active.deadline,
+    );
   }));
 
 test("concurrent claims and replay cannot launch twice; daily cap and tag movement remain blocked after human clears active", async () =>

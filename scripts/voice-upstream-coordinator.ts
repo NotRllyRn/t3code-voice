@@ -231,6 +231,14 @@ async function locked<T>(
   }
 }
 
+export function voiceUpgradeWorkerPrompt(
+  candidate: Pick<Candidate, "tag" | "sha">,
+  deadline: string,
+): string {
+  time(deadline);
+  return `Upgrade the voice fork against the verified upstream stable ${candidate.tag} commit ${candidate.sha}. Keep the target immutable. Preserve fork behavior; review migrations, compatibility, and the diff. Open an early progress PR against ${BASE} only after an independently reviewed meaningful commit. Stop for human approval before merge. Never publish, deploy, or change a live service. Stop your own work at the absolute deadline ${deadline} and request operator reconciliation; do not wait for cancellation. The external coordinator's two-hour audit is best-effort and may be delayed while the app is offline. It requests a current-turn interrupt, not guaranteed cancellation of queued turns or nested work; this is not a hard runtime cap. Do not merge, publish, or deploy.`;
+}
+
 export async function claimCandidate(
   input: unknown,
   opts: {
@@ -297,7 +305,7 @@ export async function claimCandidate(
         branch: branchName,
         startFromOrigin: false,
       },
-      message: `Upgrade the voice fork against the verified upstream stable ${candidate.tag} commit ${candidate.sha}. Keep the target immutable. Preserve fork behavior; review migrations, compatibility, and the diff. Open an early progress PR against ${BASE} only after an independently reviewed meaningful commit. Stop for human approval before merge. Never publish, deploy, or change a live service. Complete within two hours; the external coordinator must cancel the thread at the recorded deadline and reconcile it manually.`,
+      message: voiceUpgradeWorkerPrompt(candidate, state.active.deadline),
     };
   });
 }
@@ -321,7 +329,12 @@ export async function overdueInterruptRequest(
 export async function recordChildThread(stateDir: string, threadId: string): Promise<void> {
   if (!T3_THREAD_ID.test(threadId)) throw new Error("Invalid thread ID");
   await locked(stateDir, async (dir, state) => {
-    if (state.active?.phase !== "launching") throw new Error("No launch to reconcile");
+    if (!state.active) throw new Error("No launch to reconcile");
+    if (state.active.phase === "launched") {
+      if (state.active.threadId !== threadId)
+        throw new Error("Launch already records a different thread");
+      return;
+    }
     state.active.phase = "launched";
     state.active.threadId = threadId;
     await save(dir, state);
