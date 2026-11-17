@@ -100,7 +100,7 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv, Path.Path> = {
     const httpClient = yield* HttpClient.HttpClient;
     const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
     const host = yield* ProviderHost.ProviderHost;
-    const { cwd } = host.paths;
+    const probeCwd = pathService.join(host.paths.providerStatusCacheDir, "pi-status-probe");
     const hostEnvironment = yield* HostProcess.Environment;
     const mergedEnvironment = yield* mergeProviderInstanceEnvironment(environment, hostEnvironment);
     const { environment: processEnv, executable } = yield* resolvePiStartup(
@@ -168,10 +168,14 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv, Path.Path> = {
     );
     const textGeneration = yield* makePiTextGeneration(effectiveConfig, processEnv, executable);
 
-    const checkProvider = checkPiProviderStatus(effectiveConfig, processEnv, cwd, executable).pipe(
-      Effect.map(stampIdentity),
-      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-    );
+    const checkProvider = fileSystem
+      .makeDirectory(probeCwd, { recursive: true })
+      .pipe(
+        Effect.ignore,
+        Effect.andThen(checkPiProviderStatus(effectiveConfig, processEnv, probeCwd, executable)),
+        Effect.map(stampIdentity),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      );
 
     const snapshotSettings = yield* makeProviderSnapshotSettingsSource(effectiveConfig);
     const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<PiSettings>>({

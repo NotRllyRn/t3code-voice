@@ -220,6 +220,6 @@ describe("NativeWebSocket", () => {
         code: 1011,
         closeReason: "boom",
       });
-    }).pipe(Effect.scoped),
+    }),
   );
 });

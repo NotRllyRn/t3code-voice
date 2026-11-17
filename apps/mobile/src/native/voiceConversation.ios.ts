@@ -1,10 +1,10 @@
-import { requireOptionalNativeModule } from "expo";
 import { requestRecordingPermissionsAsync } from "expo-audio";
 import * as Crypto from "expo-crypto";
 import { nativeVoiceMedia, type NativeVoiceAudio } from "./voiceConversationAudio";
 
-const native = requireOptionalNativeModule<NativeVoiceAudio>("T3VoiceConversation");
-export const nativeVoiceAvailable = native !== null;
+// iOS Live remains deferred; do not load or activate the custom audio engine.
+const native: NativeVoiceAudio | null = null;
+export const nativeVoiceAvailable = false;
 export const createNativeVoiceMedia = nativeVoiceMedia(
   native,
   requestRecordingPermissionsAsync,

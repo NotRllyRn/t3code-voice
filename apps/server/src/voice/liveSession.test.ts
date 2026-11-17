@@ -219,24 +219,26 @@ it.effect.each(["ready", "binding"] as const)(
         onBound: () => {},
       }).pipe(
         Effect.provide(
-          Layer.mock(ThreadLaunch.ThreadLaunchService)({
-            launch: () =>
-              Effect.gen(function* () {
-                launches++;
-                yield* VoiceFixture.create(threadId).pipe(
-                  Effect.provideService(Orchestrator.OrchestratorV2, orchestrator),
-                );
-                yield* Deferred.succeed(bindingEntered, undefined);
-                if (phase === "binding") yield* Deferred.await(bindingRelease);
-                return {
-                  threadId,
-                  projection: yield* threads.getThreadProjection(threadId),
-                  resumed: false,
-                };
-              }).pipe(Effect.orDie),
-          }),
+          Layer.merge(
+            agentAux,
+            Layer.mock(ThreadLaunch.ThreadLaunchService)({
+              launch: () =>
+                Effect.gen(function* () {
+                  launches++;
+                  yield* VoiceFixture.create(threadId).pipe(
+                    Effect.provideService(Orchestrator.OrchestratorV2, orchestrator),
+                  );
+                  yield* Deferred.succeed(bindingEntered, undefined);
+                  if (phase === "binding") yield* Deferred.await(bindingRelease);
+                  return {
+                    threadId,
+                    projection: yield* threads.getThreadProjection(threadId),
+                    resumed: false,
+                  };
+                }).pipe(Effect.orDie),
+            }),
+          ),
         ),
-        Effect.provide(agentAux),
         Effect.provideService(LiveNetwork, {
           create: () =>
             Effect.succeed({

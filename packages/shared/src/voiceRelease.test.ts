@@ -98,10 +98,12 @@ describe("Voice release contract", () => {
 
   it("ignores drafts, non-prereleases, other channels, missing assets and wrong architecture", () => {
     const wrongArch = release("0.1.9-voice.7").assets[0]!;
+    const missingPrerelease = { ...release("0.1.9-voice.10") };
+    delete missingPrerelease.prerelease;
     const releases = [
       release("0.1.9-voice.12", { draft: true }),
       release("0.1.9-voice.11", { prerelease: false }),
-      release("0.1.9-voice.10", { prerelease: undefined }),
+      missingPrerelease,
       release("0.1.9-nightly.20261116.1"),
       release("0.1.9"),
       release("0.1.9-voice.8", { assets: [] }),
