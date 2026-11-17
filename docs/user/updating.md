@@ -1,5 +1,21 @@
 # Updating T3 Code
 
+## Voice fork desktop testers
+
+On an Apple Silicon Mac, use **Settings → About → Check Voice updates** or the
+app menu's **Check for Updates**. A compatible newer fork release offers
+**Download Voice DMG**; only that explicit action opens the browser. Install the
+DMG manually after saving your work. Development builds and other architectures
+do not offer a download. An unavailable or failed check does not mean the app
+or its connected servers are up to date.
+
+Automatic desktop download, installation, and track switching remain disabled
+for this fork pending trusted signing and a verified update path. A GitHub
+download is not proof of Apple Developer ID signing or notarization. This manual
+fallback does not fulfill automatic-update support. Server updates are separate.
+The automatic desktop and track-switching instructions below describe upstream
+T3 Code, not the current Voice tester.
+
 The app you use and the server running your agents can be on different machines.
 When a server is behind your web or desktop app, the update button at the bottom
 of the sidebar and **Settings → Environments** offer to update it.

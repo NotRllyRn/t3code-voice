@@ -5,6 +5,10 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as Electron from "electron";
+import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
+import { checkManualVoiceUpdate } from "../updates/manualVoiceUpdates.ts";
+import * as DesktopUpdatePolicy from "../updates/DesktopUpdatePolicy.ts";
+import * as ElectronShell from "../electron/ElectronShell.ts";
 
 import { makeComponentLogger } from "../app/DesktopObservability.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
@@ -35,7 +39,10 @@ export class DesktopApplicationMenu extends Context.Service<
 type DesktopApplicationMenuRuntimeServices =
   | DesktopUpdates.DesktopUpdates
   | DesktopWindow.DesktopWindow
-  | ElectronDialog.ElectronDialog;
+  | ElectronDialog.ElectronDialog
+  | ElectronShell.ElectronShell
+  | DesktopEnvironment.DesktopEnvironment
+  | DesktopUpdatePolicy.DesktopUpdatePolicy;
 
 const { logInfo: logUpdaterInfo } = makeComponentLogger("desktop-updater");
 
@@ -89,6 +96,10 @@ const checkForUpdatesFromMenu = Effect.gen(function* () {
 }).pipe(Effect.withSpan("desktop.menu.checkForUpdates"));
 
 const handleCheckForUpdatesMenuClick = Effect.gen(function* () {
+  if (FORK_DESKTOP.manualUpdatesOnly) {
+    yield* checkManualVoiceUpdate();
+    return;
+  }
   const updates = yield* DesktopUpdates.DesktopUpdates;
   const electronDialog = yield* ElectronDialog.ElectronDialog;
   const disabledReason = yield* updates.disabledReason;

@@ -7,6 +7,8 @@ import {
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
+import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
+import { checkManualVoiceUpdate } from "../../updates/manualVoiceUpdates.ts";
 import * as DesktopUpdates from "../../updates/DesktopUpdates.ts";
 import * as IpcChannels from "../channels.ts";
 import * as DesktopIpc from "../DesktopIpc.ts";
@@ -63,6 +65,10 @@ export const checkForUpdate = DesktopIpc.makeIpcMethod({
   result: DesktopUpdateCheckResultSchema,
   handler: Effect.fn("desktop.ipc.updates.check")(function* () {
     const updates = yield* DesktopUpdates.DesktopUpdates;
+    if (FORK_DESKTOP.manualUpdatesOnly) {
+      yield* checkManualVoiceUpdate();
+      return { checked: true, state: yield* updates.getState };
+    }
     return yield* updates.check("web-ui");
   }),
 });
