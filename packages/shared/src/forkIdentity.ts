@@ -20,8 +20,8 @@ export const FORK_RELEASE = {
   baseBranch: "feature/codex-voice-stable",
   upstream: {
     repository: "pingdotgg/t3code",
-    tag: "v0.1.9",
-    sha: "24e77473ecf41bc1f7142529c7911c1c1aae1d76",
+    tag: "v0.1.10",
+    sha: "7d32075e3757ded707914e2450c3e392a9665765",
   },
   voiceRevision: 1,
   githubPrerelease: true,

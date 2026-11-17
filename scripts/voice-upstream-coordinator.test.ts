@@ -1,5 +1,6 @@
 import * as NodeAssert from "node:assert/strict";
 import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { test } from "vitest";
 import {
@@ -46,7 +47,7 @@ const api: GitHubApi = async (path) => {
 };
 
 async function fixture(run: (dir: string) => Promise<void>) {
-  const dir = await NodeFSP.mkdtemp("/var/tmp/t3/voice-coordinator-test-");
+  const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "voice-coordinator-test-"));
   await NodeFSP.chmod(dir, 0o700);
   const previous = process.env.VOICE_AUTOMATION_ENABLED;
   process.env.VOICE_AUTOMATION_ENABLED = "1";

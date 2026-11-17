@@ -30,15 +30,15 @@ const release = (
 });
 
 describe("Voice release contract", () => {
-  it("keeps desktop manual-only and identifies the fork's experimental starting release", () => {
+  it("keeps desktop manual-only and identifies the fork's pinned experimental release", () => {
     expect(FORK_DESKTOP.manualUpdatesOnly).toBe(true);
     expect(FORK_RELEASE).toMatchObject({
       repository: "NotRllyRn/t3code-voice",
       baseBranch: "feature/codex-voice-stable",
       upstream: {
         repository: "pingdotgg/t3code",
-        tag: "v0.1.9",
-        sha: "24e77473ecf41bc1f7142529c7911c1c1aae1d76",
+        tag: "v0.1.10",
+        sha: "7d32075e3757ded707914e2450c3e392a9665765",
       },
       voiceRevision: 1,
       githubPrerelease: true,
