@@ -418,7 +418,10 @@ export interface OrchestratorV2Shape {
   readonly awaitRestartContinuation: (run: OrchestrationV2Run) => Effect.Effect<void>;
   readonly dispatch: (
     command: OrchestrationV2ServerCommand,
-    options?: { readonly expectedUserMessageCount?: number },
+    options?: {
+      readonly expectedUserMessageCount?: number;
+      readonly expectedModelSelection?: ModelSelection;
+    },
   ) => Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error>;
   readonly autoArmLimitRecovery: (input: {
     readonly commandId: CommandId;
@@ -15747,7 +15750,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     command: OrchestrationV2ServerCommand,
     sideChatIds: ReadonlyArray<ThreadId> = [],
     cancelledTask?: OrchestrationV2Subagent,
-    options?: { readonly expectedUserMessageCount?: number },
+    options?: {
+      readonly expectedUserMessageCount?: number;
+      readonly expectedModelSelection?: ModelSelection;
+    },
   ): Effect.fn.Return<OrchestratorV2DispatchResult, OrchestratorV2Error> {
     yield* Effect.annotateCurrentSpan({
       "orchestration_v2.command_id": command.commandId,
@@ -15768,6 +15774,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
     if (Option.isSome(existingReceipt)) {
       return yield* replayCommandReceipt(command, existingReceipt.value);
+    }
+
+    if (command.type === "message.dispatch" && options?.expectedModelSelection !== undefined) {
+      const shell = yield* projectionStore
+        .getThreadShell(command.threadId)
+        .pipe(
+          Effect.mapError(
+            (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+          ),
+        );
+      if (!shell || !modelSelectionsEqual(shell.modelSelection, options.expectedModelSelection))
+        return yield* new OrchestratorInputChangedError({ threadId: command.threadId });
     }
 
     if (command.type === "message.dispatch" && options?.expectedUserMessageCount !== undefined) {
@@ -16039,7 +16057,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   // dispatchWithReceiptEffect owns the dispatch span; this wrapper selects the thread locks.
   const dispatchWithReceipt = Effect.fnUntraced(function* (
     command: OrchestrationV2ServerCommand,
-    options?: { readonly expectedUserMessageCount?: number },
+    options?: {
+      readonly expectedUserMessageCount?: number;
+      readonly expectedModelSelection?: ModelSelection;
+    },
   ) {
     const dispatch = threadDispatch.withLock(
       commandThreadId(command),

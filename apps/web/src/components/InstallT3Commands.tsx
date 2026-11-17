@@ -1,11 +1,9 @@
+import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
+
 import { cn } from "~/lib/utils";
 
 import { CommandBlock } from "./CommandBlock";
 
-/**
- * Setup steps for another computer: install `t3`, then run `command`. Both installers are shown
- * because the browser showing this is often not the computer being set up.
- */
 export function InstallT3Commands({
   command,
   className,
@@ -15,16 +13,20 @@ export function InstallT3Commands({
 }) {
   return (
     <div className={cn("space-y-2", className)}>
-      <p className="text-xs text-muted-foreground">macOS, Linux</p>
-      <CommandBlock command="curl -fsSL https://t3.codes/install.sh | sh" />
-      <p className="text-xs text-muted-foreground">Windows (PowerShell)</p>
-      <CommandBlock command="irm https://t3.codes/install.ps1 | iex" />
-      <p className="text-xs text-muted-foreground">Then</p>
+      <p className="text-xs text-muted-foreground">
+        Install the matching Voice build from the{" "}
+        <a href={FORK_DESKTOP.releasesUrl} target="_blank" rel="noreferrer" className="underline">
+          fork releases
+        </a>{" "}
+        using its manual desktop or Docker server instructions. The Docker bundle needs a separate
+        pinned Node image and provider CLIs with authentication. Upstream installers and stock
+        clients are not compatible.
+      </p>
+      <p className="text-xs text-muted-foreground">With the matching Voice runtime, run</p>
       <CommandBlock command={command} />
       <p className="text-xs text-muted-foreground">
-        Skip the install if you already have <code className="font-mono">t3</code>. If{" "}
-        <code className="font-mono">t3</code> is not found after installing, add the folder the
-        installer names to your PATH.
+        Use only the command supplied by that Voice build, not an upstream t3 on your PATH.
+        Standalone automatic updates are not shipped; follow the release's manual update steps.
       </p>
     </div>
   );

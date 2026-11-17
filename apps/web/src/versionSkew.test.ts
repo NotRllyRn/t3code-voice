@@ -42,6 +42,25 @@ describe("versionSkew", () => {
       }),
     ).toBe("'/opt/maria'\\''s bin/t3' update --base-dir '/data/t3 home' 0.0.45");
   });
+  it("keeps Voice recovery manual for every server installation", () => {
+    const installations = [
+      undefined,
+      { kind: "npm-global", prefix: "/opt/node" },
+      { kind: "t3-launcher", launcher: "t3", baseDir: "/data/voice" },
+      { kind: "pnpm-dlx" },
+      { kind: "bunx" },
+      { kind: "npx" },
+    ] as const;
+    for (const installation of installations) {
+      const guidance = manualServerUpdateCommand("0.1.10-voice.1", installation);
+      expect(guidance).toContain("https://github.com/NotRllyRn/t3code-voice/releases");
+      expect(guidance).toContain("manual");
+      expect(guidance).not.toMatch(/npx|npm install|pnpm dlx|bunx|install\.sh|t3 update/);
+    }
+    branding.APP_VERSION = "0.1.10-voice.1";
+    expect(manualServerUpdateCommand("0.1.11")).toContain("Voice release (0.1.10-voice.1)");
+  });
+
   beforeEach(() => {
     branding.APP_VERSION = "0.0.34";
   });

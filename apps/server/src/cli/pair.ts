@@ -5,7 +5,9 @@ import {
   ORCHESTRATION_PROTOCOL_VERSION,
   PortSchema,
 } from "@t3tools/contracts";
+import { cliReleaseChannelOf } from "@t3tools/shared/cliRelease";
 import { resolveWorktreeT3Home } from "@t3tools/shared/devHome";
+import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { formatHostForUrl, isWildcardHost } from "@t3tools/shared/hostClassification";
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
@@ -93,7 +95,9 @@ export class IncompatibleServerProtocolError extends Schema.TaggedError<Incompat
   override get message(): string {
     return [
       `The running T3 Code server (${this.serverVersion}) speaks orchestration protocol ${String(this.serverProtocolVersion)}, but this CLI speaks protocol ${String(ORCHESTRATION_PROTOCOL_VERSION)}.`,
-      `Pair with the matching CLI instead: \`${this.pairCommand}\`.`,
+      cliReleaseChannelOf(this.serverVersion) === "voice"
+        ? `Use the matching Voice ${this.serverVersion} runtime from ${FORK_DESKTOP.releasesUrl}. Follow README-server.md for its manual Docker server setup (separate pinned Node image, provider CLIs and authentication required). With the guide's default container name, run \`docker exec --user 1000:1000 t3-voice-server /usr/local/bin/node /opt/t3/dist/bin.mjs pair --base-dir /state\`; substitute your container name if changed. No standalone automatic updater is shipped.`
+        : `Pair with the matching CLI instead: \`${this.pairCommand}\`.`,
     ].join("\n");
   }
 }
@@ -559,7 +563,10 @@ export const pairCommand = Command.make("pair", {
         return yield* new IncompatibleServerProtocolError({
           serverVersion: target.descriptor.serverVersion,
           serverProtocolVersion,
-          pairCommand: `npx t3@${target.descriptor.serverVersion} pair${baseDirArgs}`,
+          pairCommand:
+            cliReleaseChannelOf(target.descriptor.serverVersion) === "voice"
+              ? `t3 pair${baseDirArgs}`
+              : `npx t3@${target.descriptor.serverVersion} pair${baseDirArgs}`,
         });
       }
 

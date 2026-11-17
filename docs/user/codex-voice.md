@@ -74,12 +74,19 @@ no second executor or automatic permission bypass is used.
 
 ## Fork and other surfaces
 
-The fork is based on upstream **v0.1.9**, commit
-`24e77473ecf41bc1f7142529c7911c1c1aae1d76`. Its desktop identity and data directory
-are separate (`T3 Code Voice`, `t3code-voice`, `.t3code-voice`); updates are manual.
-Migration IDs 82–88 from earlier fork previews are retained. Back up fork data
-before changing builds, and do not open a fork preview database with older
-upstream software. No exact macOS artifact has yet passed the required Finder,
+The fork is based on upstream **v0.1.10**, commit `7d32075e`. Its desktop identity
+and data directory are separate (`T3 Code Voice`, `t3code-voice`, `.t3code-voice`);
+updates are manual. See [Voice installation and updates](./install.md).
+
+Use matching Voice clients and servers: orchestration protocol **3** with
+`voiceHistoryV1` is required. Stock upstream desktop/web clients and App Store or
+Google Play mobile apps are incompatible; they cannot connect to this server.
+A matching fork mobile build is required, not an automatic store upgrade.
+
+The current migration head is **96**. Migration checks covered legacy upstream
+**81→96** and earlier fork **88→96** data; they do not prove downgrades are safe.
+Back up fork data before changing builds, and do not open it with older upstream
+software. No exact macOS artifact has yet passed the required Finder,
 microphone, playback, signing/notarization and download checks for this candidate.
 
 Native mobile voice and the retained legacy Realtime transport are separate

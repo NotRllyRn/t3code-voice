@@ -40,6 +40,7 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
   readonly binding: LiveVoiceBinding;
   readonly connection: ResolvedLiveConnection;
   readonly capability: LiveVoiceCapability;
+  readonly modelSelection?: import("@t3tools/contracts").ModelSelection;
   readonly validateOwner: Effect.Effect<void, LiveConnectionError>;
   readonly onStopped?: () => void;
   readonly onBound: (id: import("@t3tools/contracts").ThreadId) => void;
@@ -80,6 +81,8 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
   const agent = yield* makeLiveAgentSession({
     binding: input.binding,
     sessionId,
+    ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+    validateOwner: input.validateOwner,
     send,
     onBound: input.onBound,
     append: Effect.fn("LiveSession.append")(function* (event) {

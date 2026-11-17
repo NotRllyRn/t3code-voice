@@ -5,6 +5,8 @@ import type {
   ServerSelfUpdateCapability,
 } from "@t3tools/contracts";
 import type { ServerUpdateState } from "@t3tools/client-runtime/state/server";
+import { cliReleaseChannelOf } from "@t3tools/shared/cliRelease";
+import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
 import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
 import * as Schema from "effect/Schema";
 
@@ -99,6 +101,14 @@ export function manualServerUpdateCommand(
   targetVersion: string,
   installation?: ServerInstallation,
 ): string {
+  if (
+    cliReleaseChannelOf(targetVersion) === "voice" ||
+    cliReleaseChannelOf(APP_VERSION) === "voice"
+  ) {
+    const voiceVersion =
+      cliReleaseChannelOf(targetVersion) === "voice" ? targetVersion : APP_VERSION;
+    return `Use the matching Voice release (${voiceVersion}) at ${FORK_DESKTOP.releasesUrl}. Follow its manual desktop or Docker server instructions; standalone automatic updates are not shipped.`;
+  }
   const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   if (installation?.kind === "npm-global") {
     return `npm install --global --prefix ${quote(installation.prefix)} t3@${targetVersion}`;

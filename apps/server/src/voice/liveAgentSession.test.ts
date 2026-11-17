@@ -37,7 +37,13 @@ import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as VoiceFixture from "../orchestration-v2/VoiceConversation.testkit.ts";
 import { sendRecordedVoiceMessage } from "../orchestration-v2/VoiceConversation.ts";
 import { makeLiveAgentSession } from "./liveAgentSession.ts";
-import { decodeNativeLiveEvent, type NativeLiveAppend } from "./liveProtocol.ts";
+import {
+  decodeNativeLiveEvent,
+  encodeNativeLiveAppend,
+  type NativeLiveAppend,
+} from "./liveProtocol.ts";
+
+const escapedText = '"C:\\x"\n';
 import parentCapture from "./fixtures/live-native/parent-association.json" with { type: "json" };
 import stallCapture from "./fixtures/live-native/handoff-stall.json" with { type: "json" };
 import resultCapture from "./fixtures/live-native/result-association.json" with { type: "json" };
@@ -426,14 +432,19 @@ it.live("a derived spoken yes cannot bypass pending T3 permissions or questions"
   ).pipe(Effect.provide(services)),
 );
 
-it.live(
-  "speakable completion is grounded in an authored result, not generated voice or acceptance",
-  () =>
+it.live.each([
+  ["short", "Inspected the fictional configuration. No files were changed.", false],
+  ["escaped within budget", escapedText.repeat(700), false],
+  ["escaped over budget", escapedText.repeat(800), true],
+] as const)(
+  "speakable completion is grounded and serialized-budget bounded: %s",
+  ([_name, resultText, fallback]) =>
     Effect.scoped(
       Effect.gen(function* () {
         const threadId = ThreadId.make("thread:live-grounded-result");
         yield* VoiceFixture.create(threadId);
         const threads = yield* ThreadManagement.ThreadManagementService;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
         let final: OrchestrationV2ConversationMessage | undefined;
         const appends: NativeLiveAppend[] = [];
         const agent = yield* makeLiveAgentSession({
@@ -443,6 +454,7 @@ it.live(
           send: () => Effect.void,
           append: (event) =>
             Effect.sync(() => {
+              encodeNativeLiveAppend(event);
               appends.push(event);
             }),
         }).pipe(
@@ -483,14 +495,20 @@ it.live(
           threadId,
           commandId: CommandId.make("grounded-typed"),
           messageId: MessageId.make("grounded-typed"),
-          text: "Inspect the fictional configuration without changes.",
+          text: escapedText.repeat(5000),
           attachments: [],
           mode: "queue",
           createdBy: "user",
           creationSource: "web",
         });
         yield* agent.poll;
+        expect((yield* threads.getThreadRecords(threadId, ["messages"])).messages[0]?.text).toBe(
+          sent.message.text,
+        );
         expect(appends.every((event) => !event.text.includes("actualAgentResult"))).toBe(true);
+        expect(appends.some((event) => event.text.includes("Read full typed request in T3"))).toBe(
+          true,
+        );
         final = {
           ...sent.message,
           id: MessageId.make("fictional-authored-final"),
@@ -498,15 +516,35 @@ it.live(
           role: "assistant",
           createdBy: "agent",
           creationSource: "server",
-          text: "Inspected the fictional configuration. No files were changed.",
+          text: resultText,
         };
+        yield* projections.apply({
+          id: EventId.make("stored-escaped-result"),
+          type: "message.updated",
+          threadId,
+          occurredAt: yield* DateTime.now,
+          payload: final,
+        });
         yield* agent.poll;
         yield* agent.poll;
-        const results = appends.filter((event) => event.text.includes("actualAgentResult"));
+        const results = appends.filter((event) => JSON.parse(event.text).status === "completed");
         expect(results).toHaveLength(1);
-        expect(results[0]?.text).toContain(final.text);
-        expect(results[0]?.text).toContain(final.id);
+        expect(Buffer.byteLength(results[0]!.text, "utf8")).toBeLessThanOrEqual(8192);
+        const result = JSON.parse(results[0]!.text);
+        if (fallback) {
+          expect(result.note).toBe("The result is too long for voice; read the written T3 result.");
+          expect(result.actualAgentResult).toBeUndefined();
+        } else {
+          expect(result.actualAgentResult).toBe(final.text.trim());
+          expect(result.sourceMessageIds).toContain(final.id);
+        }
+        expect(
+          (yield* threads.getThreadRecords(threadId, ["messages"])).messages.find(
+            (message) => message.id === final!.id,
+          )?.text,
+        ).toBe(resultText);
         expect(results[0]?.text).not.toContain("UNVERIFIED VOICE CLAIM");
+        yield* agent.bind;
         expect((yield* threads.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(1);
       }),
     ).pipe(Effect.provide(services)),
@@ -867,9 +905,9 @@ it.effect(
     }).pipe(Effect.provide(services)),
 );
 
-it.effect(
-  "progress expires and coalesces globally without suppressing canonical terminal results",
-  () =>
+it.effect.each([false, true])(
+  "progress expires and coalesces globally without suppressing canonical terminal results (escaped: %s)",
+  (escaped) =>
     Effect.scoped(
       Effect.gen(function* () {
         const threadId = ThreadId.make("thread:live-stale-narration");
@@ -903,6 +941,7 @@ it.effect(
           send: () => Effect.void,
           append: (event) =>
             Effect.sync(() => {
+              encodeNativeLiveAppend(event);
               notices.push(event);
             }),
         }).pipe(
@@ -924,11 +963,11 @@ it.effect(
                     ...messages,
                     ...sent.map(({ run, message }, index) => ({
                       ...message,
-                      id: MessageId.make(`commentary-${index}`),
+                      id: MessageId.make(`commentary-${index}-${"x".repeat(96)}`),
                       runId: run.id,
                       role: "assistant" as const,
                       createdBy: "agent" as const,
-                      text: `Grounded commentary ${index}.`,
+                      text: escaped ? '"\\\n'.repeat(1333) : `Grounded commentary ${index}.`,
                       createdAt: timestamp,
                       updatedAt: timestamp,
                     })),
@@ -943,7 +982,7 @@ it.effect(
                     status: "completed",
                     startedAt: timestamp,
                     completedAt: timestamp,
-                    messageId: MessageId.make(`commentary-${index}`),
+                    messageId: MessageId.make(`commentary-${index}-${"x".repeat(96)}`),
                     phase: completed ? "final_answer" : "commentary",
                     text: "",
                     textOmitted: true,
@@ -967,9 +1006,13 @@ it.effect(
         ).toHaveLength(0);
         timestamp = DateTime.makeUnsafe(25000);
         yield* agent.poll;
-        expect(
-          notices.filter((notice) => notice.text.includes('"status":"progress"')),
-        ).toHaveLength(1);
+        const progress = notices.filter((notice) => notice.text.includes('"status":"progress"'));
+        expect(progress).toHaveLength(1);
+        expect(Buffer.byteLength(progress[0]!.text, "utf8")).toBeLessThanOrEqual(8192);
+        if (escaped) {
+          expect(JSON.parse(progress[0]!.text).actualAgentCommentary).toBeUndefined();
+          expect(progress[0]!.text).toContain("Read the written T3 result");
+        }
         yield* TestClock.adjust("20 seconds");
         yield* agent.receive({
           type: "turn_done",
@@ -984,10 +1027,11 @@ it.effect(
         completed = true;
         yield* agent.poll;
         yield* agent.poll;
-        const finals = notices.filter((notice) => notice.text.includes("actualAgentResult"));
+        const finals = notices.filter((notice) => JSON.parse(notice.text).status === "completed");
         expect(finals).toHaveLength(2);
         for (let index = 0; index < 2; index++) {
-          expect(finals.some((notice) => notice.text.includes(`commentary-${index}`))).toBe(true);
+          if (!escaped)
+            expect(finals.some((notice) => notice.text.includes(`commentary-${index}`))).toBe(true);
           expect(finals.some((notice) => notice.text.includes(sent[index]!.run.id))).toBe(true);
         }
       }),

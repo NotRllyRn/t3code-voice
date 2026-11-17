@@ -153,6 +153,7 @@ export const liveVoiceRouteLayer = Layer.unwrap(
             socket,
             binding,
             connection,
+            modelSelection: selection,
             validateOwner,
             capability: {
               environmentId,

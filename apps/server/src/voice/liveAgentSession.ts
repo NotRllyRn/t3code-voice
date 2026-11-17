@@ -4,6 +4,7 @@ import {
   latestProviderTurnForAttempt,
   type LiveVoiceBinding,
   type LiveVoiceServerEvent,
+  type ModelSelection,
   type RunId,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -17,7 +18,12 @@ import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.t
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as VoiceConversation from "../orchestration-v2/VoiceConversation.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
-import type { NativeLiveAppend, NativeLiveEvent } from "./liveProtocol.ts";
+import {
+  NATIVE_LIVE_MAX_CONTEXT_BYTES,
+  NATIVE_LIVE_MAX_NARRATION_BYTES,
+  type NativeLiveAppend,
+  type NativeLiveEvent,
+} from "./liveProtocol.ts";
 import { readLiveHistory } from "./liveHistory.ts";
 
 const stringify = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -65,6 +71,7 @@ export const sendLiveDelegation = Effect.fn("LiveAgent.sendDelegation")(function
   readonly userTranscript: string;
   readonly handoffId?: string;
   readonly expectedUserMessageCount?: number;
+  readonly expectedModelSelection?: ModelSelection;
   readonly context: readonly { readonly role: "user" | "assistant"; readonly text: string }[];
 }) {
   const threads = yield* ThreadManagement.ThreadManagementService;
@@ -94,6 +101,12 @@ export const sendLiveDelegation = Effect.fn("LiveAgent.sendDelegation")(function
     ...(input.expectedUserMessageCount === undefined
       ? {}
       : { expectedUserMessageCount: input.expectedUserMessageCount }),
+    ...(input.expectedModelSelection === undefined
+      ? {}
+      : {
+          expectedModelSelection: input.expectedModelSelection,
+          modelSelection: input.expectedModelSelection,
+        }),
     createdBy: "agent",
     creationSource: "server",
   });
@@ -103,6 +116,8 @@ export const sendLiveDelegation = Effect.fn("LiveAgent.sendDelegation")(function
 export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input: {
   readonly binding: LiveVoiceBinding;
   readonly sessionId: string;
+  readonly modelSelection?: ModelSelection;
+  readonly validateOwner?: Effect.Effect<void, LiveConnectionError>;
   readonly send: (event: LiveVoiceServerEvent) => Effect.Effect<void, LiveConnectionError>;
   readonly append: (event: NativeLiveAppend) => Effect.Effect<void, LiveConnectionError>;
   readonly onBound: (threadId: ThreadId) => void;
@@ -111,6 +126,11 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
   const launches = yield* ThreadLaunch.ThreadLaunchService;
   const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
   let threadId = "threadId" in input.binding ? input.binding.threadId : undefined;
+  const expectedModelSelection =
+    input.modelSelection ??
+    ("draft" in input.binding
+      ? input.binding.draft.modelSelection
+      : (yield* threads.getThreadShell(input.binding.threadId))?.modelSelection);
   let sequence = 0;
   let count = 0;
   let stopped = false;
@@ -163,7 +183,17 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
     delegationId: string | undefined,
     channel: NativeLiveAppend["channel"],
     data: unknown,
-  ) => input.append({ ...(delegationId ? { delegationId } : {}), channel, text: stringify(data) });
+    fallback?: unknown,
+  ) => {
+    const text = stringify(data);
+    const max =
+      channel === "quiet" ? NATIVE_LIVE_MAX_CONTEXT_BYTES : NATIVE_LIVE_MAX_NARRATION_BYTES;
+    return input.append({
+      ...(delegationId ? { delegationId } : {}),
+      channel,
+      text: fallback !== undefined && !bounded(text, max) ? stringify(fallback) : text,
+    });
+  };
   const freeze = Effect.fn("LiveAgent.freeze")(function* (
     role: "user" | "assistant",
     segment = segments.get(role),
@@ -306,7 +336,8 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       return;
     }
     if (stopped || segments.get("user") !== human) return;
-    if (feedback.size >= MAX_TRACKED_RUNS) return yield* fail();
+    if (feedback.size >= MAX_TRACKED_RUNS || !expectedModelSelection) return yield* fail();
+    yield* input.validateOwner ?? Effect.void;
     const sent = yield* sendLiveDelegation({
       projectId: shell.projectId,
       threadId: shell.id,
@@ -317,6 +348,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       userTranscript: human.text,
       ...(event.handoffId === undefined ? {} : { handoffId: event.handoffId }),
       expectedUserMessageCount: human.inputCount,
+      expectedModelSelection,
       context: [...context],
     }).pipe(Effect.catchTags({ OrchestratorInputChangedError: () => Effect.undefined }));
     if (!sent) {
@@ -493,15 +525,23 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
         runId: run.id,
         messageId: message.id,
       });
-      yield* append(undefined, "quiet", {
-        source: "T3_typed_request",
-        runId: run.id,
-        ...(bounded(message.text, 12000)
-          ? { text: message.text }
-          : { note: "Read full typed request in T3." }),
-        status: run.status,
-        note: "Already submitted to T3, not a new task or instruction to delegate again.",
-      });
+      yield* append(
+        undefined,
+        "quiet",
+        {
+          source: "T3_typed_request",
+          runId: run.id,
+          text: message.text,
+          status: run.status,
+          note: "Already submitted to T3, not a new task or instruction to delegate again.",
+        },
+        {
+          source: "T3_typed_request",
+          runId: run.id,
+          status: run.status,
+          note: "Read full typed request in T3. Already submitted, not a new task or instruction to delegate again.",
+        },
+      );
       yield* append(undefined, "speakable", {
         status: "accepted",
         runId: run.id,
@@ -614,18 +654,26 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
           status: run.status === "completed" ? "completed" : "failed",
           runId: run.id,
         });
-        yield* append(current.delegationId, "speakable", {
-          runId: run.id,
-          status: run.status,
-          ...(result && bounded(result, 6000)
-            ? { actualAgentResult: result, sourceMessageIds: finals.map((message) => message.id) }
-            : {
-                note: result
-                  ? "The result is too long for voice; read the written T3 result."
-                  : "No final authored result is available. Do not invent one.",
-              }),
-          scope: "This result does not prove any other work has finished.",
-        });
+        yield* append(
+          current.delegationId,
+          "speakable",
+          {
+            runId: run.id,
+            status: run.status,
+            ...(result
+              ? { actualAgentResult: result, sourceMessageIds: finals.map((message) => message.id) }
+              : {
+                  note: "No final authored result is available. Do not invent one.",
+                }),
+            scope: "This result does not prove any other work has finished.",
+          },
+          {
+            runId: run.id,
+            status: run.status,
+            note: "The result is too long for voice; read the written T3 result.",
+            scope: "This result does not prove any other work has finished.",
+          },
+        );
         feedback.delete(run.id);
         progressSourceAt = Math.max(progressSourceAt, yield* Clock.currentTimeMillis);
         narrationGeneration++;
@@ -643,8 +691,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
           !phases.get(message.id)?.streaming &&
           DateTime.toEpochMillis(message.updatedAt) >= humanAt &&
           DateTime.toEpochMillis(message.updatedAt) > progressSourceAt &&
-          now - DateTime.toEpochMillis(message.updatedAt) <= PROGRESS_FRESH_MS &&
-          bounded(message.text, 4000),
+          now - DateTime.toEpochMillis(message.updatedAt) <= PROGRESS_FRESH_MS,
       );
       const commentary = candidates.at(-1);
       if (
@@ -669,13 +716,22 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       current.progress++;
       progressAt = now;
       progressSourceAt = sourceAt;
-      yield* append(current.delegationId, "speakable", {
-        status: "progress",
-        runId: current.runId,
-        actualAgentCommentary: message.text,
-        sourceMessageIds: [message.id],
-        note: "Progress, not a final answer.",
-      });
+      yield* append(
+        current.delegationId,
+        "speakable",
+        {
+          status: "progress",
+          runId: current.runId,
+          actualAgentCommentary: message.text,
+          sourceMessageIds: [message.id],
+          note: "Progress, not a final answer.",
+        },
+        {
+          status: "progress",
+          runId: current.runId,
+          note: "Progress, not a final answer. Read the written T3 result.",
+        },
+      );
     }
   });
   yield* Effect.addFinalizer(() =>
@@ -694,7 +750,10 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
   );
   return {
     stop,
-    receive: (event: NativeLiveEvent) => receive(event).pipe(Effect.mapError(fail)),
+    receive: (event: NativeLiveEvent) =>
+      receive(event).pipe(
+        Effect.mapError((error) => (Schema.is(LiveConnectionError)(error) ? error : fail())),
+      ),
     bind: ensureThread().pipe(Effect.asVoid, Effect.mapError(fail)),
     seed: seed().pipe(Effect.mapError(fail)),
     poll: poll().pipe(Effect.mapError(fail)),

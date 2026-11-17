@@ -1,3 +1,6 @@
+import { cliReleaseChannelOf } from "@t3tools/shared/cliRelease";
+import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
+
 import packageJson from "../../package.json" with { type: "json" };
 import { BUILD_MIGRATION_HEAD, recordedMigrations } from "../persistence/databaseMigrationHead.ts";
 import { skippedV2Migrations } from "../persistence/Migrations.ts";
@@ -36,8 +39,15 @@ export function runServicePreflight(input: {
       // reinstall itself and report success, so name the exact install and the path check.
       reason: [
         `The installed service launcher speaks protocol ${launcherProtocol}, but t3@${version} requires protocol ${SERVICE_LAUNCHER_PROTOCOL}.`,
-        `On the server machine, install this exact CLI: \`curl -fsSL https://t3.codes/install.sh | T3CODE_VERSION=${version} sh\`.`,
-        `Check that \`t3 --version\` prints ${version} and that \`which -a t3\` lists no older t3 (such as an npm or nvm install) first, then run \`~/.local/bin/t3 service install\` (the installer's default path).`,
+        ...(cliReleaseChannelOf(version) === "voice"
+          ? [
+              `Use the matching Voice ${version} release at ${FORK_DESKTOP.releasesUrl} and follow its manual Docker server instructions. The bundle needs a separate pinned Node image and authenticated provider CLIs; standalone automatic updates are not shipped.`,
+              `Check that \`t3 --version\` prints ${version} and \`which -a t3\` does not select an upstream CLI. Do not use an upstream installer or service launcher for this build.`,
+            ]
+          : [
+              `On the server machine, install this exact CLI: \`curl -fsSL https://t3.codes/install.sh | T3CODE_VERSION=${version} sh\`.`,
+              `Check that \`t3 --version\` prints ${version} and that \`which -a t3\` lists no older t3 (such as an npm or nvm install) first, then run \`~/.local/bin/t3 service install\` (the installer's default path).`,
+            ]),
         "Updating the desktop app does not update this CLI, and `t3 service update` only repairs the service with whichever CLI runs it.",
       ].join(" "),
     };

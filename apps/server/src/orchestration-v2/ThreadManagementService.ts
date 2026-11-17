@@ -158,6 +158,7 @@ export interface ThreadManagementSendInput {
   readonly modelSelection?: ModelSelection;
   readonly mode: ThreadManagementSendMode;
   readonly expectedUserMessageCount?: number;
+  readonly expectedModelSelection?: ModelSelection;
   /** Start a new provider session; the orchestrator queues it instead of steering. */
   readonly freshContext?: boolean;
   readonly createdBy: OrchestrationV2Actor;
@@ -399,7 +400,10 @@ export interface ThreadManagementServiceShape {
   ) => Effect.Effect<void, LegacyV1ThreadImporter.LegacyV1ThreadImportError>;
   readonly dispatch: (
     command: OrchestrationV2ServerCommand,
-    options?: { readonly expectedUserMessageCount?: number },
+    options?: {
+      readonly expectedUserMessageCount?: number;
+      readonly expectedModelSelection?: ModelSelection;
+    },
   ) => Effect.Effect<
     Orchestrator.OrchestratorV2DispatchResult,
     Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
@@ -906,19 +910,21 @@ const make = Effect.gen(function* () {
 
     // Restore before accepting a new send; a replay keeps its prior answer.
     if (dispatchMode.type !== "steer_active") {
-      yield* worktreeRestore.restore(target.thread).pipe(
-        Effect.catch((cause) =>
-          hasReceipt(input.commandId).pipe(
-            Effect.flatMap((replay) =>
-              replay
-                ? Effect.void
-                : Effect.fail(
-                    new ThreadManagementWorktreeRestoreError({ threadId: input.threadId, cause }),
-                  ),
+      yield* worktreeRestore
+        .restore(target.thread)
+        .pipe(
+          Effect.catch((cause) =>
+            hasReceipt(input.commandId).pipe(
+              Effect.flatMap((replay) =>
+                replay
+                  ? Effect.void
+                  : Effect.fail(
+                      new ThreadManagementWorktreeRestoreError({ threadId: input.threadId, cause }),
+                    ),
+              ),
             ),
           ),
-        ),
-      );
+        );
     }
 
     const dispatched = yield* dispatch(
@@ -939,9 +945,16 @@ const make = Effect.gen(function* () {
         createdBy: input.createdBy,
         creationSource: input.creationSource,
       },
-      input.expectedUserMessageCount === undefined
+      input.expectedUserMessageCount === undefined && input.expectedModelSelection === undefined
         ? undefined
-        : { expectedUserMessageCount: input.expectedUserMessageCount },
+        : {
+            ...(input.expectedUserMessageCount === undefined
+              ? {}
+              : { expectedUserMessageCount: input.expectedUserMessageCount }),
+            ...(input.expectedModelSelection === undefined
+              ? {}
+              : { expectedModelSelection: input.expectedModelSelection }),
+          },
     );
     const projection = yield* getProjectThreadRecords(input, ["runs", "messages", "turnItems"], {
       messageIds: [input.messageId],

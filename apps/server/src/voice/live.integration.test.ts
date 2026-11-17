@@ -264,9 +264,12 @@ const setup = Effect.fn("LiveIntegration.setup")(function* (
     ),
     Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
   );
+  let providerEnabled = true;
   const provider: ProviderInstance = {
     instanceId,
-    enabled: true,
+    get enabled() {
+      return providerEnabled;
+    },
     driverKind: driver,
     displayName: undefined,
     continuationIdentity: { driverKind: driver, continuationKey: "fictional" },
@@ -403,6 +406,10 @@ const setup = Effect.fn("LiveIntegration.setup")(function* (
   );
   return {
     controller,
+    revoke: Context.get(services, SessionStore.SessionStore).revoke(session.sessionId),
+    disable: Effect.sync(() => {
+      providerEnabled = false;
+    }),
     browserEvents,
     nativeFrames,
     providerEvents,
@@ -434,9 +441,9 @@ const setup = Effect.fn("LiveIntegration.setup")(function* (
   };
 });
 
-it.effect(
-  "controller → authenticated route → native delegation → one normal T3 provider turn → canonical result → Stop",
-  () =>
+it.effect.each([false, true])(
+  "controller → authenticated route → native delegation → one normal T3 provider turn → canonical result → Stop (escaped result: %s)",
+  (escaped) =>
     Effect.scoped(
       Effect.gen(function* () {
         const f = yield* setup("refresh");
@@ -552,7 +559,9 @@ it.effect(
           completedAt: now,
         };
         const finalId = MessageId.make("fictional-authored-result");
-        const final = "Inspected the fictional configuration. No files were changed.";
+        const final = escaped
+          ? '"\\\n'.repeat(1500)
+          : "Inspected the fictional configuration. No files were changed.";
         const finalWritten = yield* f.orchestrator.streamDomainEvents.pipe(
           Stream.filter(
             (event) => event.type === "message.updated" && event.payload.id === finalId,
@@ -610,9 +619,11 @@ it.effect(
           (event) => event.type === "live.agent" && event.status === "completed",
         );
         const result = yield* take(f.nativeFrames, (frame) =>
-          JSON.stringify(frame).includes("actualAgentResult"),
+          JSON.stringify(frame).includes(escaped ? "too long for voice" : "actualAgentResult"),
         );
-        expect(JSON.stringify(result)).toContain(final);
+        expect(JSON.stringify(result)).toContain(escaped ? "read the written T3 result" : final);
+        expect(f.controller.state.phase).toBe("connected");
+        expect(yield* Queue.size(f.hangups)).toBe(0);
         expect(JSON.stringify(result)).not.toContain("Everything succeeded");
         expect(yield* Queue.size(f.started)).toBe(0);
         const completed = yield* f.management.getThreadRecords(threadId, ["runs", "messages"]);
@@ -802,6 +813,62 @@ it.effect.each(["terminal", "stop-wait"] as const)("%s never retries or admits c
       expect((yield* f.management.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(0);
       expect(f.media.every((media) => media.disposed)).toBe(true);
       expect(f.controller.state.phase).toBe(mode === "terminal" ? "error" : "idle");
+    }),
+  ),
+);
+
+it.effect.each([
+  { change: "revoke", pending: false },
+  { change: "revoke", pending: true },
+  { change: "disable", pending: false },
+  { change: "disable", pending: true },
+  { change: "selection", pending: false },
+  { change: "selection", pending: true },
+] as const)("admission rechecks owner between ticks: %j", ({ change, pending }) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const f = yield* setup("cleanup");
+      yield* Effect.promise(() => f.controller.start());
+      yield* take(f.browserEvents, (event) => event.type === "live.answer");
+      f.native({ type: "session.started", session: { id: "owner-admission" } });
+      yield* take(f.nativeFrames, (frame) => frame.type === "session.context.append");
+      f.native({
+        type: pending ? "turn.created" : "turn.done",
+        turn: { id: "fictional-user-turn", role: "user", transcript: original },
+      });
+      yield* take(f.browserEvents, (event) => event.type === "live.caption");
+      if (pending) {
+        f.native(nativeDelegation("owner-admission"));
+        f.native({ type: "turn.delta", turn_id: "fictional-user-turn", delta: "." });
+        yield* take(f.browserEvents, (event) => event.type === "live.caption");
+        expect((yield* f.management.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(0);
+      }
+      if (change === "selection")
+        yield* f.orchestrator.dispatch({
+          type: "thread.model-selection.set",
+          commandId: CommandId.make("owner-switch"),
+          threadId,
+          modelSelection: { instanceId, model: "gpt-6" },
+        });
+      else yield* f[change];
+      if (pending)
+        f.native({
+          type: "turn.done",
+          turn: { id: "fictional-user-turn", role: "user", transcript: original },
+        });
+      else f.native(nativeDelegation("owner-admission"));
+      const outcome = yield* take(
+        f.browserEvents,
+        (event) =>
+          event.type === "live.agent" || (event.type === "live.status" && event.phase === "error"),
+      );
+      expect(outcome).toMatchObject({
+        type: "live.status",
+        phase: "error",
+        reason: "connection-changed",
+      });
+      expect((yield* f.management.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(0);
+      expect(yield* Queue.size(f.started)).toBe(0);
     }),
   ),
 );
