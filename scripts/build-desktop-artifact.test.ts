@@ -532,6 +532,51 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         channel: "latest",
       });
       assert.deepEqual(config.extraMetadata, { t3VoiceUpdate: voice });
+      const candidate = {
+        ...voice,
+        track: "voice-candidate" as const,
+        feedUrl: "https://github.com/NotRllyRn/t3code-voice/releases/download/voice-candidate/",
+      };
+      const candidateConfig = yield* createBuildConfig(
+        "mac",
+        "zip",
+        "0.1.10-voice.2",
+        true,
+        false,
+        4141,
+        undefined,
+        undefined,
+        "arm64",
+        candidate,
+      );
+      assert.deepEqual(candidateConfig.publish, {
+        provider: "generic",
+        url: candidate.feedUrl,
+        channel: "latest",
+      });
+      assert.deepEqual(candidateConfig.extraMetadata, { t3VoiceUpdate: candidate });
+      assert.include(candidateConfig.productName as string, "Candidate — Not Production");
+      assert.nestedPropertyVal(
+        candidateConfig,
+        "mac.extendInfo.ElectronSquirrelPreventDowngrades",
+        true,
+      );
+      assert.nestedPropertyVal(candidateConfig, "mac.bundleShortVersion", "0.1.10002");
+      const crossMixed = yield* Effect.result(
+        createBuildConfig(
+          "mac",
+          "zip",
+          "0.1.10-voice.2",
+          true,
+          false,
+          4141,
+          undefined,
+          undefined,
+          "arm64",
+          { ...candidate, feedUrl: voice.feedUrl },
+        ),
+      );
+      assert.equal(crossMixed._tag, "Failure");
       assert.equal(config.generateUpdatesFilesForAllChannels, false);
       assert.include((config.mac as { sign: string }).sign, "sign-voice-macos.ts");
       assert.equal((config.mac as { hardenedRuntime: boolean }).hardenedRuntime, true);

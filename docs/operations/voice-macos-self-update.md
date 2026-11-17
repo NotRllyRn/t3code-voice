@@ -21,11 +21,17 @@ These are absolute private-file paths, not PEM contents or passwords. The privat
 
 The optional driver recursively signs nested code and the outer bundle with the same identity, hardened runtime and the product's JIT/native-library/audio/camera entitlement set, then checks native strict/deep/all-architecture integrity and publisher/bundle identity. This entitlement/signing combination still needs a real product launch and update test; the earlier minimal fixture did not prove it. No Gatekeeper, quarantine, or native update verification bypass is added.
 
+## Candidate test feed (not production)
+
+A separate, build-time-only `T3VOICE_MAC_UPDATE_TRACK=voice-candidate` opt-in requires the exact `T3VOICE_MAC_UPDATE_FEED=https://github.com/NotRllyRn/t3code-voice/releases/download/voice-candidate/`. The omitted track defaults to `voice-stable` with its existing exact URL. Cross-mixed tracks/URLs and every other URL fail. No runtime environment override is supported; both tracks use the same publisher and native signature checks. Candidate apps are named **T3 Code Voice Candidate — Not Production**.
+
+The candidate release must be a public prerelease, never latest, titled **Test feed — do not install**. Check that the tag is unused before building/publishing; never overwrite existing candidate assets. Publish only reviewed B ZIP/feed assets from committed source on a feature branch. Disposable test certificates are only for owned candidate profiles, not production trust or a new user release. Existing manual apps remain manual; testing needs an explicit candidate A bootstrap. Retain published assets until the release manager decides otherwise.
+
 ## Feed and versions
 
 Use the shared Voice release contract: `0.1.10-voice.1` → `0.1.10-voice.2`, or `0.1.11-voice.1`. Do not relabel upstream nightly versions as Voice stable. Only strictly newer Voice versions on the `latest` desktop channel are offered; prerelease SemVer here describes the fork version, not a nightly track.
 
-The builder explicitly publishes generic-provider metadata on `latest` (macOS filename `latest-mac.yml`) even though the version contains `-voice.N`. Publish the generated ZIP, its blockmap, and matching YAML under the fork's `voice-stable` release asset path. Do not hand-edit checksums or rename artifacts behind YAML. Stage assets first and replace metadata last. Release workflows, version bumps, tag/asset permissions and publication remain release-manager work; this change does not publish anything.
+The builder explicitly publishes generic-provider metadata on `latest` (macOS filename `latest-mac.yml`) even though the version contains `-voice.N`. Publish the generated ZIP, its blockmap, and matching YAML under the selected track's exact release asset path (`voice-stable` by default; isolated `voice-candidate` only by explicit build opt-in). Do not hand-edit checksums or rename artifacts behind YAML. Stage assets first and replace metadata last. Release workflows, version bumps, tag/asset permissions and publication remain release-manager work; this change does not publish anything.
 
 Opt-in builds keep package/feed/runtime versions semantic, but encode `A.B.C-voice.R` as native `CFBundleShortVersionString = A.B.(1000*C+R)`. Components must be canonical nonnegative ASCII integers; revisions are 1–999 and all three native components must be ≤2,147,483,647 (a conservative product limit, not an Apple limit). Overflow, other prereleases and build metadata fail the build. The radix must not change for this track. For example `.10-voice.999` maps to `.10999`, then `.11-voice.1` maps to `.11001`. Native About/Finder may display the numeric value.
 

@@ -30,7 +30,18 @@ it.effect(
         )).message,
         /Unsupported Voice native/,
       );
+      for (const env of [
+        { ...full, T3VOICE_MAC_UPDATE_TRACK: "voice-candidate" },
+        { ...full, T3VOICE_MAC_UPDATE_TRACK: "anything" },
+        { ...full, T3VOICE_MAC_UPDATE_FEED: "https://example.com/" },
+      ]) {
+        assert.match(
+          (yield* Effect.flip(resolveVoiceMacUpdate(env, input))).message,
+          /Invalid fork feed/,
+        );
+      }
       for (const [env, build] of [
+        [{ T3VOICE_MAC_UPDATE_TRACK: "voice-candidate" }, input],
         [{ T3VOICE_MAC_UPDATE_FEED: VOICE_UPDATE_FEED }, input],
         [full, { ...input, signed: false }],
         [full, { ...input, platform: "linux" }],

@@ -77,7 +77,11 @@ export const resolveVoiceMacUpdate = Effect.fn("VoiceMacSigning.resolve")(functi
   env: NodeJS.ProcessEnv,
   input: { platform: string; target: string; version: string; signed: boolean; repoRoot: string },
 ) {
-  if (!variables.some((key) => env[key] !== undefined)) return undefined;
+  if (
+    !variables.some((key) => env[key] !== undefined) &&
+    env.T3VOICE_MAC_UPDATE_TRACK === undefined
+  )
+    return undefined;
   if (
     variables.some((key) => !env[key]) ||
     input.platform !== "mac" ||
@@ -92,6 +96,14 @@ export const resolveVoiceMacUpdate = Effect.fn("VoiceMacSigning.resolve")(functi
     try: () => encodeVoiceMacVersion(input.version),
     catch: () => new VoiceMacSigningError({ message: "Unsupported Voice native macOS version" }),
   });
+  const track = env.T3VOICE_MAC_UPDATE_TRACK ?? "voice-stable";
+  if (
+    !parseVoiceUpdateConfig(
+      { track, feedUrl: env.T3VOICE_MAC_UPDATE_FEED, publisherSha1: "0".repeat(40) },
+      input.version,
+    )
+  )
+    return yield* new VoiceMacSigningError({ message: "Invalid fork feed or Voice track" });
   const cert = yield* privateFile(env.T3VOICE_MAC_CERT!, input.repoRoot);
   const key = yield* privateFile(env.T3VOICE_MAC_KEY!, input.repoRoot);
   yield* privateFile(env.T3VOICE_RCODESIGN!, input.repoRoot);
@@ -133,7 +145,7 @@ export const resolveVoiceMacUpdate = Effect.fn("VoiceMacSigning.resolve")(functi
   ]);
   const config = parseVoiceUpdateConfig(
     {
-      track: "voice-stable",
+      track,
       feedUrl: env.T3VOICE_MAC_UPDATE_FEED,
       publisherSha1: fingerprint.trim().split("=").at(-1)?.replaceAll(":", "").toLowerCase(),
     },
@@ -158,6 +170,9 @@ export const signVoiceMacApp = Effect.fn("VoiceMacSigning.sign")(function* (
   // Validate the final builder plist against the packaged semantic version before sealing it.
   yield* verifyVoiceMacBundleVersion(app, version);
   const env = yield* Config.all({
+    T3VOICE_MAC_UPDATE_TRACK: Config.String("T3VOICE_MAC_UPDATE_TRACK").pipe(
+      Config.withDefault("voice-stable"),
+    ),
     T3VOICE_MAC_UPDATE_FEED: Config.String("T3VOICE_MAC_UPDATE_FEED"),
     T3VOICE_MAC_CERT: Config.String("T3VOICE_MAC_CERT"),
     T3VOICE_MAC_KEY: Config.String("T3VOICE_MAC_KEY"),

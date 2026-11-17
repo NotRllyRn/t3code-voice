@@ -14,7 +14,20 @@ const config = {
 describe("Voice stable update boundary", () => {
   it("requires an explicit fork feed, track, identity and Voice version", () => {
     expect(parseVoiceUpdateConfig(config, "0.1.10-voice.1")?.feedUrl).toBe(VOICE_UPDATE_FEED);
+    const candidate = {
+      ...config,
+      track: "voice-candidate",
+      feedUrl: "https://github.com/NotRllyRn/t3code-voice/releases/download/voice-candidate/",
+    };
+    expect(parseVoiceUpdateConfig(candidate, "0.1.10-voice.1")).toEqual(candidate);
     for (const invalid of [
+      { ...candidate, feedUrl: config.feedUrl },
+      { ...config, feedUrl: candidate.feedUrl },
+      { ...candidate, feedUrl: candidate.feedUrl.replace("NotRllyRn", "someone") },
+      { ...candidate, feedUrl: "http://127.0.0.1:18973/good/" },
+      { ...candidate, feedUrl: "https://example.com/voice-candidate/" },
+      { ...candidate, feedUrl: `${candidate.feedUrl}?override=1` },
+      { ...candidate, track: "voice-candidate-20261117" },
       undefined,
       {},
       { ...config, publisherSha1: "-" },

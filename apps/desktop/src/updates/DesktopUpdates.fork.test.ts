@@ -1,5 +1,5 @@
 import { assert, it } from "@effect/vitest";
-import { VOICE_UPDATE_FEED } from "./voiceUpdateConfig.ts";
+import { VOICE_UPDATE_FEED, VOICE_UPDATE_FEEDS } from "./voiceUpdateConfig.ts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as TestClock from "effect/testing/TestClock";
@@ -7,16 +7,16 @@ import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopUpdates from "./DesktopUpdates.ts";
 import { flushCallbacks, makeHarness } from "./updatesTestHarness.ts";
 
-it.effect(
-  "enables only the baked stable Voice feed after native installed-identity validation",
-  () => {
+it.effect.each(Object.entries(VOICE_UPDATE_FEEDS))(
+  "enables only the baked %s feed after native installed-identity validation",
+  ([track, feedUrl]) => {
     const harness = makeHarness({
       appVersion: "0.1.10-voice.1",
       nativeIdentityAccepted: true,
       packageJson: JSON.stringify({
         t3VoiceUpdate: {
-          track: "voice-stable",
-          feedUrl: VOICE_UPDATE_FEED,
+          track,
+          feedUrl,
           publisherSha1: "a".repeat(40),
         },
       }),
@@ -31,7 +31,7 @@ it.effect(
       const updates = yield* DesktopUpdates.DesktopUpdates;
       yield* updates.configure;
       assert.isTrue((yield* updates.getState).enabled);
-      assert.deepEqual(harness.feedUrls(), [{ provider: "generic", url: VOICE_UPDATE_FEED }]);
+      assert.deepEqual(harness.feedUrls(), [{ provider: "generic", url: feedUrl }]);
       assert.equal(harness.updateChannel(), "latest");
       assert.isTrue(harness.allowPrerelease());
       assert.isFalse(harness.allowDowngrade());

@@ -2827,7 +2827,10 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   const buildConfig: Record<string, unknown> = {
     afterPack: (yield* Path.Path).join(yield* RepoRoot, "scripts/prepare-server-compile-cache.cjs"),
     appId: DESKTOP_APP_ID,
-    productName: resolveDesktopProductName(version),
+    productName:
+      voiceUpdate?.track === "voice-candidate"
+        ? "T3 Code Voice Candidate — Not Production"
+        : resolveDesktopProductName(version),
     artifactName: "T3-Code-Voice-${version}-${arch}.${ext}",
     electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
     files: [
