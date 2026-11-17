@@ -3,8 +3,30 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Effect, Sink, Stream } from "effect";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { ChildProcessSpawner } from "effect/process";
-import { resolveVoiceMacUpdate, signVoiceMacApp } from "./voice-mac-signing.ts";
+import {
+  resolveVoiceMacUpdate,
+  signVoiceMacApp,
+  voiceMacRuntimeSigningArgs,
+} from "./voice-mac-signing.ts";
 import { VOICE_UPDATE_FEED } from "../../apps/desktop/src/updates/voiceUpdateConfig.ts";
+
+it("targets the root and every helper executable without the ineffective main scope", () => {
+  assert.deepEqual(
+    voiceMacRuntimeSigningArgs("/private/entitlements.plist", [
+      "Contents/Frameworks/Candidate Helper.app",
+    ]),
+    [
+      "--code-signature-flags",
+      "runtime",
+      "--entitlements-xml-file",
+      "/private/entitlements.plist",
+      "--code-signature-flags",
+      "Contents/Frameworks/Candidate Helper.app:runtime",
+      "--entitlements-xml-file",
+      "Contents/Frameworks/Candidate Helper.app:/private/entitlements.plist",
+    ],
+  );
+});
 
 const input = {
   platform: "mac",

@@ -156,6 +156,20 @@ export const resolveVoiceMacUpdate = Effect.fn("VoiceMacSigning.resolve")(functi
   return config;
 });
 
+// rcodesign's literal `main:` scope does not reach bundle executables in 0.29.0.
+// Use the unscoped root and explicit nested helper bundle paths.
+export function voiceMacRuntimeSigningArgs(
+  entitlements: string,
+  helpers: readonly string[],
+): string[] {
+  return ["", ...helpers].flatMap((scope) => [
+    "--code-signature-flags",
+    `${scope ? `${scope}:` : ""}runtime`,
+    "--entitlements-xml-file",
+    `${scope ? `${scope}:` : ""}${entitlements}`,
+  ]);
+}
+
 export const signVoiceMacApp = Effect.fn("VoiceMacSigning.sign")(function* (
   app: string,
   repoRoot: string,
@@ -196,6 +210,9 @@ export const signVoiceMacApp = Effect.fn("VoiceMacSigning.sign")(function* (
   ]);
   if ((yield* run(signer, ["-C", "/dev/null", "--version"])).trim() !== "apple-codesign 0.29.0")
     return yield* new VoiceMacSigningError({ message: "Unexpected rcodesign version" });
+  const helpers = (yield* fs.readDirectory(path.join(app, "Contents/Frameworks")))
+    .filter((name) => name.endsWith(".app"))
+    .map((name) => `Contents/Frameworks/${name}`);
   yield* run(signer, [
     "-C",
     "/dev/null",
@@ -206,10 +223,10 @@ export const signVoiceMacApp = Effect.fn("VoiceMacSigning.sign")(function* (
     yield* fs.realPath(env.T3VOICE_MAC_CERT),
     "--pem-file",
     yield* fs.realPath(env.T3VOICE_MAC_KEY),
-    "--code-signature-flags",
-    "main:runtime",
-    "--entitlements-xml-file",
-    `main:${path.join(repoRoot, "apps/desktop/resources/entitlements.voice.plist")}`,
+    ...voiceMacRuntimeSigningArgs(
+      path.join(repoRoot, "apps/desktop/resources/entitlements.voice.plist"),
+      helpers,
+    ),
     app,
   ]);
   yield* run("/usr/bin/codesign", [
@@ -220,5 +237,26 @@ export const signVoiceMacApp = Effect.fn("VoiceMacSigning.sign")(function* (
     `-R=${voicePublisherRequirement(config.publisherSha1)}`,
     app,
   ]);
+  for (const bundle of [app, ...helpers.map((helper) => path.join(app, helper))]) {
+    const entitlements = yield* run("/usr/bin/codesign", [
+      "--display",
+      "--entitlements",
+      "-",
+      "--xml",
+      bundle,
+    ]);
+    for (const key of [
+      "allow-jit",
+      "allow-unsigned-executable-memory",
+      "disable-library-validation",
+    ]) {
+      if (
+        !new RegExp(`<key>com\\.apple\\.security\\.cs\\.${key}</key>\\s*<true\\s*/>`).test(
+          entitlements,
+        )
+      )
+        return yield* new VoiceMacSigningError({ message: "Missing Voice runtime entitlements" });
+    }
+  }
   yield* verifyVoiceMacBundleVersion(app, version);
 });
