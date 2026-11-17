@@ -327,7 +327,7 @@ function AboutVersionSection() {
     ? isUpdateActionPending
       ? "Checking…"
       : "Check Voice updates"
-    : actionLabel[action] ?? statusLabel[updateState?.status ?? ""] ?? "Check for Updates";
+    : (actionLabel[action] ?? statusLabel[updateState?.status ?? ""] ?? "Check for Updates");
   const description = manualVoiceUpdates
     ? "Check fork releases for an Apple Silicon Mac DMG. Download and install manually; automatic installation is disabled."
     : action === "download" || action === "install"
