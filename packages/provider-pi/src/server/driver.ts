@@ -91,6 +91,7 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv, Path.Path> = {
     displayName,
     accentColor,
     environment,
+    environmentSecrets,
     enabled,
     config,
   }) {
@@ -106,6 +107,7 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv, Path.Path> = {
     const { environment: processEnv, executable } = yield* resolvePiStartup(
       config,
       mergedEnvironment,
+      environmentSecrets,
     ).pipe(
       Effect.mapError(
         (cause) =>
@@ -153,6 +155,7 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv, Path.Path> = {
       displayName,
       accentColor,
       environment,
+      environmentSecrets,
       enabled,
       config,
     }).pipe(

@@ -23,6 +23,7 @@ import type { ManagedServerProvider } from "./snapshot.ts";
 import type { ProviderTextGeneration } from "./textGeneration.ts";
 import type { ProviderUsageReader } from "./usage.ts";
 import type { LiveConnectionResolver } from "./liveConnection.ts";
+import type { ResolvedEnvironmentSecrets } from "./instanceEnvironment.ts";
 
 export interface ProviderDriverMetadata {
   readonly displayName: string;
@@ -111,6 +112,7 @@ export interface ProviderDriverCreateInput<Config> {
   readonly displayName: string | undefined;
   readonly accentColor?: string | undefined;
   readonly environment: ResolvedProviderInstanceEnvironment;
+  readonly environmentSecrets?: ResolvedEnvironmentSecrets | undefined;
   readonly enabled: boolean;
   readonly config: Config;
 }

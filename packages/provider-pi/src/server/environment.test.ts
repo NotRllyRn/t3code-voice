@@ -25,6 +25,7 @@ import { PiSettings } from "../settings.ts";
 import { PiDriver } from "./driver.ts";
 import { makePiAdapterV2 } from "./adapter.ts";
 import { resolvePiStartup } from "./environment.ts";
+import { recordResolvedEnvironmentSecrets } from "@t3tools/provider-core/server/instanceEnvironment";
 import { buildPiRpcLaunch } from "./mcpInjection.ts";
 import { makePiRpcConnection } from "./rpc.ts";
 
@@ -98,6 +99,178 @@ const contaminated = (dir: string): NodeJS.ProcessEnv => ({
   T3_MCP_BEARER_TOKEN: "stale-native-token",
   T3_PI_RUNTIME_MODE: "full-access",
 });
+
+it.effect("retains only registry-resolved credentials, never inherited or forged provenance", () =>
+  Effect.gen(function* () {
+    const { dir, settings } = yield* fixture;
+    const inherited = { ...contaminated(dir), OPENAI_API_KEY: "inherited-token" };
+    const provenance = recordResolvedEnvironmentSecrets([
+      { name: "OPENAI_API_KEY", value: "scoped-token" },
+    ]);
+    expect(
+      (yield* resolvePiStartup(settings, inherited, provenance)).environment.OPENAI_API_KEY,
+    ).toBe("scoped-token");
+    expect(
+      (yield* resolvePiStartup(settings, inherited)).environment.OPENAI_API_KEY,
+    ).toBeUndefined();
+    expect(JSON.stringify(provenance)).not.toContain("scoped-token");
+    const forged = JSON.parse(JSON.stringify(provenance));
+    const settingsWithForgedProvenance = { ...settings, environmentSecrets: forged };
+    expect(
+      (yield* resolvePiStartup(settingsWithForgedProvenance, inherited)).environment.OPENAI_API_KEY,
+    ).toBeUndefined();
+    const result = yield* Effect.result(resolvePiStartup(settings, inherited, forged));
+    expect(result._tag).toBe("Failure");
+    expect(JSON.stringify(result)).not.toContain("scoped-token");
+    expect(
+      (yield* resolvePiStartup({ ...settings, environmentMode: "inherit" }, inherited)).environment,
+    ).toBe(inherited);
+  }).pipe(Effect.scoped),
+);
+
+it.effect.each([
+  "PATH",
+  "HOME",
+  "PI_CODING_AGENT_DIR",
+  "PI_TEST",
+  "NODE_OPTIONS",
+  "LD_PRELOAD",
+  "DYLD_INSERT_LIBRARIES",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "T3_MCP_BEARER_TOKEN",
+  "T3_ACP_MCP_TOKEN",
+  "GH_TOKEN",
+  "openai_api_key",
+])("rejects resolved secret key %s without exposing its value", (name) =>
+  Effect.gen(function* () {
+    const { settings } = yield* fixture;
+    const result = yield* Effect.result(
+      resolvePiStartup(
+        settings,
+        {},
+        recordResolvedEnvironmentSecrets([{ name, value: "denied-secret-canary" }]),
+      ),
+    );
+    expect(result._tag).toBe("Failure");
+    expect(JSON.stringify(result)).not.toContain("denied-secret-canary");
+  }).pipe(Effect.scoped),
+);
+
+it.effect("checks operator models.json before launch without changing exact model metadata", () =>
+  Effect.gen(function* () {
+    const { dir, settings } = yield* fixture;
+    const path = `${dir}/home/agent/models.json`;
+    const metadata = {
+      providers: {
+        gateway: {
+          baseUrl: "https://gateway.example.test/v1",
+          api: "openai-completions",
+          apiKey: "OPENAI_API_KEY",
+          headers: {
+            "hTtP-ReFeReR": "https://example.test",
+            "x-TiTlE": "Coding client",
+            Authorization: "$OPENAI_API_KEY",
+            "X-Api-Key": "${OPENAI_API_KEY}",
+          },
+          models: [
+            {
+              id: "exact/model",
+              name: "Exact Model",
+              reasoning: true,
+              input: ["text"],
+              contextWindow: 123456,
+              maxTokens: 1234,
+              cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+            },
+          ],
+        },
+      },
+    };
+    const text = JSON.stringify(metadata);
+    NodeFS.writeFileSync(path, text);
+    yield* resolvePiStartup(settings, {});
+    expect(NodeFS.readFileSync(path, "utf8")).toBe(text);
+    for (const override of [
+      { apiKey: "!echo command-secret-canary" },
+      { apiKey: "raw-secret-canary" },
+      { headers: { Authorization: "raw-secret-canary" } },
+      { headers: { "X-Api-Key": "raw-secret-canary" } },
+      { headers: { "X-Unknown": "public-looking-secret-canary" } },
+      { headers: { "HTTP-Referer": "!echo command-secret-canary" } },
+      { headers: { "X-Title": "  !echo command-secret-canary" } },
+      { headers: { "X-Title": 123 } },
+      { headers: { Authorization: "!echo command-secret-canary" } },
+      { models: [{ id: "x", headers: { Authorization: "!echo command-secret-canary" } }] },
+      { apiKey: "$GH_TOKEN" },
+      { modelOverrides: { "exact/model": { headers: { Authorization: "!echo secret-canary" } } } },
+    ]) {
+      NodeFS.writeFileSync(
+        path,
+        JSON.stringify({ providers: { gateway: { ...metadata.providers.gateway, ...override } } }),
+      );
+      const result = yield* Effect.result(resolvePiStartup(settings, {}));
+      expect(result._tag).toBe("Failure");
+      expect(JSON.stringify(result)).not.toContain("secret-canary");
+      expect(NodeFS.existsSync(`${dir}/launches`)).toBe(false);
+    }
+    NodeFS.writeFileSync(path, '{"apiKey":"malformed-secret-canary');
+    const malformed = yield* Effect.result(resolvePiStartup(settings, {}));
+    expect(malformed._tag).toBe("Failure");
+    expect(JSON.stringify(malformed)).not.toContain("malformed-secret-canary");
+  }).pipe(Effect.scoped),
+);
+
+it.live.each(["--api-key cli-secret-canary", "--api-key=cli-secret-canary"])(
+  "rejects clean driver startup before any spawn for %s",
+  (launchArgs) =>
+    Effect.gen(function* () {
+      const { dir, settings } = yield* fixture;
+      const config = { ...settings, launchArgs };
+      const layer = Layer.mergeAll(
+        TestProviderHost.layer({
+          cwd: dir,
+          settings: { ...DEFAULT_SERVER_SETTINGS, enableProviderUpdateChecks: false },
+          runBackgroundWork: false,
+        }),
+        IdAllocator.layer,
+        McpProviderSessions.layer,
+        ProviderLatestVersions.layer,
+        Layer.succeed(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Unexpected network")),
+        ),
+      ).pipe(Layer.provideMerge(NodeServices.layer));
+      const result = yield* Effect.gen(function* () {
+        const instance = yield* PiDriver.create({
+          instanceId: ProviderInstanceId.make("pi-clean-cli-test"),
+          displayName: undefined,
+          enabled: true,
+          environment: [],
+          config,
+        });
+        yield* instance.snapshot.refresh;
+      }).pipe(
+        Effect.result,
+        Effect.provide(layer),
+        Effect.provideService(HostProcess.Environment, contaminated(dir)),
+      );
+      expect(NodeFS.existsSync(`${dir}/launches`)).toBe(false);
+      expect(NodeFS.existsSync(`${dir}/canary`)).toBe(false);
+      expect(result).toMatchObject({
+        _tag: "Failure",
+        failure: {
+          detail: "Invalid Pi startup environment.",
+          cause: { cause: { message: "Clean Pi does not allow --api-key launch arguments." } },
+        },
+      });
+      expect(JSON.stringify(result)).not.toContain("cli-secret-canary");
+      const inherited = contaminated(dir);
+      expect(
+        (yield* resolvePiStartup({ ...config, environmentMode: "inherit" }, inherited)).environment,
+      ).toBe(inherited);
+    }).pipe(Effect.scoped),
+);
 
 it.live.each(["/usr/bin/env node", process.execPath])(
   "blocks inherited startup code before %s, retaining exact native MCP argv and fresh transport",
@@ -247,6 +420,9 @@ it.live(
             environment: [
               { name: "GH_TOKEN", value: "synthetic-instance-secret", sensitive: true },
             ],
+            environmentSecrets: recordResolvedEnvironmentSecrets([
+              { name: "OPENAI_API_KEY", value: "synthetic-scoped-key" },
+            ]),
             config: aliasedSettings,
           });
           NodeFS.writeFileSync(
@@ -331,6 +507,8 @@ it.live(
         expect(report.env.PI_CODING_AGENT_DIR).toBe(`${dir}/home/agent`);
         expect(report.env.NODE_OPTIONS).toBeUndefined();
         expect(report.env.GH_TOKEN).toBeUndefined();
+        expect(report.env.OPENAI_API_KEY).toBe("synthetic-scoped-key");
+        expect(report.args.join(" ")).not.toContain("synthetic-scoped-key");
         expect(JSON.stringify(report)).not.toContain("synthetic-canary");
       }
     }).pipe(Effect.scoped),

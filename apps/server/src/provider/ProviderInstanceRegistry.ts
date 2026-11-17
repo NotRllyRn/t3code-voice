@@ -30,6 +30,7 @@ import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretReso
 import { buildUnavailableProviderSnapshot } from "./unavailableProviderSnapshot.ts";
 import * as ProviderInstanceRegistryMutator from "./ProviderInstanceRegistryMutator.ts";
 import type { AnyProviderDriver, ProviderInstance } from "@t3tools/provider-core/server/driver";
+import { recordResolvedEnvironmentSecrets } from "@t3tools/provider-core/server/instanceEnvironment";
 
 export class ProviderInstanceRegistry extends Context.Service<
   ProviderInstanceRegistry,
@@ -47,6 +48,7 @@ export class ProviderInstanceRegistry extends Context.Service<
 
 interface InstanceSecrets {
   readonly environment: ResolvedProviderInstanceEnvironment;
+  readonly referencedEnvironment: ReadonlyArray<{ readonly name: string; readonly value: string }>;
   readonly config: ReadonlyArray<SettingsSecretSlot & { readonly value: string }>;
 }
 
@@ -129,6 +131,7 @@ const readInstanceSecrets = Effect.fn("ProviderInstanceRegistry.readInstanceSecr
     const secret = values[index++];
     return secret === undefined || secret.trim() === "" ? undefined : secret;
   };
+  const referencedEnvironment: Array<{ readonly name: string; readonly value: string }> = [];
   const environment: ResolvedProviderInstanceEnvironment = variables.flatMap((variable) => {
     if (typeof variable.value === "string") return [{ ...variable, value: variable.value }];
     const secret = next();
@@ -136,6 +139,7 @@ const readInstanceSecrets = Effect.fn("ProviderInstanceRegistry.readInstanceSecr
       unreadable.push(variable.name);
       return [];
     }
+    referencedEnvironment.push({ name: variable.name, value: secret });
     return [{ ...variable, value: secret, sensitive: true }];
   });
   const config = configFields.flatMap(({ field, key }) => {
@@ -144,7 +148,7 @@ const readInstanceSecrets = Effect.fn("ProviderInstanceRegistry.readInstanceSecr
     unreadable.push(field);
     return [];
   });
-  const secrets: InstanceSecrets = { environment, config };
+  const secrets: InstanceSecrets = { environment, referencedEnvironment, config };
   return { secrets, unreadable };
 });
 
@@ -163,12 +167,20 @@ const carryCheckedSecret = <R>(
   const replacedSlots = configSecretReferences(driver, entry).filter(({ reference }) =>
     matches(reference),
   );
+  const environment = current.environment.map((variable, index) => {
+    const source = variables[index]?.value;
+    return source !== undefined && typeof source !== "string" && matches(source)
+      ? { ...variable, value }
+      : variable;
+  });
   return {
-    environment: current.environment.map((variable, index) => {
+    environment,
+    // Trust follows the original reference slots, never a duplicate name or sensitive flag.
+    referencedEnvironment: environment.flatMap((variable, index) => {
       const source = variables[index]?.value;
-      return source !== undefined && typeof source !== "string" && matches(source)
-        ? { ...variable, value }
-        : variable;
+      return source !== undefined && typeof source !== "string"
+        ? [{ name: variable.name, value: variable.value }]
+        : [];
     }),
     config: current.config.map((slot) =>
       replacedSlots.some(({ field, key }) => field === slot.field && key === slot.key)
@@ -297,7 +309,11 @@ const buildEntry = Effect.fn("ProviderInstanceRegistry.buildEntry")(function* <R
     : enabled
       ? yield* readInstanceSecrets(driver, entry)
       : {
-          secrets: { environment: withoutSecretReferences(entry.environment ?? []), config: [] },
+          secrets: {
+            environment: withoutSecretReferences(entry.environment ?? []),
+            referencedEnvironment: [],
+            config: [],
+          },
           unreadable: [],
         };
   // Starting with a blank credential would fail later with a less useful error, or fall back to
@@ -324,6 +340,7 @@ const buildEntry = Effect.fn("ProviderInstanceRegistry.buildEntry")(function* <R
       displayName: entry.displayName,
       accentColor: entry.accentColor,
       environment: secrets.environment,
+      environmentSecrets: recordResolvedEnvironmentSecrets(secrets.referencedEnvironment),
       enabled,
       config:
         secrets.config.length === 0

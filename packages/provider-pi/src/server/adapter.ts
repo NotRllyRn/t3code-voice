@@ -49,7 +49,10 @@ import { providerMessageTextWithAttachmentPaths } from "@t3tools/provider-core/s
 import { mcpToolPresentation } from "@t3tools/provider-core/server/mcpToolPresentation";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import { parsePiCompactCommand, type PiCompactCommand } from "./commands.ts";
-import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
+import {
+  mergeProviderInstanceEnvironment,
+  type ResolvedEnvironmentSecrets,
+} from "@t3tools/provider-core/server/instanceEnvironment";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
@@ -201,6 +204,7 @@ export interface PiAdapterV2Options {
   readonly instanceId: ProviderInstanceId;
   readonly settings: PiSettings;
   readonly environment: NodeJS.ProcessEnv;
+  readonly environmentSecrets?: ResolvedEnvironmentSecrets | undefined;
   readonly continuationRequests?: {
     readonly offer: (
       request: ProviderContinuationRequests.ProviderContinuationRequest,
@@ -462,6 +466,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
   const { environment, executable } = yield* resolvePiStartup(
     { ...options.settings, environmentMode },
     options.environment,
+    options.environmentSecrets,
   );
 
   const protocolError = (detail: string, payload?: unknown) =>
@@ -4237,6 +4242,7 @@ export const PiAdapterV2Driver: ProviderAdapterDriver<PiSettings, PiAdapterV2Dri
         instanceId: input.instanceId,
         settings: { ...input.config, enabled: input.enabled },
         environment: yield* mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+        environmentSecrets: input.environmentSecrets,
         continuationRequests,
       });
     },

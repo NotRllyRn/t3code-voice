@@ -5,7 +5,12 @@ import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { tokenizeCliArgs } from "@t3tools/shared/cliArgs";
 import type { PiSettings } from "../settings.ts";
+import {
+  readResolvedEnvironmentSecrets,
+  type ResolvedEnvironmentSecrets,
+} from "@t3tools/provider-core/server/instanceEnvironment";
 
 class PiEnvironmentError extends Schema.TaggedError<PiEnvironmentError>()("PiEnvironmentError", {
   cause: Schema.Defect(),
@@ -111,9 +116,50 @@ function resolveExecutable(
   return { command: node, args: [path] };
 }
 
+function validateModelsRegistry(agentDirectory: string): void {
+  const path = NodePath.join(agentDirectory, "models.json");
+  if (!NodeFS.existsSync(path)) return;
+  let registry: unknown;
+  try {
+    registry = JSON.parse(NodeFS.readFileSync(path, "utf8"));
+  } catch {
+    throw new Error("Clean Pi requires a valid operator models registry.");
+  }
+  const credentialReference = (value: unknown) =>
+    value === "OPENAI_API_KEY" || value === "$OPENAI_API_KEY" || value === "${OPENAI_API_KEY}";
+  const visit = (value: unknown): void => {
+    if (typeof value === "string" && value.trimStart().startsWith("!"))
+      throw new Error("Clean Pi does not allow command resolvers in its models registry.");
+    if (value === null || typeof value !== "object") return;
+    for (const [key, child] of Object.entries(value)) {
+      if (key === "apiKey" && !credentialReference(child))
+        throw new Error("Clean Pi registry credentials must reference OPENAI_API_KEY.");
+      if (key === "headers") {
+        if (
+          child === null ||
+          typeof child !== "object" ||
+          Array.isArray(child) ||
+          Object.entries(child).some(
+            ([name, header]) =>
+              !credentialReference(header) &&
+              !(
+                ["http-referer", "x-title"].includes(name.toLowerCase()) &&
+                typeof header === "string"
+              ),
+          )
+        )
+          throw new Error("Clean Pi registry headers must reference OPENAI_API_KEY.");
+      }
+      visit(child);
+    }
+  };
+  visit(registry);
+}
+
 export const resolvePiStartup = Effect.fn("Pi.resolveStartup")(function* (
   settings: PiSettings,
   inherited: NodeJS.ProcessEnv,
+  environmentSecrets?: ResolvedEnvironmentSecrets,
 ) {
   if (settings.environmentMode === "inherit")
     return {
@@ -125,6 +171,13 @@ export const resolvePiStartup = Effect.fn("Pi.resolveStartup")(function* (
     try: () => {
       if (settings.environmentMode !== "clean" || platform === "win32") {
         throw new Error("Unsupported Pi startup environment mode or platform.");
+      }
+      if (
+        tokenizeCliArgs(settings.launchArgs).some(
+          (arg) => arg === "--api-key" || arg.startsWith("--api-key="),
+        )
+      ) {
+        throw new Error("Clean Pi does not allow --api-key launch arguments.");
       }
       const config = settings.cleanEnvironment;
       if (config === undefined)
@@ -145,7 +198,17 @@ export const resolvePiStartup = Effect.fn("Pi.resolveStartup")(function* (
       if (config.pathDirectories.length === 0) throw new Error("Clean Pi requires a trusted PATH.");
       const pathDirectories = config.pathDirectories.map((entry) => trustedPath(entry, true));
       const executable = resolveExecutable(settings.binaryPath, pathDirectories);
-      const environment = {
+      validateModelsRegistry(agentDirectory);
+      const credentials: NodeJS.ProcessEnv = {};
+      for (const secret of readResolvedEnvironmentSecrets(environmentSecrets)) {
+        if (secret.name !== "OPENAI_API_KEY")
+          throw new Error("Clean Pi only accepts the OPENAI_API_KEY secret reference.");
+        if (secret.value.trim() === "" || secret.value.includes("\0"))
+          throw new Error("Clean Pi requires a nonempty environment credential.");
+        credentials.OPENAI_API_KEY = secret.value;
+      }
+      const environment: NodeJS.ProcessEnv = {
+        ...credentials,
         HOME: home,
         PI_CODING_AGENT_DIR: agentDirectory,
         PATH: pathDirectories.join(NodePath.delimiter),
@@ -154,7 +217,7 @@ export const resolvePiStartup = Effect.fn("Pi.resolveStartup")(function* (
         TMPDIR: tempDirectory,
         TMP: tempDirectory,
         TEMP: tempDirectory,
-      } satisfies NodeJS.ProcessEnv;
+      };
       return { environment, executable };
     },
     catch: (cause) => new PiEnvironmentError({ cause }),
