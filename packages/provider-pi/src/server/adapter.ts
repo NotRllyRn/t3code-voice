@@ -75,6 +75,7 @@ import {
 } from "./mcpInjection.ts";
 import { PI_FILE_CHANGE_TOOLS, PI_T3_SERVICE_TIER_COMMAND } from "./mcpExtensionSource.ts";
 import { PI_STANDARD_SERVICE_TIER } from "./modelCapabilities.ts";
+import { resolvePiStartup } from "./environment.ts";
 
 export const PI_PROVIDER = ProviderDriverKind.make("pi");
 const PI_DRIVER_KIND = PI_PROVIDER;
@@ -437,6 +438,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
   const host = yield* ProviderHost.ProviderHost;
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
   const { continuationRequests } = options;
+  const { environment, executable } = yield* resolvePiStartup(
+    options.settings,
+    options.environment,
+  );
 
   const protocolError = (detail: string, payload?: unknown) =>
     new ProviderAdapter.ProviderAdapterProtocolError({
@@ -482,14 +487,14 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       }
       const launch = buildPiRpcLaunch({
         launchArgs: resolvedLaunchArgs.args,
-        environment: options.environment,
+        environment,
         mcpSession,
         extensionPath,
         runtimeMode: input.runtimePolicy.runtimeMode,
       });
       const scopedLaunch = yield* agentScope.wrap({
-        command: options.settings.binaryPath || "pi",
-        args: launch.args,
+        command: executable.command,
+        args: [...executable.args, ...launch.args],
         name: "pi",
         threadId: input.threadId,
         env: launch.env,
@@ -3334,7 +3339,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             // switch_session/clone alone would retain the source cwd.
             const forkLaunch = buildPiRpcLaunch({
               launchArgs: resolvedLaunchArgs.args,
-              environment: options.environment,
+              environment,
               mcpSession: undefined,
               extensionPath: undefined,
               shortLived: true,
@@ -3344,8 +3349,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             const nativeId = yield* Effect.scoped(
               Effect.gen(function* () {
                 const forkConnection = yield* makePiRpcConnection({
-                  command: options.settings.binaryPath || "pi",
-                  args: [...forkLaunch.args, "--fork", sourceFile],
+                  command: executable.command,
+                  args: [...executable.args, ...forkLaunch.args, "--fork", sourceFile],
                   cwd,
                   env: forkLaunch.env,
                 });

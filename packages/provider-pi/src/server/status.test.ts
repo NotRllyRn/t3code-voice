@@ -120,6 +120,7 @@ const piDiscoverySpawner = (
   });
 
 const settings = {
+  environmentMode: "inherit",
   enabled: true,
   binaryPath: "pi",
   launchArgs: "",
