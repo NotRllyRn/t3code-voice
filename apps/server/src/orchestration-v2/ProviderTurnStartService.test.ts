@@ -1735,9 +1735,27 @@ effectIt.effect("leaves the run starting when a session-open failure will be ret
       text: "Continue",
       openFailure: new Error("provider session rejected"),
     });
-
+    const constraint = {
+      instanceId: harness.newInstanceId,
+      driver: "pi" as const,
+      environmentMode: "clean" as const,
+    };
+    const projection = harness.projection();
+    harness.setProjection({
+      ...projection,
+      runs: projection.runs.map((run) => ({
+        ...run,
+        workspacePreparation: { type: "root", cleanProviderConstraint: constraint },
+      })),
+    });
     const error = yield* harness.startWithRetry.pipe(Effect.flip);
 
+    expect(harness.open).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runtimePolicy: expect.objectContaining({ cleanProviderConstraint: constraint }),
+      }),
+    );
+    expect(harness.startRootRun).not.toHaveBeenCalled();
     expect(error._tag).toBe("ProviderTurnStartError");
     expect(harness.writeIfRunCurrent).not.toHaveBeenCalled();
     expect(harness.projection().runs.at(-1)?.status).toBe("starting");

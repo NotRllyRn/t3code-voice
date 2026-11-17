@@ -19,6 +19,7 @@ import {
   OrchestrationV2Subagent,
   OrchestrationV2TurnItem,
   ProviderApprovalDecision,
+  ProviderCleanStartConstraint,
   ProviderInteractionMode,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -46,6 +47,7 @@ import type {
 } from "./selectionTransition.ts";
 
 export const ProviderAdapterV2RuntimePolicy = Schema.Struct({
+  cleanProviderConstraint: Schema.optional(ProviderCleanStartConstraint),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   cwd: Schema.NullOr(Schema.String),

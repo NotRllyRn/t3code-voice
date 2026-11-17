@@ -438,8 +438,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
   const host = yield* ProviderHost.ProviderHost;
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
   const { continuationRequests } = options;
+  // The guard must describe the captured spawn environment, not later settings changes.
+  const environmentMode = options.settings.environmentMode;
   const { environment, executable } = yield* resolvePiStartup(
-    options.settings,
+    { ...options.settings, environmentMode },
     options.environment,
   );
 
@@ -450,11 +452,33 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       ...(payload === undefined ? {} : { payload }),
     });
 
+  const capabilities = {
+    ...PiProviderCapabilitiesV2,
+    cleanStart: {
+      environmentMode,
+      supportsConstraint: true as const,
+    },
+  };
+  const assertCleanStart = (
+    policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
+    selection: ModelSelection,
+  ) => {
+    const constraint = policy.cleanProviderConstraint;
+    return constraint === undefined ||
+      (constraint.instanceId === options.instanceId &&
+        selection.instanceId === constraint.instanceId &&
+        constraint.driver === PI_PROVIDER &&
+        constraint.environmentMode === "clean" &&
+        environmentMode === "clean")
+      ? Effect.void
+      : protocolError("The clean provider start constraint is not satisfied.");
+  };
+
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: options.instanceId,
     driver: PI_PROVIDER,
     getCapabilities: Effect.fn("PiAdapter.getCapabilities")(function () {
-      return Effect.succeed(PiProviderCapabilitiesV2);
+      return Effect.succeed(capabilities);
     }),
     planSelectionTransition: Effect.fn("PiAdapter.planSelectionTransition")(function () {
       return Effect.succeed(turnScopedSelectionTransition());
@@ -462,6 +486,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
     openSession: Effect.fn("PiAdapterV2.openSession")(function* (
       input: ProviderAdapter.ProviderAdapterV2OpenSessionInput,
     ) {
+      yield* assertCleanStart(input.runtimePolicy, input.modelSelection);
       const scope = yield* Effect.scope;
       const cwd = input.runtimePolicy.cwd ?? host.paths.cwd;
       const mcpSession = yield* mcpSessions.read(input.threadId);
@@ -535,7 +560,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         status: "ready",
         cwd,
         model: input.modelSelection.model,
-        capabilities: PiProviderCapabilitiesV2,
+        capabilities,
         extensionStatuses: [],
         createdAt: now,
         updatedAt: now,
@@ -2756,6 +2781,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           }),
         startTurn: Effect.fn("PiAdapter.startTurn")(
           function* (turnInput) {
+            yield* assertCleanStart(turnInput.runtimePolicy, turnInput.modelSelection);
             if (rollbackBarrier !== null)
               return yield* protocolError("Cannot start a Pi turn during rollback");
             const state = threadState;

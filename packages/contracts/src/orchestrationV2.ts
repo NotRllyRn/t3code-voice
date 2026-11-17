@@ -379,7 +379,21 @@ export const OrchestrationV2IdentityCapabilities = Schema.Struct({
 });
 export type OrchestrationV2IdentityCapabilities = typeof OrchestrationV2IdentityCapabilities.Type;
 
+export const ProviderCleanStartConstraint = Schema.Struct({
+  instanceId: ProviderInstanceId,
+  driver: Schema.Literal("pi"),
+  environmentMode: Schema.Literal("clean"),
+});
+export type ProviderCleanStartConstraint = typeof ProviderCleanStartConstraint.Type;
+
+export const ProviderCleanStartCapability = Schema.Struct({
+  environmentMode: Schema.Literals(["inherit", "clean"]),
+  supportsConstraint: Schema.Literal(true),
+});
+export type ProviderCleanStartCapability = typeof ProviderCleanStartCapability.Type;
+
 export const OrchestrationV2ProviderCapabilities = Schema.Struct({
+  cleanStart: Schema.optional(ProviderCleanStartCapability),
   sessions: OrchestrationV2SessionCapabilities,
   threads: OrchestrationV2ThreadCapabilities,
   turns: OrchestrationV2TurnCapabilities,
@@ -662,17 +676,20 @@ export type OrchestrationV2RunBackgroundWorkCancelled =
 export const OrchestrationV2ThreadLaunchWorkspaceStrategy = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("root"),
+    cleanProviderConstraint: Schema.optional(ProviderCleanStartConstraint),
     branch: Schema.optional(TrimmedNonEmptyString),
     enforceNoSetupScripts: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     type: Schema.Literal("existing_worktree"),
+    cleanProviderConstraint: Schema.optional(ProviderCleanStartConstraint),
     worktreePath: TrimmedNonEmptyString,
     branch: Schema.optional(TrimmedNonEmptyString),
     enforceNoSetupScripts: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     type: Schema.Literal("worktree"),
+    cleanProviderConstraint: Schema.optional(ProviderCleanStartConstraint),
     baseRef: TrimmedNonEmptyString,
     branch: Schema.optional(TrimmedNonEmptyString),
     startFromOrigin: Schema.optional(Schema.Boolean),
@@ -1920,7 +1937,10 @@ export const OrchestrationV2DomainEvent = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("thread.created"),
-    payload: OrchestrationV2AppThread,
+    payload: Schema.Struct({
+      ...OrchestrationV2AppThread.fields,
+      cleanProviderConstraint: Schema.optional(ProviderCleanStartConstraint),
+    }),
   }),
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
@@ -2815,7 +2835,10 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("thread.created"),
-    payload: OrchestrationV2AppThreadJson,
+    payload: Schema.Struct({
+      ...OrchestrationV2AppThreadJson.fields,
+      cleanProviderConstraint: Schema.optional(ProviderCleanStartConstraint),
+    }),
   }),
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
@@ -2972,6 +2995,7 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("thread.create"),
+    cleanProviderConstraint: Schema.optional(ProviderCleanStartConstraint),
     ...OrchestrationV2CreationFields,
     commandId: CommandId,
     threadId: ThreadId,

@@ -16,6 +16,7 @@ import {
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadLaunchWorkspaceStrategy,
   type ProviderDriverKind,
+  type ProviderCleanStartConstraint,
   type ProviderInteractionMode,
   ProjectId,
   type RunId,
@@ -54,6 +55,7 @@ import type * as Orchestrator from "./Orchestrator.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
 import { DispatchModeLimit } from "./DispatchModeLimit.ts";
+import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 
 export type ThreadLaunchWorkspaceStrategy = OrchestrationV2ThreadLaunchWorkspaceStrategy;
@@ -79,6 +81,7 @@ export interface ThreadLaunchInput {
   readonly interactionMode: ProviderInteractionMode;
   readonly workspaceStrategy: ThreadLaunchWorkspaceStrategy;
   readonly enforceNoSetupScripts?: boolean;
+  readonly cleanProviderConstraint?: ProviderCleanStartConstraint;
   readonly initialMessage?: ThreadLaunchInitialMessage;
   readonly importedNativeThread?: {
     readonly ref: {
@@ -115,6 +118,7 @@ export interface ThreadLaunchResult {
   /** The launch's last write (the initial message, else the thread claim) was accepted before this call. */
   readonly resumed: boolean;
   readonly enforceNoSetupScripts?: true;
+  readonly cleanProviderConstraint?: ProviderCleanStartConstraint;
   readonly sequence?: number;
 }
 
@@ -201,6 +205,7 @@ const make = Effect.gen(function* () {
   const git = yield* GitWorkflow.GitWorkflowService;
   const setupScripts = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
+  const providerAdapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const textGeneration = yield* TextGeneration.TextGeneration;
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
@@ -860,15 +865,52 @@ const make = Effect.gen(function* () {
       const normalizedStrategy: ThreadLaunchWorkspaceStrategy =
         request.workspaceStrategy.type === "worktree" &&
         (yield* managedFolders.isScratchProject(request.projectId))
-          ? { type: "root", enforceNoSetupScripts: request.workspaceStrategy.enforceNoSetupScripts }
+          ? {
+              type: "root",
+              enforceNoSetupScripts: request.workspaceStrategy.enforceNoSetupScripts,
+              cleanProviderConstraint: request.workspaceStrategy.cleanProviderConstraint,
+            }
           : request.workspaceStrategy;
-      const input: ThreadLaunchInput = {
+      let input: ThreadLaunchInput = {
         ...request,
         workspaceStrategy: {
           ...normalizedStrategy,
           ...(request.enforceNoSetupScripts === true ? { enforceNoSetupScripts: true } : {}),
+          ...(request.cleanProviderConstraint === undefined
+            ? {}
+            : { cleanProviderConstraint: request.cleanProviderConstraint }),
         },
       };
+      let constraint = input.workspaceStrategy.cleanProviderConstraint;
+      if (constraint !== undefined) {
+        if (
+          input.reuseExistingThread === true ||
+          input.initialMessage === undefined ||
+          input.modelSelection.instanceId !== constraint.instanceId
+        ) {
+          return yield* mapError(
+            input,
+            "resolve-project",
+          )("A clean provider launch requires an explicit matching instance and initial message.");
+        }
+        const adapter = yield* providerAdapters
+          .get(constraint.instanceId)
+          .pipe(Effect.mapError(mapError(input, "resolve-project")));
+        const capabilities = yield* adapter
+          .getCapabilities()
+          .pipe(Effect.mapError(mapError(input, "resolve-project")));
+        if (
+          adapter.instanceId !== constraint.instanceId ||
+          adapter.driver !== constraint.driver ||
+          capabilities.cleanStart?.supportsConstraint !== true ||
+          capabilities.cleanStart.environmentMode !== constraint.environmentMode
+        ) {
+          return yield* mapError(
+            input,
+            "resolve-project",
+          )("The clean provider start constraint is not satisfied.");
+        }
+      }
       yield* assertNoScripts(input);
       yield* ProjectCloneTracker.rejectCommandsDuringClone(cloneTracker, {
         type: "thread.create",
@@ -932,7 +974,7 @@ const make = Effect.gen(function* () {
           yield* validateReusableThread(input, candidateThreadId);
         }
 
-        const workspaceStrategy: ThreadLaunchWorkspaceStrategy =
+        let workspaceStrategy: ThreadLaunchWorkspaceStrategy =
           input.workspaceStrategy.type === "root" && Option.isNone(launchReceipt)
             ? Option.match(
                 yield* managedFolders
@@ -947,6 +989,7 @@ const make = Effect.gen(function* () {
                   onSome: (worktreePath) => ({
                     type: "existing_worktree",
                     worktreePath,
+                    cleanProviderConstraint: input.workspaceStrategy.cleanProviderConstraint,
                     ...(input.workspaceStrategy.enforceNoSetupScripts === true
                       ? { enforceNoSetupScripts: true }
                       : {}),
@@ -967,6 +1010,7 @@ const make = Effect.gen(function* () {
               })
             : threads.dispatch({
                 type: "thread.create",
+                cleanProviderConstraint: constraint,
                 commandId: input.commandId,
                 threadId: candidateThreadId,
                 projectId: input.projectId,
@@ -998,6 +1042,53 @@ const make = Effect.gen(function* () {
         const threadId =
           claimed.storedEvents.find((stored) => stored.event.type.startsWith("thread."))?.event
             .threadId ?? candidateThreadId;
+        // A claim can survive a crash before its first run; replay must retain its constraint.
+        const createdClaim = claimed.storedEvents.find(
+          (stored) => stored.event.type === "thread.created",
+        );
+        const claim =
+          createdClaim !== undefined
+            ? Option.some(createdClaim)
+            : input.reuseExistingThread !== true &&
+                (claimed.replayed === true || Option.isSome(launchReceipt))
+              ? yield* threads
+                  .streamStoredEventsFrom({ threadId, eventType: "thread.created" })
+                  .pipe(Stream.runHead, Effect.mapError(mapError(input, "read-receipt", threadId)))
+              : Option.none();
+        const claimConstraint =
+          Option.isSome(claim) && claim.value.event.type === "thread.created"
+            ? claim.value.event.payload.cleanProviderConstraint
+            : undefined;
+        if (claimConstraint !== undefined) {
+          if (
+            input.modelSelection.instanceId !== claimConstraint.instanceId ||
+            (constraint !== undefined &&
+              (constraint.instanceId !== claimConstraint.instanceId ||
+                constraint.driver !== claimConstraint.driver ||
+                constraint.environmentMode !== claimConstraint.environmentMode))
+          ) {
+            return yield* mapError(
+              input,
+              "resolve-project",
+              threadId,
+            )("The previous launch has a different clean provider start constraint.");
+          }
+          constraint = claimConstraint;
+          workspaceStrategy = { ...workspaceStrategy, cleanProviderConstraint: claimConstraint };
+          input = {
+            ...input,
+            workspaceStrategy: {
+              ...input.workspaceStrategy,
+              cleanProviderConstraint: claimConstraint,
+            },
+          };
+        } else if (constraint !== undefined) {
+          return yield* mapError(
+            input,
+            "resolve-project",
+            threadId,
+          )("The previous launch did not durably acknowledge the clean provider start constraint.");
+        }
         if (project.id !== input.projectId) {
           return yield* mapError(input, "resolve-project", threadId)("Project identity changed.");
         }
@@ -1104,6 +1195,19 @@ const make = Effect.gen(function* () {
             threadId,
           )("The previous launch did not durably acknowledge the no-setup-scripts guard.");
         const preparationRun = projection.runs.find((run) => run.id === runId);
+        const savedConstraint = preparationRun?.workspacePreparation?.cleanProviderConstraint;
+        if (
+          constraint !== undefined &&
+          (savedConstraint?.instanceId !== constraint.instanceId ||
+            savedConstraint.driver !== constraint.driver ||
+            savedConstraint.environmentMode !== constraint.environmentMode)
+        ) {
+          return yield* mapError(
+            input,
+            "resolve-project",
+            threadId,
+          )("The launch did not durably acknowledge the clean provider start constraint.");
+        }
         const runIsPreparing = preparationRun?.status === "preparing";
         const shouldSchedule = runId === null ? Option.isNone(launchReceipt) : runIsPreparing;
         const boundWorktreePath = projection.thread.worktreePath;
@@ -1158,6 +1262,7 @@ const make = Effect.gen(function* () {
         return {
           threadId,
           projection,
+          ...(savedConstraint === undefined ? {} : { cleanProviderConstraint: savedConstraint }),
           ...(input.workspaceStrategy.enforceNoSetupScripts === true
             ? { enforceNoSetupScripts: true as const }
             : {}),

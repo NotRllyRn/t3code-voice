@@ -228,6 +228,18 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             )?.supportedRuntimeModes,
           });
         }
+        const cleanProviderConstraint =
+          input.cleanProviderConstraint ?? input.workspaceStrategy?.cleanProviderConstraint;
+        if (
+          cleanProviderConstraint !== undefined &&
+          input.modelSelection?.instanceId !== cleanProviderConstraint.instanceId
+        ) {
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message:
+              "A clean provider launch requires an explicit matching modelSelection.instanceId.",
+          });
+        }
         const result = yield* ThreadMessageIntake.launchThread({
           commandId,
           threadId,
@@ -237,6 +249,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           runtimeMode: startedRuntimeMode,
           interactionMode,
           workspaceStrategy: input.workspaceStrategy ?? { type: "root" },
+          ...(cleanProviderConstraint === undefined ? {} : { cleanProviderConstraint }),
           ...(input.enforceNoSetupScripts === undefined
             ? {}
             : { enforceNoSetupScripts: input.enforceNoSetupScripts }),
@@ -269,10 +282,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 message: error.message,
               });
             }
-            if (
-              error._tag === "ThreadLaunchError" &&
-              isSetupScriptsForbiddenError(error.cause)
-            )
+            if (error._tag === "ThreadLaunchError" && isSetupScriptsForbiddenError(error.cause))
               return new OrchestratorMcpFailure({
                 code: "invalid_request",
                 message: error.cause.message,
@@ -296,6 +306,9 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           modelSelection: thread.modelSelection,
           runId: run?.id ?? null,
           status: run?.status ?? null,
+          ...(result.cleanProviderConstraint === undefined
+            ? {}
+            : { cleanProviderConstraint: result.cleanProviderConstraint }),
           ...(result.enforceNoSetupScripts === true
             ? { enforceNoSetupScripts: true as const }
             : {}),

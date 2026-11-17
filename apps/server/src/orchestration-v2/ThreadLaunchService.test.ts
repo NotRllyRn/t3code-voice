@@ -235,6 +235,7 @@ function makeHarness(options: HarnessOptions = {}) {
   const layerLaunch = ThreadLaunch.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
+        layerRegistry,
         layerExternalServices,
         layerThreadManagement,
         layerReceipts,
@@ -1626,6 +1627,76 @@ it.effect.each(["failed", "interrupted"] as const)(
     }).pipe(Effect.provide(harness.layer));
   },
 );
+
+it.effect("keeps the clean constraint on replay and refuses a changed instance or mode", () => {
+  let environmentMode: "inherit" | "clean" = "clean";
+  const cleanAdapter = {
+    ...adapter,
+    driver: ProviderDriverKind.make("pi"),
+    getCapabilities: () =>
+      Effect.succeed({
+        ...CodexProviderCapabilitiesV2,
+        cleanStart: { environmentMode, supportsConstraint: true as const },
+      }),
+  };
+  const harness = makeHarness({ adapters: [cleanAdapter] });
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const constraint = {
+      instanceId: modelSelection.instanceId,
+      driver: "pi" as const,
+      environmentMode: "clean" as const,
+    };
+    const input = launchInput({
+      command: "clean:replay",
+      thread: "clean:replay",
+      message: "Clean only",
+      workspace: { type: "root" },
+    });
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    yield* threads.dispatch({
+      type: "thread.create",
+      commandId: input.commandId,
+      threadId: ThreadId.make("clean:replay"),
+      projectId: input.projectId,
+      title: input.title,
+      modelSelection: input.modelSelection,
+      runtimeMode: input.runtimeMode,
+      interactionMode: input.interactionMode,
+      branch: null,
+      worktreePath: null,
+      cleanProviderConstraint: constraint,
+      createdBy: input.createdBy,
+      creationSource: input.creationSource,
+    });
+    const first = yield* launches.launch(input);
+    assert.deepEqual(first.cleanProviderConstraint, constraint);
+    const replay = yield* launches.launch(input);
+    assert.deepEqual(replay.cleanProviderConstraint, constraint);
+    assert.deepEqual(
+      replay.projection.runs[0]?.workspacePreparation?.cleanProviderConstraint,
+      constraint,
+    );
+    const switched = yield* launches
+      .launch({ ...input, modelSelection: claudeModelSelection })
+      .pipe(Effect.result);
+    assert.equal(switched._tag, "Failure");
+    environmentMode = "inherit";
+    const changed = yield* launches
+      .launch({ ...input, cleanProviderConstraint: constraint })
+      .pipe(Effect.result);
+    assert.equal(changed._tag, "Failure");
+    const unguarded = yield* launches.launch(
+      launchInput({
+        command: "normal:inherit",
+        thread: "normal:inherit",
+        message: "Normal",
+        workspace: { type: "root" },
+      }),
+    );
+    assert.equal(unguarded.cleanProviderConstraint, undefined);
+  }).pipe(Effect.provide(harness.layer));
+});
 
 it.effect.each([false, true])("replays a server-allocated launch (guarded: %s)", (guarded) =>
   Effect.gen(function* () {

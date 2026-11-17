@@ -624,6 +624,41 @@ const startTurn = Effect.fnUntraced(function* (
 });
 
 describe("PiAdapterV2", () => {
+  it.effect("rejects a clean start constraint before spawning an inherited environment", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const settings = {
+        enabled: true,
+        binaryPath: "pi",
+        launchArgs: "",
+        customModels: [],
+        environmentMode: "inherit" as "inherit" | "clean",
+      };
+      const adapter = yield* makePiAdapterV2({
+        instanceId: PI_INSTANCE_ID,
+        settings,
+        environment: {},
+      }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, fake.spawner));
+      settings.environmentMode = "clean";
+      const result = yield* adapter
+        .openSession({
+          threadId: THREAD_ID,
+          providerSessionId: SESSION_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy: {
+            ...runtimePolicy,
+            cleanProviderConstraint: {
+              instanceId: PI_INSTANCE_ID,
+              driver: "pi",
+              environmentMode: "clean",
+            },
+          },
+        })
+        .pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+      assert.deepEqual(fake.lastSpawn().args, []);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
   it.effect(
     "replaces keyed extension statuses while idle without producing conversation items",
     () =>

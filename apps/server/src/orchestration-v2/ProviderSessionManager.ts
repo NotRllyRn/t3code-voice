@@ -10,6 +10,8 @@ import {
   type OrchestrationV2ProviderThread,
   OrchestrationV2RuntimeRequest,
   ProviderInstanceId,
+  type ProviderDriverKind,
+  type OrchestrationV2ProviderCapabilities,
   ProviderSessionId,
   ThreadId,
   type ProviderThreadId,
@@ -2419,11 +2421,73 @@ export const layerWithOptions = (
                   });
                 }
               }
+              const constraint = input.runtimePolicy.cleanProviderConstraint;
+              const guardedAdapter =
+                constraint === undefined
+                  ? undefined
+                  : yield* registry
+                      .get(input.modelSelection.instanceId)
+                      .pipe(
+                        Effect.mapError(
+                          (cause) =>
+                            new ProviderSessionOpenError({
+                              instanceId: input.modelSelection.instanceId,
+                              providerSessionId: input.providerSessionId,
+                              cause,
+                            }),
+                        ),
+                      );
+              const assertCleanStart = (
+                instanceId: ProviderInstanceId,
+                driver: ProviderDriverKind,
+                capabilities: OrchestrationV2ProviderCapabilities,
+              ) => {
+                if (
+                  constraint === undefined ||
+                  (constraint.instanceId === instanceId &&
+                    constraint.driver === driver &&
+                    input.modelSelection.instanceId === constraint.instanceId &&
+                    capabilities.cleanStart?.supportsConstraint === true &&
+                    capabilities.cleanStart.environmentMode === constraint.environmentMode)
+                )
+                  return Effect.void;
+                return Effect.fail(
+                  new ProviderSessionOpenError({
+                    instanceId: input.modelSelection.instanceId,
+                    providerSessionId: input.providerSessionId,
+                    cause: "The clean provider start constraint is not satisfied.",
+                  }),
+                );
+              };
+              if (guardedAdapter !== undefined) {
+                const capabilities = yield* guardedAdapter
+                  .getCapabilities()
+                  .pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new ProviderSessionOpenError({
+                          instanceId: input.modelSelection.instanceId,
+                          providerSessionId: input.providerSessionId,
+                          cause,
+                        }),
+                    ),
+                  );
+                yield* assertCleanStart(
+                  guardedAdapter.instanceId,
+                  guardedAdapter.driver,
+                  capabilities,
+                );
+              }
               const key = sessionKey(input.providerSessionId);
               const live = (yield* Ref.get(sessions)).get(key);
               if (live !== undefined) yield* releaseForLinkedEnvironments(live);
               const existing = (yield* Ref.get(sessions)).get(key);
               if (existing !== undefined) {
+                yield* assertCleanStart(
+                  existing.runtime.instanceId,
+                  existing.runtime.driver,
+                  existing.runtime.providerSession.capabilities,
+                );
                 const attached = existing.attachedThreadIds.has(input.threadId);
                 if (!attached && !existing.supportsMultipleProviderThreads) {
                   return yield* new ProviderSessionOpenError({
@@ -2442,16 +2506,18 @@ export const layerWithOptions = (
                 return existing.exposedRuntime;
               }
 
-              const adapter = yield* registry.get(input.modelSelection.instanceId).pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new ProviderSessionOpenError({
-                      instanceId: input.modelSelection.instanceId,
-                      providerSessionId: input.providerSessionId,
-                      cause,
-                    }),
-                ),
-              );
+              const adapter =
+                guardedAdapter ??
+                (yield* registry.get(input.modelSelection.instanceId).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderSessionOpenError({
+                        instanceId: input.modelSelection.instanceId,
+                        providerSessionId: input.providerSessionId,
+                        cause,
+                      }),
+                  ),
+                ));
               const openedWithLinkedEnvironments = yield* readLinkedEnvironments;
               const prepared = yield* prepareMcpSession(
                 input.threadId,

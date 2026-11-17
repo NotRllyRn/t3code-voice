@@ -1,6 +1,7 @@
 import { McpAttachmentInput } from "../attachment/input.ts";
 import {
   NonNegativeInt,
+  ProviderCleanStartConstraint,
   ModelSelection,
   TrimmedNonEmptyString,
   ThreadId,
@@ -157,6 +158,7 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
       }),
     ),
     attachments: Schema.optional(Schema.Array(McpAttachmentInput).check(Schema.isMaxLength(8))),
+    cleanProviderConstraint: Schema.optional(ProviderCleanStartConstraint),
     enforceNoSetupScripts: Schema.optional(
       Schema.Boolean.annotate({
         description:
@@ -175,6 +177,7 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     runId: Schema.NullOr(RunId),
     status: Schema.NullOr(OrchestrationV2RunStatus),
     enforceNoSetupScripts: Schema.optional(Schema.Literal(true)),
+    cleanProviderConstraint: Schema.optional(ProviderCleanStartConstraint),
   }),
   dependencies: [
     ...shared.dependencies,

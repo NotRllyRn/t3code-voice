@@ -23,6 +23,7 @@ import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderS
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 import { PiSettings } from "../settings.ts";
 import { PiDriver } from "./driver.ts";
+import { makePiAdapterV2 } from "./adapter.ts";
 import { resolvePiStartup } from "./environment.ts";
 import { buildPiRpcLaunch } from "./mcpInjection.ts";
 import { makePiRpcConnection } from "./rpc.ts";
@@ -211,6 +212,34 @@ it.live(
       ).pipe(Layer.provideMerge(NodeServices.layer));
       yield* Effect.scoped(
         Effect.gen(function* () {
+          const inherited = yield* makePiAdapterV2({
+            instanceId: ProviderInstanceId.make("pi-clean-test"),
+            settings: { ...settings, environmentMode: "inherit" },
+            environment: contaminated(dir),
+          });
+          const refused = yield* inherited
+            .openSession({
+              threadId: ThreadId.make("synthetic-refused"),
+              providerSessionId: ProviderSessionId.make("synthetic-refused"),
+              modelSelection: createModelSelection(
+                ProviderInstanceId.make("pi-clean-test"),
+                "default",
+              ),
+              runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                cwd: dir,
+                cleanProviderConstraint: {
+                  instanceId: ProviderInstanceId.make("pi-clean-test"),
+                  driver: "pi",
+                  environmentMode: "clean",
+                },
+              }),
+            })
+            .pipe(Effect.result);
+          expect(refused._tag).toBe("Failure");
+          expect(NodeFS.existsSync(`${dir}/launches`)).toBe(false);
+          expect(NodeFS.existsSync(`${dir}/canary`)).toBe(false);
           const instance = yield* PiDriver.create({
             instanceId: ProviderInstanceId.make("pi-clean-test"),
             displayName: undefined,
@@ -251,6 +280,11 @@ it.live(
           expect(reply.subject).toBe("Synthetic subject");
           const threadId = ThreadId.make("synthetic-thread");
           const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+            cleanProviderConstraint: {
+              instanceId: ProviderInstanceId.make("pi-clean-test"),
+              driver: "pi",
+              environmentMode: "clean",
+            },
             runtimeMode: "full-access",
             interactionMode: "default",
             cwd: dir,

@@ -724,7 +724,14 @@ export const layer: Layer.Layer<
         });
         return;
       }
-      const resolvedRuntimePolicy = resolvedPolicy.success;
+      const resolvedRuntimePolicy = {
+        ...resolvedPolicy.success,
+        ...(run.workspacePreparation?.cleanProviderConstraint === undefined
+          ? {}
+          : {
+              cleanProviderConstraint: run.workspacePreparation.cleanProviderConstraint,
+            }),
+      };
       if (!(yield* isCurrentAttemptInStatus("starting"))) return;
       const existingSessionProjection = projection.providerSessions.find(
         (candidate) => candidate.id === providerSessionId,
