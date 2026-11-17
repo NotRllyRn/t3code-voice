@@ -36,6 +36,7 @@ const makeService = Effect.fnUntraced(function* (
   run: ProcessRunner.ProcessRunner["Service"]["run"],
   publicRegistry: HttpClient.HttpClient = noPublicRegistry,
   npmInstalled = true,
+  runtimeVersion?: string,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -43,7 +44,7 @@ const makeService = Effect.fnUntraced(function* (
   for (const name of ["npm", "npm.cmd"]) {
     yield* fs.writeFileString(path.join(npmBin, name), "", { mode: 0o755 });
   }
-  return yield* NpmRelease.make().pipe(
+  return yield* NpmRelease.make(runtimeVersion).pipe(
     Effect.provideService(ProcessRunner.ProcessRunner, { run }),
     Effect.provideService(HttpClient.HttpClient, publicRegistry),
     Effect.provideService(HostProcess.Environment, {
@@ -87,6 +88,27 @@ it.effect.each([
     yield* TestClock.adjust("1 minute");
     expect(yield* service.get({ spec: fixture.spec })).toEqual(expected);
     expect(calls).toHaveLength(2);
+  }),
+);
+
+it.effect("does not use npm metadata for a Voice runtime", () =>
+  Effect.gen(function* () {
+    const calls: ProcessRunner.ProcessRunInput[] = [];
+    const service = yield* makeService(
+      (input) => {
+        calls.push(input);
+        return Effect.die("unexpected npm lookup");
+      },
+      noPublicRegistry,
+      true,
+      "0.1.9-voice.1",
+    );
+    const error = yield* service.get({ spec: "latest" }).pipe(Effect.flip);
+    expect(error.reason).toBe(
+      "Voice servers use fork release archives; npm release metadata is unavailable.",
+    );
+    expect(calls).toEqual([]);
+    expect(NpmRelease.voiceNpmReleaseRefusal("0.1.9-preview.20261116.1")).toBeUndefined();
   }),
 );
 

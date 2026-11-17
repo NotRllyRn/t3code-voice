@@ -4,6 +4,7 @@ import {
   type ServerNpmRelease,
 } from "@t3tools/contracts";
 import { npmReleaseDatabaseMigration } from "@t3tools/shared/cliRelease";
+import { parseVoiceVersion } from "@t3tools/shared/voiceRelease";
 import { resolveCommandPath } from "@t3tools/shared/shell";
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
@@ -15,6 +16,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import { FetchHttpClient, HttpClient } from "effect/http";
 
+import packageJson from "../../package.json" with { type: "json" };
 import * as ProcessRunner from "../processRunner.ts";
 
 const Version = Schema.String.check(Schema.isPattern(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/));
@@ -27,6 +29,12 @@ const decodeError = Schema.decodeUnknownOption(
   Schema.fromJsonString(Schema.Struct({ error: Schema.Struct({ code: Schema.String }) })),
 );
 const decodeInput = Schema.decodeUnknownEffect(ServerNpmReleaseInput);
+
+export function voiceNpmReleaseRefusal(runtimeVersion: string): string | undefined {
+  return parseVoiceVersion(runtimeVersion) === null
+    ? undefined
+    : "Voice servers use fork release archives; npm release metadata is unavailable.";
+}
 
 export class NpmRelease extends Context.Service<
   NpmRelease,
@@ -55,7 +63,7 @@ function toRelease(spec: string, json: string) {
   });
 }
 
-export const make = Effect.fn("NpmRelease.make")(function* () {
+export const make = Effect.fn("NpmRelease.make")(function* (runtimeVersion = packageJson.version) {
   const runner = yield* ProcessRunner.ProcessRunner;
   const http = yield* HttpClient.HttpClient;
   const lookupPublic = Effect.fn("NpmRelease.lookupPublic")(function* (spec: string) {
@@ -122,6 +130,10 @@ export const make = Effect.fn("NpmRelease.make")(function* () {
           () => new ServerNpmReleaseError({ reason: "Invalid release version or track." }),
         ),
       );
+      const voiceRefusal = voiceNpmReleaseRefusal(runtimeVersion);
+      if (voiceRefusal !== undefined) {
+        return yield* new ServerNpmReleaseError({ reason: voiceRefusal });
+      }
       return yield* Cache.get(cache, spec);
     }),
   });

@@ -3,7 +3,12 @@ import type {
   DesktopSshEnvironmentTarget,
 } from "@t3tools/contracts";
 import { waitForHttpReady as waitForHttpReadyShared } from "@t3tools/shared/httpReadiness";
-import { cliReleaseDownloadBaseUrl } from "@t3tools/shared/cliRelease";
+import {
+  CLI_RELEASE_CHECKSUMS_FILE,
+  cliArchiveFileName,
+  cliReleaseAssetUrl,
+} from "@t3tools/shared/cliRelease";
+import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as NetService from "@t3tools/shared/Net";
 import { extractJsonObject, fromLenientJson } from "@t3tools/shared/schemaJson";
@@ -229,6 +234,11 @@ function normalizeSshErrorMessage(stderr: string, fallbackMessage: string): stri
 function stripTrailingNewlines(value: string): string {
   return value.replace(/\n+$/u, "");
 }
+
+const REMOTE_T3_HOME_ASSIGNMENT =
+  'T3_HOME="${' +
+  FORK_DESKTOP.homeEnvironmentVariable +
+  `:-$HOME/${FORK_DESKTOP.homeDirectoryName}}"`;
 
 function shellSingleQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
@@ -460,14 +470,14 @@ if [ -z "$T3_ARCHIVE_VERSION" ]; then
 fi
 # Self-contained release archive: no Node, npm, or compiler on the remote.
 # Unpacked into the pinned-runtime layout so \`t3 service install\` reuses it.
-T3_RELEASE_BASE_URL=@@T3_RELEASE_BASE_URL@@
-T3_RUNTIME_DIR="$HOME/.t3/runtime/versions/$T3_ARCHIVE_VERSION"
+@@T3_HOME_ASSIGNMENT@@
+T3_RUNTIME_DIR="$T3_HOME/runtime/versions/$T3_ARCHIVE_VERSION"
 t3_runtime_ready() {
   [ -x "$T3_RUNTIME_DIR/t3" ] && [ "$(cat "$T3_RUNTIME_DIR/.install-complete" 2>/dev/null)" = "$T3_ARCHIVE_VERSION" ]
 }
 if ! t3_runtime_ready; then
-  mkdir -p "$HOME/.t3/runtime/versions"
-  T3_LOCK="$HOME/.t3/runtime/versions/.$T3_ARCHIVE_VERSION.install.lock"
+  mkdir -p "$T3_HOME/runtime/versions"
+  T3_LOCK="$T3_HOME/runtime/versions/.$T3_ARCHIVE_VERSION.install.lock"
   # uutils mkdir can report success on EEXIST, so use shell noclobber.
   # An empty lock gets a short grace period for its owner to publish a PID.
   T3_LOCK_WAITED=0
@@ -499,13 +509,13 @@ fi
 if ! t3_runtime_ready; then
   # Keep aligned with CLI_ARCHIVE_PLATFORM_KEYS in packages/shared/src/cliRelease.ts.
   case "$(uname -s) $(uname -m)" in
-    "Darwin arm64") T3_PLATFORM_KEY="darwin-arm64" ;;
-    "Linux arm64" | "Linux aarch64") T3_PLATFORM_KEY="linux-arm64" ;;
-    "Linux x86_64" | "Linux amd64") T3_PLATFORM_KEY="linux-x64" ;;
+    "Darwin arm64") T3_PLATFORM_KEY="darwin-arm64"; T3_ARCHIVE_URL=@@T3_DARWIN_ARM64_URL@@ ;;
+    "Linux arm64" | "Linux aarch64") T3_PLATFORM_KEY="linux-arm64"; T3_ARCHIVE_URL=@@T3_LINUX_ARM64_URL@@ ;;
+    "Linux x86_64" | "Linux amd64") T3_PLATFORM_KEY="linux-x64"; T3_ARCHIVE_URL=@@T3_LINUX_X64_URL@@ ;;
     *) printf 'Remote host %s has no t3 release archive.\\n' "$(uname -s) $(uname -m)" >&2; exit 1 ;;
   esac
   T3_ARCHIVE="t3-$T3_ARCHIVE_VERSION-$T3_PLATFORM_KEY.tar.gz"
-  T3_STAGING="$(mktemp -d "$HOME/.t3/runtime/versions/.staging-XXXXXX")"
+  T3_STAGING="$(mktemp -d "$T3_HOME/runtime/versions/.staging-XXXXXX")"
   trap 'rm -rf "$T3_STAGING" "$T3_LOCK"' EXIT
   t3_fetch() {
     if command -v curl >/dev/null 2>&1; then curl -fsSL --connect-timeout 30 --max-time "$3" "$1" -o "$2"
@@ -513,8 +523,8 @@ if ! t3_runtime_ready; then
     else printf 'Remote host needs curl or wget to download %s.\\n' "$T3_ARCHIVE" >&2; exit 1
     fi
   }
-  t3_fetch "$T3_RELEASE_BASE_URL/v$T3_ARCHIVE_VERSION/SHA256SUMS" "$T3_STAGING/SHA256SUMS" @@T3_ARCHIVE_CHECKSUMS_SECONDS@@
-  t3_fetch "$T3_RELEASE_BASE_URL/v$T3_ARCHIVE_VERSION/$T3_ARCHIVE" "$T3_STAGING/$T3_ARCHIVE" @@T3_ARCHIVE_DOWNLOAD_SECONDS@@
+  t3_fetch @@T3_CHECKSUMS_URL@@ "$T3_STAGING/SHA256SUMS" @@T3_ARCHIVE_CHECKSUMS_SECONDS@@
+  t3_fetch "$T3_ARCHIVE_URL" "$T3_STAGING/$T3_ARCHIVE" @@T3_ARCHIVE_DOWNLOAD_SECONDS@@
   T3_EXPECTED="$(grep " \\*\\{0,1\\}$T3_ARCHIVE$" "$T3_STAGING/SHA256SUMS" | cut -d' ' -f1)"
   if command -v sha256sum >/dev/null 2>&1; then
     T3_ACTUAL="$(sha256sum "$T3_STAGING/$T3_ARCHIVE" | cut -d' ' -f1)"
@@ -545,8 +555,9 @@ exec "$T3_RUNTIME_DIR/t3" "$@"
 const REMOTE_LAUNCH_SCRIPT = `set -eu
 @@T3_NODE_ENV_SCRIPT@@
 STATE_KEY="$1"
-STATE_DIR="$HOME/.t3/ssh-launch/$STATE_KEY"
-DEFAULT_SERVER_HOME="$HOME/.t3"
+@@T3_HOME_ASSIGNMENT@@
+STATE_DIR="$T3_HOME/ssh-launch/$STATE_KEY"
+DEFAULT_SERVER_HOME="$T3_HOME"
 DEFAULT_RUNTIME_FILE="$DEFAULT_SERVER_HOME/userdata/server-runtime.json"
 PORT_FILE="$STATE_DIR/port"
 PID_FILE="$STATE_DIR/pid"
@@ -821,8 +832,9 @@ printf '{"remotePort":%s,"serverKind":"%s"}\\n' "$REMOTE_PORT" "\${REMOTE_MANAGE
 `;
 
 const REMOTE_PAIRING_SCRIPT = `set -eu
-STATE_DIR="$HOME/.t3/ssh-launch/@@T3_STATE_KEY@@"
-DEFAULT_SERVER_HOME="$HOME/.t3"
+@@T3_HOME_ASSIGNMENT@@
+STATE_DIR="$T3_HOME/ssh-launch/@@T3_STATE_KEY@@"
+DEFAULT_SERVER_HOME="$T3_HOME"
 RUNNER_FILE="$STATE_DIR/run-t3.sh"
 mkdir -p "$STATE_DIR"
 cat >"$RUNNER_FILE" <<'SH'
@@ -834,7 +846,8 @@ PAIRING_BASE_DIR="$DEFAULT_SERVER_HOME"
 `;
 
 const REMOTE_STOP_SCRIPT = `set -eu
-STATE_DIR="$HOME/.t3/ssh-launch/@@T3_STATE_KEY@@"
+@@T3_HOME_ASSIGNMENT@@
+STATE_DIR="$T3_HOME/ssh-launch/@@T3_STATE_KEY@@"
 PID_FILE="$STATE_DIR/pid"
 PORT_FILE="$STATE_DIR/port"
 MANAGED_FILE="$STATE_DIR/managed"
@@ -857,7 +870,8 @@ printf '{"stopped":true}\\n'
 `;
 
 const REMOTE_LOG_TAIL_SCRIPT = `set -eu
-STATE_DIR="$HOME/.t3/ssh-launch/@@T3_STATE_KEY@@"
+@@T3_HOME_ASSIGNMENT@@
+STATE_DIR="$T3_HOME/ssh-launch/@@T3_STATE_KEY@@"
 LOG_FILE="$STATE_DIR/server.log"
 if [ -f "$LOG_FILE" ]; then
   tail -n 80 "$LOG_FILE" 2>/dev/null || true
@@ -897,15 +911,19 @@ export function buildRemoteT3RunnerScript(input?: RemoteT3RunnerOptions): string
   if (archiveVersion !== "" && !EXACT_ARCHIVE_VERSION.test(archiveVersion)) {
     throw new SshInvalidArchiveVersionError({ archiveVersion });
   }
-  const releaseBaseUrl = cliReleaseDownloadBaseUrl("", input?.releaseBaseUrl ?? undefined).replace(
-    /\/v$/u,
-    "",
-  );
+  const assetUrl = (fileName: string) =>
+    shellSingleQuote(
+      cliReleaseAssetUrl(archiveVersion, fileName, input?.releaseBaseUrl ?? undefined),
+    );
   return stripTrailingNewlines(
     applyScriptPlaceholders(REMOTE_RUNNER_SCRIPT, {
+      T3_HOME_ASSIGNMENT: REMOTE_T3_HOME_ASSIGNMENT,
       T3_NODE_SCRIPT_PATH: shellSingleQuote(nodeScriptPath),
       T3_ARCHIVE_VERSION: shellSingleQuote(archiveVersion),
-      T3_RELEASE_BASE_URL: shellSingleQuote(releaseBaseUrl),
+      T3_CHECKSUMS_URL: assetUrl(CLI_RELEASE_CHECKSUMS_FILE),
+      T3_DARWIN_ARM64_URL: assetUrl(cliArchiveFileName(archiveVersion, "darwin-arm64")),
+      T3_LINUX_ARM64_URL: assetUrl(cliArchiveFileName(archiveVersion, "linux-arm64")),
+      T3_LINUX_X64_URL: assetUrl(cliArchiveFileName(archiveVersion, "linux-x64")),
       T3_ARCHIVE_LOCK_WAIT_SECONDS: String(REMOTE_ARCHIVE_LOCK_WAIT_SECONDS),
       T3_ARCHIVE_DOWNLOAD_SECONDS: String(REMOTE_ARCHIVE_DOWNLOAD_SECONDS),
       T3_ARCHIVE_CHECKSUMS_SECONDS: String(REMOTE_ARCHIVE_CHECKSUMS_SECONDS),
@@ -925,6 +943,7 @@ export function buildRemoteNodeEnvScript(input?: RemoteT3RunnerOptions): string 
 
 function buildRemoteLaunchScript(input?: RemoteT3RunnerOptions): string {
   return applyScriptPlaceholders(REMOTE_LAUNCH_SCRIPT, {
+    T3_HOME_ASSIGNMENT: REMOTE_T3_HOME_ASSIGNMENT,
     T3_ARCHIVE_MODE: isNodeScriptRunner(input) ? "0" : "1",
     T3_NODE_ENV_SCRIPT: buildRemoteNodeEnvScript(input),
     T3_RUNNER_SCRIPT: stripTrailingNewlines(buildRemoteT3RunnerScript(input)),
@@ -943,6 +962,7 @@ function buildRemoteLaunchScript(input?: RemoteT3RunnerOptions): string {
 
 function buildRemotePairingScript(stateKey: string, input?: RemoteT3RunnerOptions): string {
   return applyScriptPlaceholders(REMOTE_PAIRING_SCRIPT, {
+    T3_HOME_ASSIGNMENT: REMOTE_T3_HOME_ASSIGNMENT,
     T3_STATE_KEY: stateKey,
     T3_RUNNER_SCRIPT: stripTrailingNewlines(buildRemoteT3RunnerScript(input)),
   });
@@ -950,12 +970,14 @@ function buildRemotePairingScript(stateKey: string, input?: RemoteT3RunnerOption
 
 function buildRemoteStopScript(stateKey: string): string {
   return applyScriptPlaceholders(REMOTE_STOP_SCRIPT, {
+    T3_HOME_ASSIGNMENT: REMOTE_T3_HOME_ASSIGNMENT,
     T3_STATE_KEY: stateKey,
   });
 }
 
 function buildRemoteLogTailScript(stateKey: string): string {
   return applyScriptPlaceholders(REMOTE_LOG_TAIL_SCRIPT, {
+    T3_HOME_ASSIGNMENT: REMOTE_T3_HOME_ASSIGNMENT,
     T3_STATE_KEY: stateKey,
   });
 }

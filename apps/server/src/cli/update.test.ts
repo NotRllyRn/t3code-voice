@@ -51,24 +51,27 @@ it.effect("authenticates each release page until the requested channel is found"
     const httpClient = HttpClient.make((request) => {
       const url = new URL(request.url);
       assert.equal(url.origin, "https://api.github.com");
-      assert.equal(url.pathname, "/repos/pingdotgg/t3code/releases");
+      assert.equal(url.pathname, "/repos/NotRllyRn/t3code-voice/releases");
       assert.equal(request.headers.accept, "application/vnd.github+json");
       assert.equal(request.headers.authorization, "Bearer gh-token");
       const page = url.searchParams.get("page") ?? "";
       pages.push(page);
-      const tag_name = page === "1" ? "v1.2.4-preview.20260101.1" : "v1.2.3";
-      return Effect.succeed(HttpClientResponse.fromWeb(request, Response.json([{ tag_name }])));
+      const releases =
+        page === "1"
+          ? [{ tag_name: "v1.2.5" }, { tag_name: "v1.2.4-preview.20260101.1" }]
+          : [{ tag_name: "v1.2.4-voice.10" }, { tag_name: "v1.2.4-voice.2" }];
+      return Effect.succeed(HttpClientResponse.fromWeb(request, Response.json(releases)));
     });
-    const version = yield* resolveNewestVersion("stable").pipe(
+    const version = yield* resolveNewestVersion("voice").pipe(
       Effect.provideService(HostProcess.Environment, { GH_TOKEN: "gh-token" }),
       Effect.provideService(HttpClient.HttpClient, httpClient),
     );
-    assert.equal(version, "1.2.3");
+    assert.equal(version, "1.2.4-voice.10");
     assert.deepStrictEqual(pages, ["1", "2"]);
   }),
 );
 
-it.effect("reads the newest version from the update feed file a mirror publishes", () =>
+it.effect("refuses desktop update feed manifests for Voice server updates", () =>
   Effect.gen(function* () {
     const requested: string[] = [];
     const mirror = {
@@ -76,7 +79,7 @@ it.effect("reads the newest version from the update feed file a mirror publishes
       feedUrl: "https://updates.example.com/t3code/?token=abc",
     };
     const resolve = (
-      channel: "stable" | "nightly" | "preview",
+      channel: "stable" | "nightly" | "preview" | "voice",
       platform: NodeJS.Platform,
       arch: string,
       feed: string,
@@ -95,31 +98,35 @@ it.effect("reads the newest version from the update feed file a mirror publishes
         ),
       );
 
-    assert.equal(
+    assert.include(
+      yield* resolve("voice", "darwin", "arm64", "version: 1.4.0-voice.1\n"),
+      "no safe Voice release manifest",
+    );
+    assert.include(
       yield* resolve("stable", "darwin", "arm64", "version: 1.4.0\nfiles: []\n"),
-      "1.4.0",
+      "no safe Voice release manifest",
     );
-    assert.equal(
+    assert.include(
       yield* resolve("nightly", "linux", "arm64", "version: '1.5.0-nightly.20261101.2'\n"),
-      "1.5.0-nightly.20261101.2",
+      "no safe Voice release manifest",
     );
-    assert.deepStrictEqual(requested, [
-      "https://updates.example.com/t3code/latest-mac.yml?token=abc",
-      "https://updates.example.com/t3code/nightly-linux-arm64.yml?token=abc",
-    ]);
+    assert.deepStrictEqual(requested, []);
     // A feed for the wrong track is not trusted to mean the requested one.
     assert.include(
       yield* resolve("stable", "win32", "x64", "version: 1.5.0-nightly.20261101.2\n"),
-      "Could not read latest.yml from Example Corp's update mirror.",
+      "no safe Voice release manifest",
     );
-    assert.include(yield* resolve("preview", "win32", "x64", ""), "has no preview builds");
+    assert.include(
+      yield* resolve("preview", "win32", "x64", ""),
+      "no safe Voice release manifest",
+    );
   }),
 );
 
 it.layer(NodeServices.layer)("t3 update under a managed policy", (it) => {
   const runWithPolicy = (
     updates: ManagedUpdatesPolicy,
-    input: { readonly channel?: "stable" | "nightly"; readonly requestedVersion?: string } = {},
+    input: { readonly channel?: "stable" | "nightly" | "voice"; readonly requestedVersion?: string } = {},
     httpClient = HttpClient.make(() => Effect.die("unexpected release lookup")),
   ) =>
     runUpdate({
@@ -154,7 +161,7 @@ it.layer(NodeServices.layer)("t3 update under a managed policy", (it) => {
     }),
   );
 
-  it.effect("refuses nightly releases when the policy disallows them", () =>
+  it.effect("refuses upstream release channels", () =>
     Effect.gen(function* () {
       const byChannel = yield* runWithPolicy(
         { mode: "auto", allowNightly: false },
@@ -162,18 +169,20 @@ it.layer(NodeServices.layer)("t3 update under a managed policy", (it) => {
       );
       const byVersion = yield* runWithPolicy(
         { mode: "auto", allowNightly: false },
-        { channel: "stable", requestedVersion: "1.2.0-nightly.20261028.1" },
+        { channel: "voice", requestedVersion: "1.2.0-nightly.20261028.1" },
       );
-      for (const error of [byChannel, byVersion]) {
-        assert.equal(
-          error.message,
-          "Example Corp manages T3 Code updates. Only stable releases can be installed.",
-        );
-      }
+      assert.equal(
+        byChannel.message,
+        "Only Voice releases are supported; use --channel voice instead of nightly.",
+      );
+      assert.equal(
+        byVersion.message,
+        "Only Voice releases can be installed; refusing 1.2.0-nightly.20261028.1.",
+      );
     }),
   );
 
-  it.effect("looks for updates on the policy's mirror, never the public releases", () =>
+  it.effect("does not use a desktop update mirror as a Voice manifest", () =>
     Effect.gen(function* () {
       const requested: string[] = [];
       const error = yield* runWithPolicy(
@@ -186,8 +195,11 @@ it.layer(NodeServices.layer)("t3 update under a managed policy", (it) => {
           );
         }),
       );
-      assert.include(error.message, "from Example Corp's update mirror");
-      assert.deepStrictEqual(requested, ["https://updates.example.com"]);
+      assert.equal(
+        error.message,
+        "Only Voice releases are supported; use --channel voice instead of stable.",
+      );
+      assert.deepStrictEqual(requested, []);
     }),
   );
 });

@@ -25,6 +25,7 @@ import {
   cliReleaseChannelOf,
   crossesReleaseTrack,
 } from "@t3tools/shared/cliRelease";
+import { parseVoiceVersion } from "@t3tools/shared/voiceRelease";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
@@ -55,6 +56,20 @@ export function resolveServerSelfUpdateCapability(input: {
 }): ServerSelfUpdateCapability | null {
   if (input.desktopManaged) return "desktop-managed" as const;
   return input.launcherManaged ? ("boot-service" as const) : null;
+}
+
+export function voiceServerUpdateRefusal(input: {
+  readonly serverVersion: string;
+  readonly targetVersion: string;
+  readonly channel?: string;
+}): string | null {
+  if (parseVoiceVersion(input.serverVersion) === null) return null;
+  if (input.channel !== undefined) {
+    return "Voice servers cannot switch to upstream release channels; update to a Voice release instead.";
+  }
+  return parseVoiceVersion(input.targetVersion) === null
+    ? `Voice servers can update only to Voice releases; refusing t3@${input.targetVersion}.`
+    : null;
 }
 
 export class ServerSelfUpdate extends Context.Service<
@@ -161,9 +176,19 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
   const update: ServerSelfUpdate["Service"]["update"] = Effect.fn(
     "cloud.server_self_update.update",
   )(function* (input, reportProgress = () => Effect.void, onHandoffAccepted = () => Effect.void) {
+    const targetVersion = input.targetVersion.trim();
+    if (capability === "boot-service") {
+      const voiceRefusal = voiceServerUpdateRefusal({
+        serverVersion: packageJson.version,
+        targetVersion,
+        channel: input.channel,
+      });
+      if (voiceRefusal !== null) return yield* failWith(voiceRefusal);
+    }
+    const targetChannel = cliReleaseChannelOf(targetVersion);
     const policyRefusal = managedUpdateRefusal(
       policy.document,
-      capability === "boot-service" ? cliReleaseChannelOf(input.targetVersion.trim()) : undefined,
+      capability === "boot-service" && targetChannel !== "voice" ? targetChannel : undefined,
     );
     if (policyRefusal !== undefined) {
       return yield* failWith(policyRefusal);
@@ -191,7 +216,6 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
 
     const unsafeCrossing = crossesTrackUnsafely(input);
     if (unsafeCrossing !== null) return yield* failWith(unsafeCrossing);
-    const targetVersion = input.targetVersion.trim();
     if (!isExactServiceVersion(targetVersion)) {
       return yield* failWith(`'${targetVersion}' is not an exact t3 version.`);
     }

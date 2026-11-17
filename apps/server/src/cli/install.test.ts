@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -18,7 +19,7 @@ const setup = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-install-" });
-  const runtimeDir = path.join(root, ".t3/runtime");
+  const runtimeDir = path.join(root, FORK_DESKTOP.homeDirectoryName, "runtime");
   const executable = path.join(runtimeDir, "versions", VERSION, "t3");
   yield* fs.makeDirectory(path.dirname(executable), { recursive: true });
   yield* fs.writeFileString(executable, "");
@@ -63,7 +64,7 @@ it.layer(NodeServices.layer)("t3 install", (it) => {
 
       // A link written through a symlinked T3 home is still ours.
       const alias = path.join(root, "alias");
-      yield* fs.symlink(path.join(root, ".t3"), alias);
+      yield* fs.symlink(path.join(root, FORK_DESKTOP.homeDirectoryName), alias);
       yield* fs.remove(link);
       yield* fs.symlink(path.join(alias, "runtime/versions", VERSION, "t3"), link);
       const onPath = yield* provide(installCli(), { PATH: `/usr/bin:${path.join(root, "bin")}/` });
@@ -94,9 +95,18 @@ it.layer(NodeServices.layer)("t3 install", (it) => {
       assert.include(sibling.message, "Another t3 is already at");
       // This home's desktop launcher is replaced, as install.sh does.
       yield* fs.remove(link);
-      yield* fs.symlink(path.join(root, ".t3/bin/t3"), link);
+      yield* fs.symlink(path.join(root, FORK_DESKTOP.homeDirectoryName, "bin/t3"), link);
       yield* provide(installCli());
       assert.equal(yield* fs.readLink(link), executable);
+
+      for (const upstreamPath of [".t3/bin/t3", ".t3/runtime/versions/0.0.1/t3"]) {
+        yield* fs.remove(link);
+        const upstream = path.join(root, upstreamPath);
+        yield* fs.symlink(upstream, link);
+        const foreign = yield* provide(installCli()).pipe(Effect.flip);
+        assert.include(foreign.message, "Another t3 is already at");
+        assert.equal(yield* fs.readLink(link), upstream);
+      }
 
       // A failed swap over our own link leaves a staging path it did not create alone.
       yield* fs.remove(link);
@@ -162,6 +172,21 @@ it.layer(NodeServices.layer)("t3 install", (it) => {
         ),
       ).pipe(Effect.flip);
       assert.include(unrunnable.message, "has % or non-ASCII characters");
+      assert.notInclude(unrunnable.message, "npx");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("gives non-bundled installs fork release guidance", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { link, provide } = yield* setup;
+      const error = yield* provide(
+        installCli().pipe(Effect.provideService(HostProcess.IsExecutable, false)),
+      ).pipe(Effect.flip);
+      assert.include(error.message, FORK_DESKTOP.releasesUrl);
+      assert.notInclude(error.message, "t3.codes/install");
+      assert.notInclude(error.message, "npx t3");
+      assert.isFalse(yield* fs.exists(link));
     }).pipe(Effect.scoped),
   );
 

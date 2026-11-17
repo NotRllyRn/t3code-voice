@@ -161,6 +161,27 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
 });
 
 it.layer(NodeServices.layer)("server self update", (it) => {
+  it.effect("Voice runtimes reject upstream candidates but allow preview migration", () =>
+    Effect.sync(() => {
+      const refuse = ServerSelfUpdate.voiceServerUpdateRefusal;
+      expect(
+        refuse({ serverVersion: "0.1.9-voice.1", targetVersion: "1.0.0" }),
+      ).toBe("Voice servers can update only to Voice releases; refusing t3@1.0.0.");
+      expect(
+        refuse({ serverVersion: "0.1.9-voice.1", targetVersion: "1.0.0-nightly.20261116.1" }),
+      ).toBe("Voice servers can update only to Voice releases; refusing t3@1.0.0-nightly.20261116.1.");
+      expect(
+        refuse({ serverVersion: "0.1.9-voice.1", targetVersion: "1.0.0-voice.1", channel: "stable" }),
+      ).toBe("Voice servers cannot switch to upstream release channels; update to a Voice release instead.");
+      expect(
+        refuse({ serverVersion: "0.1.9-preview.20261116.1", targetVersion: "1.0.0-voice.1" }),
+      ).toBeNull();
+      expect(
+        refuse({ serverVersion: "0.1.9-voice.1", targetVersion: "1.0.0-voice.2" }),
+      ).toBeNull();
+    }),
+  );
+
   it.effect.each([
     { asset: "checksums", status: 504 },
     { asset: "archive", status: 503 },

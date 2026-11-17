@@ -8,6 +8,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
+import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -179,18 +180,33 @@ describe("ssh tunnel scripts", () => {
         archiveVersion,
       );
     }
+    const script = SshTunnel.buildRemoteT3RunnerScript(ARCHIVE);
+    assert.include(script, "T3_ARCHIVE_VERSION='1.2.3-preview.20260911.4'");
     assert.include(
-      SshTunnel.buildRemoteT3RunnerScript(ARCHIVE),
-      "T3_ARCHIVE_VERSION='1.2.3-preview.20260911.4'",
+      script,
+      'T3_HOME="${' +
+        FORK_DESKTOP.homeEnvironmentVariable +
+        ":-$HOME/" +
+        FORK_DESKTOP.homeDirectoryName +
+        '}"',
     );
+    assert.include(script, `T3_RUNTIME_DIR="$T3_HOME/runtime/versions/$T3_ARCHIVE_VERSION"`);
+    assert.notInclude(script, "$HOME/.t3/runtime");
   });
 
   it.each([
     { host: "Darwin x86_64", system: "Darwin", machine: "x86_64", downloads: false },
     { host: "Darwin arm64", system: "Darwin", machine: "arm64", downloads: true },
+    {
+      host: "Linux x86_64 with signed mirror",
+      system: "Linux",
+      machine: "x86_64",
+      downloads: true,
+      releaseBaseUrl: "https://mirror.test/releases?sig=abc",
+    },
   ])(
     "only downloads a release archive the host can run: $host",
-    ({ system, machine, downloads }) => {
+    ({ system, machine, downloads, releaseBaseUrl }) => {
       const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-ssh-runner-"));
       try {
         const bin = NodePath.join(root, "bin");
@@ -203,11 +219,14 @@ describe("ssh tunnel scripts", () => {
         );
         NodeFS.writeFileSync(
           NodePath.join(bin, "curl"),
-          "#!/bin/sh\necho 'download attempt' >&2\nexit 22\n",
+          '#!/bin/sh\nprintf "download attempt: %s\\n" "$6" >&2\ncase "$6" in *SHA256SUMS*) : > "$8" ;; *) exit 22 ;; esac\n',
           { mode: 0o755 },
         );
         const runner = NodePath.join(root, "run-t3.sh");
-        NodeFS.writeFileSync(runner, SshTunnel.buildRemoteT3RunnerScript(ARCHIVE));
+        NodeFS.writeFileSync(
+          runner,
+          SshTunnel.buildRemoteT3RunnerScript({ ...ARCHIVE, releaseBaseUrl }),
+        );
         const result = NodeChildProcess.spawnSync("sh", [runner, "--version"], {
           encoding: "utf8",
           env: { HOME: NodePath.join(root, "home"), PATH: `${bin}:${process.env.PATH ?? ""}` },
@@ -215,6 +234,13 @@ describe("ssh tunnel scripts", () => {
         assert.notEqual(result.status, 0);
         if (downloads) {
           assert.include(result.stderr, "download attempt");
+          if (releaseBaseUrl) {
+            assert.equal(
+              result.stderr,
+              `download attempt: https://mirror.test/releases/v${ARCHIVE.archiveVersion}/SHA256SUMS?sig=abc\n` +
+                `download attempt: https://mirror.test/releases/v${ARCHIVE.archiveVersion}/t3-${ARCHIVE.archiveVersion}-linux-x64.tar.gz?sig=abc\n`,
+            );
+          }
         } else {
           assert.notInclude(result.stderr, "download attempt");
           assert.include(result.stderr, "has no t3 release archive.");
@@ -724,7 +750,8 @@ describe("ssh tunnel scripts", () => {
         const serverScript = path.join(home, "fake-t3.cjs");
         yield* fs.writeFileString(serverScript, fakeT3Serve(publishDelayMs));
         // A launch that died holding the lock must not block or double-admit later ones.
-        const launchLock = path.join(home, ".t3", "ssh-launch", ".launch.lock");
+        const t3Home = path.join(home, FORK_DESKTOP.homeDirectoryName);
+        const launchLock = path.join(t3Home, "ssh-launch", ".launch.lock");
         yield* fs.makeDirectory(path.dirname(launchLock), { recursive: true });
         yield* fs.writeFileString(launchLock, "999999999\n");
         const targets = [
@@ -742,7 +769,7 @@ describe("ssh tunnel scripts", () => {
         ).pipe(Effect.provide(localRemoteShellLayer(home)));
 
         const ownerPid = Number(
-          yield* fs.readFileString(path.join(home, ".t3", "userdata", "server.lock")),
+          yield* fs.readFileString(path.join(t3Home, "userdata", "server.lock")),
         );
         assert.sameMembers(
           launches.map((launch) => launch.remoteServerKind),
@@ -756,7 +783,7 @@ describe("ssh tunnel scripts", () => {
           if (launch.remoteServerKind !== "managed") continue;
           const stateKey = yield* remoteStateKey(targets[index]!);
           const recordedPid = yield* fs.readFileString(
-            path.join(home, ".t3", "ssh-launch", stateKey, "pid"),
+            path.join(t3Home, "ssh-launch", stateKey, "pid"),
           );
           assert.equal(
             Number(recordedPid.trim()),

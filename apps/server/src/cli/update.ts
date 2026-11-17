@@ -5,8 +5,6 @@ import {
   cliReleaseIndexPageUrl,
   cliReleaseChannelOf,
   newestCliReleaseVersion,
-  releaseAssetUrl,
-  updateFeedFileName,
   type CliReleaseChannel,
 } from "@t3tools/shared/cliRelease";
 import * as Console from "effect/Console";
@@ -65,6 +63,11 @@ const RELEASE_INDEX_MAX_PAGES = 10;
 export const resolveNewestVersion = Effect.fn("cli.update.resolve_newest")(function* (
   channel: CliReleaseChannel,
 ) {
+  if (channel !== "voice") {
+    return yield* new CliUpdateError({
+      reason: `Only Voice releases are supported; refusing to check the upstream ${channel} channel.`,
+    });
+  }
   const httpClient = yield* HttpClient.HttpClient;
   const environment = yield* HostProcess.Environment;
   const githubToken = environment.GH_TOKEN?.trim() || environment.GITHUB_TOKEN?.trim() || undefined;
@@ -102,40 +105,10 @@ export const resolveMirrorVersion = Effect.fn("cli.update.resolve_mirror")(funct
   mirror: { readonly organization: string; readonly feedUrl: string },
   channel: CliReleaseChannel,
 ) {
-  if (channel === "preview") {
-    return yield* new CliUpdateError({
-      reason: `${mirror.organization}'s update mirror has no preview builds.`,
-    });
-  }
-  const httpClient = yield* HttpClient.HttpClient;
-  const fileName = updateFeedFileName(
-    channel === "nightly" ? "nightly" : "latest",
-    yield* HostProcess.Platform,
-    yield* HostProcess.Architecture,
-  );
-  const url = releaseAssetUrl(mirror.feedUrl, fileName);
-  // Not the URL, whose query can hold the mirror's access token.
-  const unreadable = new CliUpdateError({
-    reason: `Could not read ${fileName} from ${mirror.organization}'s update mirror.`,
+  return yield* new CliUpdateError({
+    reason: `${mirror.organization}'s update mirror has no safe Voice release manifest; refusing the ${channel} feed.`,
   });
-  const body = yield* httpClient.get(url).pipe(
-    Effect.flatMap(HttpClientResponse.filterStatusOk),
-    Effect.flatMap((response) => response.text),
-    Effect.mapError(() => unreadable),
-    Effect.timeoutOrElse({
-      duration: RELEASE_INDEX_TIMEOUT,
-      orElse: () => Effect.fail(unreadable),
-    }),
-  );
-  const version = /^version:\s*["']?([^"'\s]+)/m.exec(body)?.[1];
-  if (
-    version === undefined ||
-    !isExactServiceVersion(version) ||
-    cliReleaseChannelOf(version) !== channel
-  ) {
-    return yield* unreadable;
-  }
-  return version;
+
 });
 
 /**
@@ -367,10 +340,24 @@ export const runUpdate = Effect.fn("cli.update.run")(function* (input: {
   const mirror = managedUpdateMirror(policy.document);
 
   const currentVersion = packageJson.version;
-  const channel = input.channel ?? cliReleaseChannelOf(currentVersion);
+  const channel = input.channel ?? "voice";
+  if (channel !== "voice") {
+    return yield* new CliUpdateError({
+      reason: `Only Voice releases are supported; use --channel voice instead of ${channel}.`,
+    });
+  }
+  if (
+    input.requestedVersion !== undefined &&
+    input.requestedVersion !== currentVersion &&
+    cliReleaseChannelOf(input.requestedVersion) !== "voice"
+  ) {
+    return yield* new CliUpdateError({
+      reason: `Only Voice releases can be installed; refusing ${input.requestedVersion}.`,
+    });
+  }
   const refusal = managedUpdateRefusal(
     policy.document,
-    input.requestedVersion === undefined ? channel : cliReleaseChannelOf(input.requestedVersion),
+    undefined,
   );
   if (refusal !== undefined) {
     return yield* new CliUpdateError({ reason: refusal });
@@ -385,9 +372,7 @@ export const runUpdate = Effect.fn("cli.update.run")(function* (input: {
   const targetVersion = yield* (
     input.requestedVersion !== undefined
       ? Effect.succeed(input.requestedVersion)
-      : mirror === undefined
-        ? resolveNewestVersion(channel)
-        : resolveMirrorVersion(mirror, channel)
+      : resolveNewestVersion(channel)
   ).pipe(Effect.ensuring(Effect.sync(progress.finish)));
   const targetChannel = cliReleaseChannelOf(targetVersion);
 

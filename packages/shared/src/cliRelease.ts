@@ -1,9 +1,11 @@
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
+import { FORK_RELEASE } from "./forkIdentity.ts";
+import { parseVoiceVersion } from "./voiceRelease.ts";
 import { compareSemverVersions } from "./semver.ts";
 
-const CLI_RELEASE_REPOSITORY = "pingdotgg/t3code";
+const CLI_RELEASE_REPOSITORY = FORK_RELEASE.repository;
 export const CLI_RELEASES_PAGE_URL = `https://github.com/${CLI_RELEASE_REPOSITORY}/releases`;
 export const CLI_RELEASE_CHECKSUMS_FILE = "SHA256SUMS";
 export const CLI_RELEASE_BASE_URL_ENV = "T3CODE_RELEASE_BASE_URL";
@@ -48,7 +50,7 @@ export function cliReleaseDownloadBaseUrl(
   version: string,
   baseUrl: string | undefined = CLI_RELEASE_DEFAULT_BASE_URL,
 ): string {
-  return `${(baseUrl?.trim() || CLI_RELEASE_DEFAULT_BASE_URL).replace(/\/+$/, "")}/v${version}`;
+  return releaseAssetUrl(baseUrl?.trim() || CLI_RELEASE_DEFAULT_BASE_URL, `v${version}`);
 }
 
 /** `segments` added to `baseUrl`'s path, keeping its query, such as a signed mirror URL's token. */
@@ -78,14 +80,17 @@ export function parseChecksums(text: string): ReadonlyMap<string, string> {
   return checksums;
 }
 
-export type CliReleaseChannel = "stable" | "nightly" | "preview";
+export type CliReleaseChannel = "stable" | "nightly" | "preview" | "voice" | "invalid";
 export const CLI_RELEASE_CHANNELS: ReadonlyArray<CliReleaseChannel> = [
   "stable",
   "nightly",
   "preview",
+  "voice",
 ];
 
 export function cliReleaseChannelOf(version: string): CliReleaseChannel {
+  if (parseVoiceVersion(version)) return "voice";
+  if (/^[^-+]+-voice(?:\.|$)/.test(version)) return "invalid";
   const channel = /^[^-+]+-(nightly|preview)\.\d{8}\.\d+$/.exec(version)?.[1];
   return channel === "nightly" || channel === "preview" ? channel : "stable";
 }
@@ -144,13 +149,14 @@ export function newestCliReleaseVersion(
   }>,
   channel: CliReleaseChannel,
 ): string | undefined {
+  let newest: string | undefined;
   for (const release of releases) {
     if (release.draft) continue;
     const version = /^v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/.exec(release.tag_name)?.[1];
-    if (version === undefined) continue;
-    if (cliReleaseChannelOf(version) === channel) return version;
+    if (version === undefined || cliReleaseChannelOf(version) !== channel) continue;
+    if (newest === undefined || compareSemverVersions(version, newest) > 0) newest = version;
   }
-  return undefined;
+  return newest;
 }
 
 const NpmReleaseMigrationManifest = Schema.Struct({
