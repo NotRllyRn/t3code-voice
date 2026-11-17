@@ -26,6 +26,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ModelManifest from "../provider/ModelManifest.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as ProviderInstanceRegistryMutator from "../provider/ProviderInstanceRegistryMutator.ts";
@@ -188,6 +189,7 @@ const setup = Effect.fn("SecretCheckTest.setup")(function* (
 });
 
 const layerTest = Layer.mergeAll(
+  Layer.mock(ServerSecretStore.ServerSecretStore)({}),
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-secret-check-" }),
   ModelManifest.layerTest,
   ProviderLatestVersions.layer,

@@ -34,6 +34,7 @@ import * as Scope from "effect/Scope";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
@@ -930,6 +931,9 @@ describe("ProviderInstanceRegistry secret environment", () => {
     const vault = new Map(Object.entries(initial));
     const reads: Array<ReadonlyArray<string>> = [];
     const invalidated: Array<ReadonlyArray<string>> = [];
+    const stored = new Map<string, string>();
+    const storeReads: string[] = [];
+    const storeFailures = new Set<string>();
     const created: Array<ResolvedProviderInstanceEnvironment> = [];
     const configs: Array<unknown> = [];
     const resolvedSecrets: Array<ReadonlyArray<{ readonly name: string; readonly value: string }>> =
@@ -973,6 +977,28 @@ describe("ProviderInstanceRegistry secret environment", () => {
     };
     const makeGated = makeProviderInstanceRegistry({ drivers: [driver], configMap }).pipe(
       Effect.provide(resolver),
+      Effect.provideService(ServerSecretStore.ServerSecretStore, {
+        get: (name) =>
+          Effect.suspend(() => {
+            storeReads.push(name);
+            return storeFailures.has(name)
+              ? Effect.fail(
+                  new ServerSecretStore.SecretStoreReadError({
+                    resource: "test slot",
+                    cause: "DO_NOT_LEAK",
+                  }),
+                )
+              : Effect.succeed(
+                  Option.fromNullishOr(stored.get(name)).pipe(
+                    Option.map((value) => new TextEncoder().encode(value)),
+                  ),
+                );
+          }),
+        set: () => Effect.void,
+        create: () => Effect.void,
+        getOrCreateRandom: () => Effect.succeed(new Uint8Array()),
+        remove: () => Effect.void,
+      }),
     );
     // Secrets are read after startup, so wait for the change that applies them.
     const make = Effect.gen(function* () {
@@ -986,6 +1012,9 @@ describe("ProviderInstanceRegistry secret environment", () => {
       vault,
       reads,
       invalidated,
+      stored,
+      storeReads,
+      storeFailures,
       created,
       configs,
       resolvedSecrets,
@@ -995,6 +1024,111 @@ describe("ProviderInstanceRegistry secret environment", () => {
       gate,
     };
   }
+
+  const storedSlot = `provider-env-${Buffer.from(instanceId).toString("base64url")}-${Buffer.from("OPENAI_API_KEY").toString("base64url")}`;
+  const storedVariable = {
+    name: "OPENAI_API_KEY",
+    value: "untrusted-materialized-value",
+    sensitive: true,
+    valueRedacted: true,
+  };
+
+  it.effect.each(["success", "missing", "empty", "failure"] as const)(
+    "uses only a successful server-store read (%s)",
+    (scenario) => {
+      const fixture = setup({}, Schema.Unknown, {}, [storedVariable]);
+      if (scenario === "success") fixture.stored.set(storedSlot, "stored-current");
+      if (scenario === "empty") fixture.stored.set(storedSlot, " ");
+      if (scenario === "failure") fixture.storeFailures.add(storedSlot);
+      return Effect.gen(function* () {
+        const { registry, mutator } = yield* fixture.makeGated;
+        expect(fixture.storeReads).toEqual([storedSlot]);
+        if (scenario !== "success") {
+          expect(yield* registry.getInstance(instanceId)).toBeUndefined();
+          expect(fixture.created).toEqual([]);
+          expect(JSON.stringify(yield* registry.listUnavailable)).not.toMatch(
+            /DO_NOT_LEAK|untrusted-materialized-value/,
+          );
+          fixture.storeFailures.clear();
+          fixture.stored.set(storedSlot, "stored-recovered");
+          yield* mutator.reloadSecrets(instanceId);
+          expect(fixture.resolvedSecrets.at(-1)).toEqual([
+            { name: "OPENAI_API_KEY", value: "stored-recovered" },
+          ]);
+          return;
+        }
+        expect(fixture.created.at(-1)?.[0]?.value).toBe("stored-current");
+        expect(fixture.resolvedSecrets.at(-1)).toEqual([
+          { name: "OPENAI_API_KEY", value: "stored-current" },
+        ]);
+        fixture.stored.set(storedSlot, "stored-rotated");
+        yield* mutator.reloadSecrets(instanceId);
+        expect(fixture.created.at(-1)?.[0]?.value).toBe("stored-rotated");
+        expect(fixture.resolvedSecrets.at(-1)).toEqual([
+          { name: "OPENAI_API_KEY", value: "stored-rotated" },
+        ]);
+        fixture.storeFailures.add(storedSlot);
+        yield* mutator.reloadSecrets(instanceId);
+        expect(yield* registry.getInstance(instanceId)).toBeUndefined();
+        expect(fixture.created).toHaveLength(2);
+      });
+    },
+  );
+
+  it.effect.each([
+    { ...storedVariable, valueRedacted: false },
+    { ...storedVariable, sensitive: false },
+    { name: "OPENAI_API_KEY", value: "literal", sensitive: false },
+    { ...storedVariable, name: "OTHER_API_KEY" },
+  ])(
+    "does not grant store provenance from a literal or sensitive flag alone ($name)",
+    (variable) => {
+      const fixture = setup({}, Schema.Unknown, {}, [variable]);
+      fixture.stored.set(storedSlot, "stored-current");
+      return Effect.gen(function* () {
+        yield* fixture.makeGated;
+        expect(fixture.storeReads).toEqual([]);
+        expect(fixture.resolvedSecrets).toEqual([[]]);
+      });
+    },
+  );
+
+  it.effect.each([true, false])(
+    "keeps stored duplicate order and checked refresh current (stored first %s)",
+    (storedFirst) => {
+      const literal = { name: "OPENAI_API_KEY", value: "literal-override", sensitive: true };
+      const fixture = setup({ [secret.reference]: "external-current" }, Schema.Unknown, {}, [
+        ...(storedFirst ? [storedVariable, literal] : [literal, storedVariable]),
+        { name: "EXTERNAL_KEY", value: secret, sensitive: true },
+      ]);
+      fixture.stored.set(storedSlot, "stored-current");
+      return Effect.gen(function* () {
+        const { registry, mutator } = yield* fixture.make;
+        const expectedSecrets = (value: string) => [
+          ...(!storedFirst ? [{ name: "OPENAI_API_KEY", value }] : []),
+          { name: "EXTERNAL_KEY", value: "external-current" },
+        ];
+        expect(fixture.resolvedSecrets.at(-1)).toEqual(expectedSecrets("stored-current"));
+        fixture.stored.set(storedSlot, "stored-checked-current");
+        yield* mutator.applySecret(secret, "external-current");
+        expect(
+          fixture.created
+            .at(-1)
+            ?.slice(0, 2)
+            .map(({ value }) => value),
+        ).toEqual(
+          storedFirst
+            ? ["stored-checked-current", "literal-override"]
+            : ["literal-override", "stored-checked-current"],
+        );
+        expect(fixture.resolvedSecrets.at(-1)).toEqual(expectedSecrets("stored-checked-current"));
+        fixture.storeFailures.add(storedSlot);
+        yield* mutator.applySecret(secret, "external-checked-new");
+        expect(yield* registry.getInstance(instanceId)).toBeUndefined();
+        expect(fixture.created).toHaveLength(2);
+      });
+    },
+  );
 
   it.effect("starts an instance with the secret its environment points at", () => {
     const fixture = setup({ [secret.reference]: "sk-live" });
@@ -1026,7 +1160,7 @@ describe("ProviderInstanceRegistry secret environment", () => {
       return Effect.gen(function* () {
         const { mutator } = yield* fixture.make;
         expect(fixture.resolvedSecrets).toEqual([
-          [{ name: "OPENAI_API_KEY", value: "initial-reference" }],
+          referenceFirst ? [] : [{ name: "OPENAI_API_KEY", value: "initial-reference" }],
         ]);
         const reads = fixture.reads.length;
         yield* mutator.applySecret(secret, "checked-rotation");
@@ -1040,14 +1174,14 @@ describe("ProviderInstanceRegistry secret environment", () => {
         ).toEqual({
           OPENAI_API_KEY: expected.at(-1),
         });
-        expect(fixture.resolvedSecrets.at(-1)).toEqual([
-          { name: "OPENAI_API_KEY", value: "checked-rotation" },
-        ]);
+        expect(fixture.resolvedSecrets.at(-1)).toEqual(
+          referenceFirst ? [] : [{ name: "OPENAI_API_KEY", value: "checked-rotation" }],
+        );
         fixture.vault.set(secret.reference, "resolver-rotation");
         yield* mutator.reloadSecrets(instanceId);
-        expect(fixture.resolvedSecrets.at(-1)).toEqual([
-          { name: "OPENAI_API_KEY", value: "resolver-rotation" },
-        ]);
+        expect(fixture.resolvedSecrets.at(-1)).toEqual(
+          referenceFirst ? [] : [{ name: "OPENAI_API_KEY", value: "resolver-rotation" }],
+        );
         expect(fixture.created.at(-1)?.map(({ value }) => value)).toEqual(
           referenceFirst
             ? ["resolver-rotation", "literal-override"]

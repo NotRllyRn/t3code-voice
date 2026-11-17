@@ -27,6 +27,7 @@ import * as Stream from "effect/Stream";
 
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { buildUnavailableProviderSnapshot } from "./unavailableProviderSnapshot.ts";
 import * as ProviderInstanceRegistryMutator from "./ProviderInstanceRegistryMutator.ts";
 import type { AnyProviderDriver, ProviderInstance } from "@t3tools/provider-core/server/driver";
@@ -94,6 +95,53 @@ const withoutSecretReferences = (
     typeof variable.value === "string" ? [{ ...variable, value: variable.value }] : [],
   );
 
+const isStoredEnvironmentSecret = (variable: ProviderInstanceEnvironment[number]) =>
+  variable.name === "OPENAI_API_KEY" &&
+  typeof variable.value === "string" &&
+  variable.sensitive === true &&
+  variable.valueRedacted === true;
+
+const hasStoredEnvironmentSecret = (entry: ProviderInstanceConfig) =>
+  entry.environment?.some(isStoredEnvironmentSecret) === true;
+
+const environmentSecretProvenance = (
+  entry: ProviderInstanceConfig,
+  environment: ResolvedProviderInstanceEnvironment,
+) => {
+  const variables = entry.environment ?? [];
+  return environment.flatMap((variable, index) => {
+    const source = variables[index];
+    return source !== undefined &&
+      (typeof source.value !== "string" || isStoredEnvironmentSecret(source)) &&
+      variables.findLastIndex(({ name }) => name === variable.name) === index
+      ? [{ name: variable.name, value: variable.value }]
+      : [];
+  });
+};
+
+const readStoredEnvironmentSecrets = Effect.fn(
+  "ProviderInstanceRegistry.readStoredEnvironmentSecrets",
+)(function* (
+  instanceId: ProviderInstanceId,
+  entry: ProviderInstanceConfig,
+  environment: ResolvedProviderInstanceEnvironment,
+) {
+  const unreadable: string[] = [];
+  const resolved = yield* Effect.forEach(environment, (variable, index) =>
+    Effect.gen(function* () {
+      const source = entry.environment?.[index];
+      if (source === undefined || !isStoredEnvironmentSecret(source)) return variable;
+      const store = yield* ServerSecretStore.ServerSecretStore;
+      const slot = `provider-env-${Buffer.from(instanceId, "utf8").toString("base64url")}-${Buffer.from(source.name, "utf8").toString("base64url")}`;
+      const bytes = yield* store.get(slot).pipe(Effect.catch(() => Effect.succeedNone));
+      const value = Option.isSome(bytes) ? new TextDecoder().decode(bytes.value) : "";
+      if (value.trim() === "") unreadable.push(source.name);
+      return { ...variable, value };
+    }),
+  );
+  return { environment: resolved, unreadable };
+});
+
 interface CheckedSecret {
   readonly reference: SecretReference;
   readonly value: string;
@@ -107,6 +155,7 @@ const sameReference = (a: SecretReference, b: SecretReference) =>
 const readInstanceSecrets = Effect.fn("ProviderInstanceRegistry.readInstanceSecrets")(function* <R>(
   driver: AnyProviderDriver<R> | undefined,
   entry: ProviderInstanceConfig,
+  instanceId: ProviderInstanceId,
   checked?: CheckedSecret,
 ) {
   const variables = entry.environment ?? [];
@@ -131,16 +180,13 @@ const readInstanceSecrets = Effect.fn("ProviderInstanceRegistry.readInstanceSecr
     const secret = values[index++];
     return secret === undefined || secret.trim() === "" ? undefined : secret;
   };
-  const referencedEnvironment: Array<{ readonly name: string; readonly value: string }> = [];
-  const environment: ResolvedProviderInstanceEnvironment = variables.flatMap((variable) => {
-    if (typeof variable.value === "string") return [{ ...variable, value: variable.value }];
+  const environment: ResolvedProviderInstanceEnvironment = variables.map((variable) => {
+    if (typeof variable.value === "string") return { ...variable, value: variable.value };
     const secret = next();
     if (secret === undefined) {
       unreadable.push(variable.name);
-      return [];
     }
-    referencedEnvironment.push({ name: variable.name, value: secret });
-    return [{ ...variable, value: secret, sensitive: true }];
+    return { ...variable, value: secret ?? "", sensitive: true };
   });
   const config = configFields.flatMap(({ field, key }) => {
     const secret = next();
@@ -148,18 +194,28 @@ const readInstanceSecrets = Effect.fn("ProviderInstanceRegistry.readInstanceSecr
     unreadable.push(field);
     return [];
   });
-  const secrets: InstanceSecrets = { environment, referencedEnvironment, config };
-  return { secrets, unreadable };
+  const stored = yield* readStoredEnvironmentSecrets(instanceId, entry, environment);
+  const secrets: InstanceSecrets = {
+    environment: stored.environment,
+    referencedEnvironment: environmentSecretProvenance(entry, stored.environment),
+    config,
+  };
+  return {
+    secrets,
+    unreadable: [...unreadable, ...stored.unreadable],
+    storedUnreadable: stored.unreadable.length > 0,
+  };
 });
 
 // Replaces only the checked reference's value in the secrets a live instance already holds, so
 // another reference whose read failed earlier is not read again and does not park the instance.
-const carryCheckedSecret = <R>(
+const carryCheckedSecret = Effect.fn("ProviderInstanceRegistry.carryCheckedSecret")(function* <R>(
   driver: AnyProviderDriver<R> | undefined,
   entry: ProviderInstanceConfig,
+  instanceId: ProviderInstanceId,
   current: InstanceSecrets,
   { reference: checked, value }: CheckedSecret,
-): InstanceSecrets => {
+) {
   const matches = (reference: SecretReference) => sameReference(reference, checked);
   // A live instance resolved every variable in order, so slots line up with the entry's variables
   // by position; names may repeat.
@@ -173,22 +229,20 @@ const carryCheckedSecret = <R>(
       ? { ...variable, value }
       : variable;
   });
+  const stored = yield* readStoredEnvironmentSecrets(instanceId, entry, environment);
   return {
-    environment,
-    // Trust follows the original reference slots, never a duplicate name or sensitive flag.
-    referencedEnvironment: environment.flatMap((variable, index) => {
-      const source = variables[index]?.value;
-      return source !== undefined && typeof source !== "string"
-        ? [{ name: variable.name, value: variable.value }]
-        : [];
-    }),
-    config: current.config.map((slot) =>
-      replacedSlots.some(({ field, key }) => field === slot.field && key === slot.key)
-        ? { ...slot, value }
-        : slot,
-    ),
+    secrets: {
+      environment: stored.environment,
+      referencedEnvironment: environmentSecretProvenance(entry, stored.environment),
+      config: current.config.map((slot) =>
+        replacedSlots.some(({ field, key }) => field === slot.field && key === slot.key)
+          ? { ...slot, value }
+          : slot,
+      ),
+    },
+    unreadable: stored.unreadable,
   };
-};
+});
 
 /** Conflicting saved flags must preserve any explicit disable. */
 const resolveEntryEnabled = (entry: ProviderInstanceConfig, typedConfig: unknown): boolean => {
@@ -230,7 +284,7 @@ const buildEntry = Effect.fn("ProviderInstanceRegistry.buildEntry")(function* <R
       readonly secretsUnreadable?: true;
     },
   never,
-  R | SecretResolver.SecretResolver
+  R | SecretResolver.SecretResolver | ServerSecretStore.ServerSecretStore
 > {
   const {
     driversById,
@@ -307,7 +361,7 @@ const buildEntry = Effect.fn("ProviderInstanceRegistry.buildEntry")(function* <R
   const { secrets, unreadable } = carriedSecrets
     ? { secrets: carriedSecrets, unreadable: [] }
     : enabled
-      ? yield* readInstanceSecrets(driver, entry)
+      ? yield* readInstanceSecrets(driver, entry, instanceId)
       : {
           secrets: {
             environment: withoutSecretReferences(entry.environment ?? []),
@@ -388,7 +442,11 @@ const makeReconcile = <R>(input: {
   rebuild?: ReadonlySet<ProviderInstanceId>,
   deferSecrets?: boolean,
   carried?: ReadonlyMap<ProviderInstanceId, InstanceSecrets>,
-) => Effect.Effect<void, never, R | SecretResolver.SecretResolver>) => {
+) => Effect.Effect<
+  void,
+  never,
+  R | SecretResolver.SecretResolver | ServerSecretStore.ServerSecretStore
+>) => {
   const { state, driversById, blockedReason, parentScope } = input;
   return (configMap, rebuild = new Set(), deferSecrets = false, carried = new Map()) =>
     Effect.gen(function* () {
@@ -541,7 +599,7 @@ export const makeProviderInstanceRegistry = Effect.fn(
     readonly mutator: ProviderInstanceRegistryMutator.ProviderInstanceRegistryMutatorShape;
   },
   never,
-  R | SecretResolver.SecretResolver | Scope.Scope
+  R | SecretResolver.SecretResolver | ServerSecretStore.ServerSecretStore | Scope.Scope
 > {
   const driversById = new Map<ProviderDriverKind, AnyProviderDriver<R>>(
     input.drivers.map((driver) => [driver.driverKind, driver]),
@@ -553,7 +611,9 @@ export const makeProviderInstanceRegistry = Effect.fn(
   // scopes to the *caller's* scope instead of the registry's.
   const parentScope = yield* Scope.Scope;
 
-  const driverContext = yield* Effect.context<R | SecretResolver.SecretResolver>();
+  const driverContext = yield* Effect.context<
+    R | SecretResolver.SecretResolver | ServerSecretStore.ServerSecretStore
+  >();
 
   const entries = yield* Ref.make<ReadonlyMap<ProviderInstanceId, LiveEntry>>(new Map());
   const unavailable = yield* Ref.make<ReadonlyMap<ProviderInstanceId, ServerProvider>>(new Map());
@@ -591,7 +651,8 @@ export const makeProviderInstanceRegistry = Effect.fn(
     ) {
       const configMap = yield* Ref.get(configMapRef);
       const targets = yield* Effect.filter(Object.entries(configMap), ([rawInstanceId, entry]) =>
-        select(rawInstanceId, entry) && secretReferencesOf(driversById, entry).length > 0
+        select(rawInstanceId, entry) &&
+        (secretReferencesOf(driversById, entry).length > 0 || hasStoredEnvironmentSecret(entry))
           ? isEntryEnabled(driversById, entry)
           : Effect.succeed(false),
       );
@@ -599,8 +660,10 @@ export const makeProviderInstanceRegistry = Effect.fn(
       if (checked === undefined) {
         const resolver = yield* SecretResolver.SecretResolver;
         const references = targets.flatMap(([, entry]) => secretReferencesOf(driversById, entry));
-        yield* resolver.invalidate(references);
-        yield* resolver.read(references);
+        if (references.length > 0) {
+          yield* resolver.invalidate(references);
+          yield* resolver.read(references);
+        }
       }
       const live = yield* Ref.get(entries);
       const rebuild = new Set<ProviderInstanceId>();
@@ -614,6 +677,7 @@ export const makeProviderInstanceRegistry = Effect.fn(
             const { secrets, unreadable } = yield* readInstanceSecrets(
               driversById.get(entry.driver),
               entry,
+              instanceId,
               checked,
             );
             if (unreadable.length === 0) carried.set(instanceId, secrets);
@@ -621,25 +685,31 @@ export const makeProviderInstanceRegistry = Effect.fn(
           continue;
         }
         if (checked !== undefined) {
-          const secrets = carryCheckedSecret(
+          const { secrets, unreadable } = yield* carryCheckedSecret(
             driversById.get(entry.driver),
             current.entry,
+            instanceId,
             current.secrets,
             checked,
           );
-          if (!Equal.equals(secrets, current.secrets)) {
+          if (unreadable.length > 0 || !Equal.equals(secrets, current.secrets)) {
             rebuild.add(current.instance.instanceId);
-            carried.set(current.instance.instanceId, secrets);
+            if (unreadable.length === 0) carried.set(current.instance.instanceId, secrets);
           }
           continue;
         }
-        const { secrets, unreadable } = yield* readInstanceSecrets(
+        const { secrets, unreadable, storedUnreadable } = yield* readInstanceSecrets(
           driversById.get(entry.driver),
           entry,
+          instanceId,
         );
-        // A failed re-read keeps the working instance and the value it already holds.
-        if (unreadable.length === 0 && !Equal.equals(secrets, current.secrets)) {
+        // External vault failures keep a working instance; a failed server-store read revokes it.
+        if (
+          storedUnreadable ||
+          (unreadable.length === 0 && !Equal.equals(secrets, current.secrets))
+        ) {
           rebuild.add(current.instance.instanceId);
+          if (unreadable.length === 0) carried.set(current.instance.instanceId, secrets);
         }
       }
       yield* reconcileWithR(configMap, rebuild, false, carried);
@@ -737,7 +807,7 @@ export const layer = <R>(input: {
 }): Layer.Layer<
   ProviderInstanceRegistry | ProviderInstanceRegistryMutator.ProviderInstanceRegistryMutator,
   never,
-  R | SecretResolver.SecretResolver
+  R | SecretResolver.SecretResolver | ServerSecretStore.ServerSecretStore
 > =>
   Layer.effectContext(
     makeProviderInstanceRegistry(input).pipe(
@@ -750,5 +820,5 @@ export const layer = <R>(input: {
   ) as Layer.Layer<
     ProviderInstanceRegistry | ProviderInstanceRegistryMutator.ProviderInstanceRegistryMutator,
     never,
-    R | SecretResolver.SecretResolver
+    R | SecretResolver.SecretResolver | ServerSecretStore.ServerSecretStore
   >;
