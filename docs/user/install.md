@@ -122,9 +122,11 @@ service configuration, ownership and permissions**, then start the preserved old
 release. Never run old code against newly migrated state. Production cutover,
 service installation and production-state restore have not been verified here.
 
-Desktop **Check for Updates** can offer a fork download for manual replacement;
-it does not automatically upgrade the app. An automatic standalone server
-updater is not proven or shipped. Do not rely on `t3 update`, npm, or upstream
+Published older desktop previews require manual replacement; in-app updating
+has been verified between the new persistent-identity Mac candidates, but their
+stable feed remains unpublished and notarization is absent. Update availability
+depends on the exact release channel and artifact, not that candidate proof;
+an automatic standalone server updater is not proven or shipped. Do not rely on `t3 update`, npm, or upstream
 update/install commands to move a Voice installation forward. General
 [update guidance](./updating.md#voice-fork-desktop-testers) explains the desktop
 manual flow; the release instructions take precedence for this fork.
