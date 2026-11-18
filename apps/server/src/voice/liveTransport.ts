@@ -333,11 +333,23 @@ export const liveNetworkLayer = Layer.effect(
         if (response.status !== 200) return yield* safeFailure();
       }),
       sideband: Effect.fn("LiveNetwork.sideband")(function* (connection, url) {
+        const context = yield* Effect.context<never>();
+        let terminal:
+          | {
+              failureStage:
+                | "sideband-peer-close"
+                | "sideband-error"
+                | "sideband-write"
+                | "sideband-release";
+              initiator: "local" | "upstream" | "unknown";
+            }
+          | undefined;
         let wire: NodeWS.WebSocket | undefined;
         let pendingBytes = 0;
         let pendingFrames = 0;
         let failed = false;
         const fail = () => {
+          terminal ??= { failureStage: "sideband-write", initiator: "local" };
           failed = true;
           wire?.terminate();
         };
@@ -383,7 +395,18 @@ export const liveNetworkLayer = Layer.effect(
                 autoPong: false,
               });
               wire = ws;
-              ws.on("error", () => undefined);
+              ws.on("error", () => {
+                terminal ??= { failureStage: "sideband-error", initiator: "unknown" };
+              });
+              ws.once("close", (code: number) => {
+                terminal ??= { failureStage: "sideband-peer-close", initiator: "upstream" };
+                Effect.runSyncWith(context)(
+                  Effect.logInfo("Live sideband closed", {
+                    ...terminal,
+                    webSocketCloseCode: code,
+                  }),
+                );
+              });
               ws.on("ping", (data: Buffer) => {
                 try {
                   const { complete } = reserve(data.byteLength);
@@ -399,6 +422,7 @@ export const liveNetworkLayer = Layer.effect(
                 const closed = () => resume(Effect.void);
                 if (ws.readyState === NodeWS.WebSocket.CLOSED) return closed();
                 ws.once("close", closed);
+                terminal ??= { failureStage: "sideband-release", initiator: "local" };
                 fail();
                 return Effect.sync(() => ws.off("close", closed));
               }).pipe(
@@ -418,6 +442,7 @@ export const liveNetworkLayer = Layer.effect(
             try: () => {
               if (Socket.isCloseEvent(frame)) {
                 const { ws } = reserve(125);
+                terminal ??= { failureStage: "sideband-release", initiator: "local" };
                 failed = true;
                 ws.close(frame.code);
               } else {

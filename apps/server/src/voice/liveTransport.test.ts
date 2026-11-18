@@ -458,6 +458,14 @@ it.live.each([
         );
         expect(JSON.stringify(logs)).not.toMatch(/fictional|owned-call|127\.0\.0\.1/);
         expect(mapped).toBe(false);
+        expect(logs).toContainEqual([
+          "Live sideband closed",
+          {
+            failureStage: mode === "closed" ? "sideband-peer-close" : "sideband-release",
+            initiator: mode === "closed" ? "upstream" : "local",
+            webSocketCloseCode: 1006,
+          },
+        ]);
       }),
     ),
 );
@@ -556,6 +564,72 @@ it.live.each(["bytes", "frames", "callback-error"] as const)(
         // Completion may arrive after termination; it must not revive the writer or retain a queue.
         buffered = 0;
         for (const callback of callbacks) callback();
+      }),
+    ),
+);
+
+it.live.each(["peer-close", "peer-error", "protocol-error", "local-stop"] as const)(
+  "sideband lifecycle logs retain %s without private close reasons",
+  (mode) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* loopbackServer;
+        const address = server.address();
+        if (!address || typeof address === "string") throw new Error("Expected loopback port");
+        const connected = Promise.withResolvers<NodeWS.WebSocket>();
+        server.once("connection", (ws) => {
+          connected.resolve(ws);
+          ws.send("ready");
+        });
+        const logs: unknown[] = [];
+        const context = yield* Layer.build(
+          liveNetworkLayer.pipe(Layer.provide(FetchHttpClient.layer)),
+        );
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const socket = yield* Context.get(context, LiveNetwork).sideband(
+              connection,
+              `ws://127.0.0.1:${address.port}/private-token`,
+            );
+            const reader = yield* socket.reader;
+            expect(yield* reader.pull).toEqual(["ready"]);
+            const remote = yield* Effect.promise(() => connected.promise);
+            if (mode === "peer-close") remote.close(4001, "fictional-secret-close-reason");
+            if (mode === "peer-error") remote.terminate();
+            if (mode === "protocol-error") remote.send(Buffer.from([0xff]), { binary: false });
+            if (mode !== "local-stop")
+              expect((yield* reader.pull.pipe(Effect.result))._tag).toBe("Failure");
+          }),
+        ).pipe(
+          Effect.provide(
+            Logger.layer([Logger.make(({ message, cause }) => logs.push({ message, cause }))], {
+              mergeWithExisting: false,
+            }),
+          ),
+        );
+        expect(logs).toContainEqual({
+          message: [
+            "Live sideband closed",
+            {
+              failureStage:
+                mode === "local-stop"
+                  ? "sideband-release"
+                  : mode === "protocol-error"
+                    ? "sideband-error"
+                    : "sideband-peer-close",
+              initiator:
+                mode === "local-stop"
+                  ? "local"
+                  : mode === "protocol-error"
+                    ? "unknown"
+                    : "upstream",
+              webSocketCloseCode: mode === "peer-close" ? 4001 : 1006,
+            },
+          ],
+          cause: expect.anything(),
+        });
+        expect(JSON.stringify(logs)).not.toMatch(/fictional|private-token|127\.0\.0\.1|Bearer|v=0/);
+        expect(logs).toHaveLength(1);
       }),
     ),
 );

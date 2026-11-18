@@ -30,6 +30,23 @@ import { makeLiveAgentSession } from "./liveAgentSession.ts";
 const stringify = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const unavailable = () => new LiveConnectionError({ reason: "disconnected" });
 const decode = Schema.is(LiveConnectionError);
+type LifecycleStage =
+  | "app-stop"
+  | "client-read"
+  | "client-write"
+  | "native-read"
+  | "native-write"
+  | "native-error"
+  | "native-closed"
+  | "native-decode"
+  | "heartbeat-timeout"
+  | "connect-timeout"
+  | "ready-timeout"
+  | "peer-failed"
+  | "owner-validation"
+  | "call-acquire"
+  | "session-work"
+  | "scope-release";
 type Work =
   | { type: "client"; frame: string }
   | { type: "native"; frame: string }
@@ -65,8 +82,23 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
   let lastHeartbeat = yield* Clock.currentTimeMillis;
   let lastOwnerCheck = lastHeartbeat;
   let nativeWriter: Socket.Writer | undefined;
+  let terminal:
+    | { failureStage: LifecycleStage; initiator: "local" | "upstream" | "unknown" }
+    | undefined;
+  const diagnose = (failureStage: LifecycleStage, initiator: "local" | "upstream" | "unknown") =>
+    Effect.sync(() => {
+      terminal ??= { failureStage, initiator };
+    });
+  const validateOwner = input.validateOwner.pipe(
+    Effect.tapError(() => diagnose("owner-validation", "local")),
+  );
   const send = (event: LiveVoiceServerEvent) =>
-    alive ? writer.write(stringify(event)).pipe(Effect.mapError(unavailable)) : Effect.void;
+    alive
+      ? writer.write(stringify(event)).pipe(
+          Effect.tapError(() => diagnose("client-write", "unknown")),
+          Effect.mapError(unavailable),
+        )
+      : Effect.void;
   const status = (phase: "connecting" | "connected" | "refresh_wait") =>
     send({
       type: "live.status",
@@ -82,13 +114,16 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
     binding: input.binding,
     sessionId,
     ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
-    validateOwner: input.validateOwner,
+    validateOwner,
     send,
     onBound: input.onBound,
     append: Effect.fn("LiveSession.append")(function* (event) {
       if (!nativeWriter || !alive) return;
       for (const message of encodeNativeLiveAppend(event))
-        yield* nativeWriter.write(stringify(message)).pipe(Effect.mapError(unavailable));
+        yield* nativeWriter.write(stringify(message)).pipe(
+          Effect.tapError(() => diagnose("native-write", "unknown")),
+          Effect.mapError(unavailable),
+        );
     }),
   }).pipe(Effect.provideService(Scope.Scope, resources));
   const offer = (work: Work) => Queue.offer(queue, work).pipe(Effect.asVoid);
@@ -107,6 +142,7 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
               });
               lastHeartbeat = yield* Clock.currentTimeMillis;
               if (event.type === "live.stop") {
+                yield* diagnose("app-stop", "local");
                 alive = false;
                 yield* agent.stop;
                 yield* Deferred.succeed(stop, undefined);
@@ -116,28 +152,38 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
         ),
       ),
     ),
-  ).pipe(Effect.mapError(unavailable));
+  ).pipe(
+    Effect.tapError(() => diagnose("client-read", "unknown")),
+    Effect.mapError(unavailable),
+  );
   const process = Effect.forever(
     Effect.gen(function* () {
       const work = yield* Queue.take(queue);
       if (!alive) return;
       const now = yield* Clock.currentTimeMillis;
       if (work.type === "tick") {
-        if (now - lastHeartbeat > LIVE_VOICE_HEARTBEAT_TIMEOUT_MS) return yield* unavailable();
+        if (now - lastHeartbeat > LIVE_VOICE_HEARTBEAT_TIMEOUT_MS) {
+          yield* diagnose("heartbeat-timeout", "local");
+          return yield* unavailable();
+        }
         if (now - lastOwnerCheck >= 5000) {
           lastOwnerCheck = now;
-          yield* input.validateOwner;
+          yield* validateOwner;
         }
-        if (deadline !== undefined && !(nativeStarted && peer) && now >= deadline)
+        if (deadline !== undefined && !(nativeStarted && peer) && now >= deadline) {
+          yield* diagnose("connect-timeout", "local");
           return yield* new LiveConnectionError({ reason: "timeout" });
+        }
         if (
           answerAt !== undefined &&
           !(nativeStarted && peer) &&
           now - answerAt >= LIVE_VOICE_READY_TIMEOUT_MS
-        )
+        ) {
+          yield* diagnose("ready-timeout", "local");
           return yield* new LiveConnectionError({ reason: "timeout" });
+        }
         if (retryAt !== undefined && now >= retryAt) {
-          yield* input.validateOwner;
+          yield* validateOwner;
           retryAt = undefined;
           attemptId = SecureRandom.uuidV4Unsafe();
           awaitingOffer = true;
@@ -150,7 +196,7 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
         const event = yield* Effect.try({
           try: () => decodeNativeLiveEvent(work.frame),
           catch: () => new LiveConnectionError({ reason: "incompatible-protocol" }),
-        });
+        }).pipe(Effect.tapError(() => diagnose("native-decode", "upstream")));
         if (!event) return;
         if (event.type === "started") {
           if ("draft" in input.binding) yield* agent.bind;
@@ -158,14 +204,19 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
           nativeStarted = true;
           yield* agent.seed;
           if (peer) yield* status("connected");
-        } else if (event.type === "error" || event.type === "closed") return yield* unavailable();
-        else if (nativeStarted) yield* agent.receive(event);
+        } else if (event.type === "error" || event.type === "closed") {
+          yield* diagnose(event.type === "error" ? "native-error" : "native-closed", "upstream");
+          return yield* unavailable();
+        } else if (nativeStarted) yield* agent.receive(event);
         return;
       }
       const event = decodeLiveVoiceClientEvent(work.frame);
       if (event.type === "live.peer") {
         if (event.attemptId !== attemptId || answerAt === undefined) return;
-        if (event.state === "failed") return yield* unavailable();
+        if (event.state === "failed") {
+          yield* diagnose("peer-failed", "local");
+          return yield* unavailable();
+        }
         peer = true;
         if (nativeStarted) yield* status("connected");
         return;
@@ -181,7 +232,7 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
         return yield* new LiveConnectionError({ reason: "invalid-offer" });
       if (now + LIVE_VOICE_CREATE_TIMEOUT_MS + LIVE_VOICE_READY_TIMEOUT_MS > deadline)
         return yield* new LiveConnectionError({ reason: "timeout" });
-      yield* input.validateOwner;
+      yield* validateOwner;
       awaitingOffer = false;
       attempts++;
       previousOffer = event.offerSdp;
@@ -193,6 +244,7 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
       cleanup = { result: "unknown" };
       const call = yield* acquireLiveCall(input.connection, event.offerSdp, cleanup).pipe(
         Effect.provideService(Scope.Scope, callScope),
+        Effect.tapError(() => diagnose("call-acquire", "unknown")),
       );
       if (!alive) return;
       if (call.type === "rejected") {
@@ -224,6 +276,7 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
           ),
         ),
       ).pipe(
+        Effect.tapError(() => diagnose("native-read", "unknown")),
         Effect.mapError(unavailable),
         Effect.catch(() => Deferred.succeed(stop, undefined)),
         Effect.forkScoped,
@@ -249,6 +302,7 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
   );
   yield* Effect.all([process, read, tick], { concurrency: "unbounded", discard: true }).pipe(
     Effect.raceFirst(Deferred.await(stop)),
+    Effect.tapError(() => diagnose("session-work", "unknown")),
     Effect.catch((error) =>
       send({
         type: "live.status",
@@ -259,6 +313,13 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
     ),
     Effect.ensuring(
       Effect.gen(function* () {
+        yield* Effect.logInfo(
+          "Live session ended",
+          terminal ?? {
+            failureStage: "scope-release",
+            initiator: "local",
+          },
+        );
         alive = false;
         yield* agent.stop;
         yield* Scope.close(resources, Exit.void);

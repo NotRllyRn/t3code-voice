@@ -1,5 +1,14 @@
 import { expect, it } from "@effect/vitest";
-import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProviderInstanceId,
+  ThreadId,
+  NodeId,
+  RuntimeRequestId,
+} from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
+import * as Logger from "effect/Logger";
+import * as Socket from "effect/socket/Socket";
 import { LiveConnectionError } from "@t3tools/provider-core/server/liveConnection";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
@@ -143,6 +152,162 @@ it.effect(
       expect(yield* Queue.size(down.output)).toBe(0);
       expect(up.closed()).toBe(true);
       expect(down.closed()).toBe(true);
+    }).pipe(Effect.provide(VoiceFixture.layer)),
+);
+
+it.effect.each(["peer-close", "error", "approval-pending"] as const)(
+  "lifecycle diagnostics survive cleanup: %s",
+  (mode) =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("fixture-diagnostics-thread");
+      yield* VoiceFixture.create(threadId);
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const down = yield* peer;
+      const up = yield* peer;
+      const logs: unknown[] = [];
+      const nativeClose = yield* Deferred.make<never, Socket.SocketError>();
+      let hangups = 0;
+      let recordsRead = 0;
+      const fiber = yield* runLiveSession({
+        socket: down.socket,
+        binding: { threadId },
+        connection,
+        capability,
+        validateOwner: Effect.void,
+        onBound: () => {},
+      }).pipe(
+        Effect.provide(agentAux),
+        Effect.provideService(ThreadManagement.ThreadManagementService, {
+          ...threads,
+          getThreadRecords: (...args) =>
+            threads.getThreadRecords(...args).pipe(
+              Effect.map((records) => {
+                recordsRead++;
+                return {
+                  ...records,
+                  runtimeRequests:
+                    mode === "approval-pending"
+                      ? [
+                          {
+                            id: RuntimeRequestId.make("fictional-approval"),
+                            nodeId: NodeId.make("fictional-node"),
+                            providerTurnId: null,
+                            nativeRequestRef: null,
+                            kind: "command" as const,
+                            status: "pending" as const,
+                            responseCapability: { type: "message" as const },
+                            createdAt: DateTime.makeUnsafe("2026-01-01T00:00:00Z"),
+                            resolvedAt: null,
+                          },
+                        ]
+                      : [],
+                };
+              }),
+            ),
+        }),
+        Effect.provideService(LiveNetwork, {
+          create: () =>
+            Effect.succeed({
+              status: 201,
+              location: "/v1/live/owned",
+              contentType: "application/sdp",
+              retryAfter: null,
+              body: Effect.succeed(sdp),
+            }),
+          hangup: () =>
+            Effect.sync(() => {
+              hangups++;
+            }),
+          sideband: () =>
+            Effect.succeed(
+              Socket.make({
+                reader: up.socket.reader.pipe(
+                  Effect.map((reader) => ({
+                    ...reader,
+                    pull: reader.pull.pipe(Effect.raceFirst(Deferred.await(nativeClose))),
+                  })),
+                ),
+                writer: up.socket.writer,
+              }),
+            ),
+        }),
+        Effect.provide(
+          Logger.layer([Logger.make(({ message }) => logs.push(message))], {
+            mergeWithExisting: false,
+          }),
+        ),
+        Effect.scoped,
+        Effect.forkScoped,
+      );
+      const initial = JSON.parse(yield* Queue.take(down.output));
+      yield* Queue.offer(
+        down.input,
+        JSON.stringify({ type: "live.start", attemptId: initial.attemptId, offerSdp: sdp }),
+      );
+      yield* Queue.take(down.output);
+      expect(JSON.parse(yield* Queue.take(down.output)).type).toBe("live.answer");
+      yield* Queue.offer(
+        up.input,
+        '{"type":"session.started","session":{"id":"fictional-private-id"}}',
+      );
+      yield* Queue.offer(
+        down.input,
+        JSON.stringify({ type: "live.peer", attemptId: initial.attemptId, state: "connected" }),
+      );
+      expect(JSON.parse(yield* Queue.take(down.output)).phase).toBe("connected");
+      if (mode === "approval-pending") {
+        for (let tick = 0; tick < 20; tick++) {
+          yield* Queue.offer(down.input, '{"type":"live.heartbeat"}');
+          yield* TestClock.adjust("10 seconds");
+        }
+        expect(recordsRead).toBeGreaterThan(1);
+        expect(hangups).toBe(0);
+        expect(logs).toEqual([]);
+        expect(yield* Queue.size(down.output)).toBe(0);
+        yield* Queue.offer(down.input, '{"type":"live.stop"}');
+      } else if (mode === "peer-close")
+        yield* Deferred.fail(
+          nativeClose,
+          new Socket.SocketError({
+            reason: new Socket.SocketCloseError({
+              code: 4001,
+              closeReason: "fictional-secret-close-reason",
+            }),
+          }),
+        );
+      else
+        yield* Queue.offer(
+          up.input,
+          JSON.stringify({
+            type: "error",
+            reason: "fictional-secret-close-reason",
+            code: 4567,
+            message: "fictional-secret-message",
+          }),
+        );
+      yield* Fiber.join(fiber);
+      expect(hangups).toBe(1);
+      expect(up.closed()).toBe(true);
+      expect(logs).toEqual([
+        [
+          "Live session ended",
+          {
+            failureStage:
+              mode === "approval-pending"
+                ? "app-stop"
+                : mode === "peer-close"
+                  ? "native-read"
+                  : "native-error",
+            initiator:
+              mode === "approval-pending"
+                ? "local"
+                : mode === "peer-close"
+                  ? "unknown"
+                  : "upstream",
+          },
+        ],
+      ]);
+      expect(JSON.stringify(logs)).not.toMatch(/fictional|4567|Bearer|v=0|https:/);
     }).pipe(Effect.provide(VoiceFixture.layer)),
 );
 
