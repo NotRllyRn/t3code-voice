@@ -187,6 +187,8 @@ const EMPTY_DRAFT: DraftState = {
   runtimeMode: "full-access",
   interactionMode: "default",
   baseModelSelection: null,
+  webhookAction: undefined,
+  hasStoredSignatureSecret: false,
   signatureEnabled: false,
   ...WEBHOOK_SIGNATURE_DEFAULTS,
   signatureSecret: "",
@@ -1368,6 +1370,8 @@ function ScheduledTaskEditorForm({
     task?.schedule.type === "once";
   const offersThreadModes =
     environment?.serverConfig?.environment.capabilities.scheduledTaskThreadModes === true;
+  const offersVoiceActions =
+    environment?.serverConfig?.environment.capabilities.voiceWebhookActions === true;
   const connected =
     environment?.connection.phase === "connected" && environment.serverConfig !== null;
   const tasksQuery = useEnvironmentQuery(
@@ -1485,7 +1489,14 @@ function ScheduledTaskEditorForm({
       reportFailure("Invalid filter", parsedFilters.error);
       return;
     }
-    const schedule = scheduleFromDraft(draft);
+    if (draft.webhookAction !== undefined && !offersVoiceActions) {
+      reportFailure(
+        "Update this environment",
+        "This server does not advertise voice webhook actions.",
+      );
+      return;
+    }
+    const schedule = scheduleFromDraft(draft, offersVoiceActions);
     if (schedule === null) {
       for (const error of scheduleDraftErrors(draft)) reportFailure(error.title, error.description);
       return;
@@ -1853,11 +1864,17 @@ function ScheduledTaskEditorForm({
                     });
                 }}
               >
-                <Toggle value="fixed">At a time</Toggle>
+                <Toggle value="fixed" disabled={draft.webhookAction !== undefined}>
+                  At a time
+                </Toggle>
                 {offersOnce || draft.scheduleMode === "once" ? (
-                  <Toggle value="once">Once</Toggle>
+                  <Toggle value="once" disabled={draft.webhookAction !== undefined}>
+                    Once
+                  </Toggle>
                 ) : null}
-                <Toggle value="interval">Every interval</Toggle>
+                <Toggle value="interval" disabled={draft.webhookAction !== undefined}>
+                  Every interval
+                </Toggle>
                 <Toggle
                   value="webhook"
                   disabled={webhookDenial !== undefined && draft.scheduleMode !== "webhook"}
@@ -1880,11 +1897,51 @@ function ScheduledTaskEditorForm({
             draft.enabled ? null : draft.scheduleMode === "webhook" ? (
               <div className="space-y-4">
                 <WebhookEndpointField environmentId={environmentId} task={liveTask} />
-                <p className="text-xs text-muted-foreground">
-                  {
-                    "Each request runs the prompt. Use {{body.path}}, {{headers.name}}, {{query.name}}, {{body}} or {{request}} in the prompt; only what it names reaches the agent."
-                  }
+                <Field label="Action" htmlFor="scheduled-task-webhook-action">
+                  <Select
+                    value={draft.webhookAction ?? "prompt"}
+                    disabled={
+                      task?.schedule.type === "webhook" && task.schedule.action !== undefined
+                    }
+                    onValueChange={(value) => {
+                      if (value !== "prompt" && value !== "voice-upstream-release") return;
+                      if (value === "voice-upstream-release" && !offersVoiceActions) return;
+                      setDraft((current) => ({
+                        ...current,
+                        webhookAction: value === "voice-upstream-release" ? value : undefined,
+                        ...(value === "voice-upstream-release"
+                          ? {
+                              enabled: false,
+                              signatureEnabled: true,
+                              ...WEBHOOK_SIGNATURE_DEFAULTS,
+                            }
+                          : {}),
+                      }));
+                    }}
+                  >
+                    <SelectTrigger size="sm" id="scheduled-task-webhook-action">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectPopup>
+                      <SelectItem value="prompt">Run prompt</SelectItem>
+                      <SelectItem value="voice-upstream-release" disabled={!offersVoiceActions}>
+                        Verified voice release
+                      </SelectItem>
+                    </SelectPopup>
+                  </Select>
+                </Field>
+                <p className="text-xs text-muted-foreground" role="status">
+                  {draft.webhookAction !== undefined
+                    ? "Starts one guarded upgrade thread after release verification. Create paused with an HMAC secret. Editing or enabling changes the generation; update the private binding last."
+                    : "Each request runs the prompt. Use {{body.path}}, {{headers.name}}, {{query.name}}, {{body}} or {{request}} in the prompt; only what it names reaches the agent."}
                 </p>
+                {draft.webhookAction !== undefined &&
+                (!offersVoiceActions || draft.webhookAction !== "voice-upstream-release") ? (
+                  <p className="text-sm text-muted-foreground" role="alert">
+                    This client and server cannot edit this webhook action. Update before saving;
+                    this task will not be converted to a prompt.
+                  </p>
+                ) : null}
                 <Field
                   label="Skip requests older than"
                   hint="minutes, optional"
@@ -1975,6 +2032,7 @@ function ScheduledTaskEditorForm({
                   </div>
                   <Switch
                     id="scheduled-task-signature"
+                    disabled={draft.webhookAction !== undefined}
                     checked={draft.signatureEnabled}
                     onCheckedChange={(signatureEnabled) =>
                       setDraft((current) => ({ ...current, signatureEnabled }))
@@ -2032,6 +2090,10 @@ function ScheduledTaskEditorForm({
                         id="scheduled-task-signature-secret"
                         type="password"
                         autoComplete="off"
+                        required={
+                          draft.webhookAction !== undefined &&
+                          (draft.editingId === null || !draft.hasStoredSignatureSecret)
+                        }
                         value={draft.signatureSecret}
                         placeholder={
                           liveTask?.schedule.type === "webhook" && liveTask.webhook?.hasSecret
@@ -2132,11 +2194,18 @@ function ScheduledTaskEditorForm({
             <div className="min-w-0 space-y-1">
               <Label htmlFor="scheduled-task-enabled">Enabled</Label>
               <p id="scheduled-task-enabled-description" className="text-sm text-muted-foreground">
-                Disabled tasks stay saved but do not run.
+                {draft.webhookAction !== undefined &&
+                (task?.schedule.type !== "webhook" || task.schedule.action === undefined)
+                  ? "Create paused. Enabling changes the generation; update the private binding last."
+                  : "Disabled tasks stay saved but do not run."}
               </p>
             </div>
             <Switch
               id="scheduled-task-enabled"
+              disabled={
+                draft.webhookAction !== undefined &&
+                (task?.schedule.type !== "webhook" || task.schedule.action === undefined)
+              }
               aria-describedby="scheduled-task-enabled-description"
               checked={draft.enabled}
               onCheckedChange={(enabled) => setDraft((current) => ({ ...current, enabled }))}
@@ -2153,6 +2222,8 @@ function ScheduledTaskEditorForm({
           size="sm"
           disabled={
             !canOperate ||
+            (draft.webhookAction !== undefined &&
+              (!offersVoiceActions || draft.webhookAction !== "voice-upstream-release")) ||
             saving ||
             editingTaskMissing ||
             !connected ||

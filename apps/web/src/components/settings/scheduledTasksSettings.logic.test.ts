@@ -289,22 +289,70 @@ describe("webhook scheduled tasks", () => {
     }
   });
 
-  it("keeps a stored secret when the secret field is left blank", () => {
-    const draft = taskToDraft(webhookTask);
-    expect(draft.scheduleMode).toBe("webhook");
-    expect(draft.signatureSecret).toBe("");
-    expect(scheduleFromDraft(draft)).toEqual({
+  it.each([undefined, "voice-upstream-release"] as const)(
+    "keeps a stored secret and action %s when editing",
+    (action) => {
+      const draft = taskToDraft({
+        ...webhookTask,
+        schedule: { type: "webhook", signature, ...(action === undefined ? {} : { action }) },
+      });
+      expect(draft.scheduleMode).toBe("webhook");
+      expect(draft.signatureSecret).toBe("");
+      if (action !== undefined) {
+        expect(scheduleFromDraft(draft)).toBeNull();
+        expect(scheduleFromDraft(draft, false)).toBeNull();
+      }
+      expect(scheduleFromDraft({ ...draft, title: "Edited hook" }, true)).toEqual({
+        type: "webhook",
+        ...(action === undefined ? {} : { action }),
+        signature,
+        maxDeliveryAgeMinutes: null,
+        dedupe: {},
+      });
+      expect(scheduleFromDraft({ ...draft, signatureSecret: " new " }, true)).toEqual({
+        type: "webhook",
+        ...(action === undefined ? {} : { action }),
+        signature: { ...signature, secret: "new" },
+        maxDeliveryAgeMinutes: null,
+        dedupe: {},
+      });
+    },
+  );
+
+  it("creates paused signed voice actions and rejects enabled or unsigned drafts", () => {
+    const draft = {
+      ...taskToDraft(webhookTask),
+      editingId: null,
+      enabled: false,
+      webhookAction: "voice-upstream-release" as const,
+      signatureSecret: " fictional-test-hmac ",
+    };
+    expect(scheduleFromDraft(draft)).toBeNull();
+    expect(scheduleFromDraft(draft, false)).toBeNull();
+    expect(scheduleFromDraft(draft, true)).toEqual({
       type: "webhook",
-      signature,
+      action: "voice-upstream-release",
+      signature: { ...signature, secret: "fictional-test-hmac" },
       maxDeliveryAgeMinutes: null,
       dedupe: {},
     });
-    expect(scheduleFromDraft({ ...draft, signatureSecret: " new " })).toEqual({
-      type: "webhook",
-      signature: { ...signature, secret: "new" },
-      maxDeliveryAgeMinutes: null,
-      dedupe: {},
-    });
+    expect(scheduleFromDraft({ ...draft, enabled: true }, true)).toBeNull();
+    expect(scheduleFromDraft({ ...draft, signatureEnabled: false }, true)).toBeNull();
+    expect(scheduleFromDraft({ ...draft, signatureSecret: " " }, true)).toBeNull();
+    expect(scheduleFromDraft({ ...draft, signatureHeader: " " }, true)).toBeNull();
+    expect(scheduleFromDraft({ ...draft, webhookAction: "future-action" }, true)).toBeNull();
+    expect(scheduleFromDraft({ ...draft, scheduleMode: "interval" }, true)).toBeNull();
+    expect(
+      scheduleFromDraft(
+        {
+          ...draft,
+          editingId: webhookTask.id,
+          hasStoredSignatureSecret: false,
+          signatureSecret: "",
+        },
+        true,
+      ),
+    ).toBeNull();
   });
 
   it("round-trips the max age, treats blank as no limit, and rejects an invalid limit", () => {
