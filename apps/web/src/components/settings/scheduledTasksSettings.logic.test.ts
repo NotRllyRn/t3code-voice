@@ -301,20 +301,21 @@ describe("webhook scheduled tasks", () => {
       if (action !== undefined) {
         expect(scheduleFromDraft(draft)).toBeNull();
         expect(scheduleFromDraft(draft, false)).toBeNull();
+        expect(scheduleFromDraft({ ...draft, webhookAction: undefined }, true)).toBeNull();
       }
       expect(scheduleFromDraft({ ...draft, title: "Edited hook" }, true)).toEqual({
         type: "webhook",
         ...(action === undefined ? {} : { action }),
         signature,
         maxDeliveryAgeMinutes: null,
-        dedupe: {},
+        ...(action === undefined ? { dedupe: {} } : {}),
       });
       expect(scheduleFromDraft({ ...draft, signatureSecret: " new " }, true)).toEqual({
         type: "webhook",
         ...(action === undefined ? {} : { action }),
         signature: { ...signature, secret: "new" },
         maxDeliveryAgeMinutes: null,
-        dedupe: {},
+        ...(action === undefined ? { dedupe: {} } : {}),
       });
     },
   );
@@ -334,8 +335,29 @@ describe("webhook scheduled tasks", () => {
       action: "voice-upstream-release",
       signature: { ...signature, secret: "fictional-test-hmac" },
       maxDeliveryAgeMinutes: null,
-      dedupe: {},
     });
+    for (const unsupported of [
+      { replayKey: "{{body.id}}" },
+      { coalesceKey: "{{body.id}}" },
+      { coalesceWindowSeconds: "30" },
+    ])
+      expect(scheduleFromDraft({ ...draft, ...unsupported }, true)).toBeNull();
+    const stored = {
+      type: "webhook",
+      action: "voice-upstream-release",
+      signature,
+      dedupe: {},
+    } as const;
+    expect(
+      scheduleFromDraft({ ...draft, editingId: webhookTask.id, savedSchedule: stored }, true),
+    ).toBeNull();
+    const ordinary = taskToDraft({
+      ...webhookTask,
+      schedule: { type: "webhook", signature, dedupe: {} },
+    });
+    expect(
+      scheduleFromDraft({ ...ordinary, webhookAction: "voice-upstream-release" }, true),
+    ).toBeNull();
     expect(scheduleFromDraft({ ...draft, enabled: true }, true)).toBeNull();
     expect(scheduleFromDraft({ ...draft, signatureEnabled: false }, true)).toBeNull();
     expect(scheduleFromDraft({ ...draft, signatureSecret: " " }, true)).toBeNull();

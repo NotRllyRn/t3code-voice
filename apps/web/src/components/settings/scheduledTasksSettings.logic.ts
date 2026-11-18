@@ -122,6 +122,7 @@ export interface DraftState {
   /** Retain the source selection's provider options when the picker leaves instanceId:model unchanged. */
   readonly baseModelSelection: ModelSelection | null;
   readonly webhookAction: string | undefined;
+  readonly savedSchedule: ScheduledTaskSchedule | null;
   readonly hasStoredSignatureSecret: boolean;
   readonly signatureEnabled: boolean;
   readonly signatureHeader: string;
@@ -159,6 +160,14 @@ export function scheduleDraftErrors(draft: DraftState) {
     return [
       { title: "Webhook required", description: "Voice release actions must stay webhooks." },
     ];
+  if (
+    draft.editingId !== null &&
+    draft.webhookAction !==
+      (draft.savedSchedule?.type === "webhook" ? draft.savedSchedule.action : undefined)
+  )
+    return [
+      { title: "Create a new task", description: "Saved tasks cannot change webhook action." },
+    ];
   if (draft.scheduleMode === "once") {
     const runAt = new Date(draft.runAt);
     if (Number.isNaN(runAt.getTime()))
@@ -174,6 +183,19 @@ export function scheduleDraftErrors(draft: DraftState) {
     return [{ title: "Invalid run time", description: "Pick a time." }];
   if (draft.scheduleMode !== "webhook") return [];
   if (draft.webhookAction !== undefined) {
+    if (
+      draft.replayKey.trim() ||
+      draft.coalesceKey.trim() ||
+      draft.coalesceWindowSeconds.trim() ||
+      (draft.savedSchedule?.type === "webhook" && draft.savedSchedule.dedupe !== undefined)
+    )
+      return [
+        {
+          title: "Unsupported webhook settings",
+          description:
+            "Voice actions cannot use custom dedupe or coalescing. Recreate paused if these settings were already saved.",
+        },
+      ];
     if (draft.editingId === null && draft.enabled)
       return [
         { title: "Create paused", description: "Create voice release actions disabled first." },
@@ -278,15 +300,17 @@ export function scheduleFromDraft(
           }
         : null,
       maxDeliveryAgeMinutes,
-      ...(replayKey || coalesceKey || coalesceWindowSeconds !== undefined
-        ? {
-            dedupe: {
-              ...(replayKey ? { replayKey } : {}),
-              ...(coalesceKey ? { coalesceKey } : {}),
-              ...(coalesceWindowSeconds === undefined ? {} : { coalesceWindowSeconds }),
-            },
-          }
-        : { dedupe: {} }),
+      ...(draft.webhookAction !== undefined
+        ? {}
+        : replayKey || coalesceKey || coalesceWindowSeconds !== undefined
+          ? {
+              dedupe: {
+                ...(replayKey ? { replayKey } : {}),
+                ...(coalesceKey ? { coalesceKey } : {}),
+                ...(coalesceWindowSeconds === undefined ? {} : { coalesceWindowSeconds }),
+              },
+            }
+          : { dedupe: {} }),
       // Only edited filters are sent; the server keeps the stored ones otherwise.
       ...(webhookFilterDraftsChanged(draft.savedFilters, draft.filters)
         ? { filters: parsedFilters.filters }
@@ -343,6 +367,7 @@ export function taskToDraft(task: ScheduledTask): DraftState {
     interactionMode: task.interactionMode,
     baseModelSelection: task.modelSelection,
     webhookAction: schedule.type === "webhook" ? schedule.action : undefined,
+    savedSchedule: schedule,
     hasStoredSignatureSecret: schedule.type === "webhook" && task.webhook?.hasSecret === true,
     ...(schedule.type === "webhook" && schedule.signature !== null
       ? {

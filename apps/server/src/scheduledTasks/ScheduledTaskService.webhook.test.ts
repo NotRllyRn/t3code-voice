@@ -544,7 +544,50 @@ it.effect("dispatches signed HTTP bytes once through the real webhook service an
   withVoiceService((input) =>
     Effect.scoped(
       Effect.gen(function* () {
-        const { task, binding } = yield* bindVoiceTask(input);
+        const initial = yield* bindVoiceTask(input);
+        const settings = yield* Effect.promise(() =>
+          vi.importActual<{
+            taskToDraft: (task: unknown) => unknown;
+            scheduleFromDraft: (draft: unknown, supported: boolean) => unknown;
+          }>(
+            new URL(
+              "../../../web/src/components/settings/scheduledTasksSettings.logic.ts",
+              import.meta.url,
+            ).href,
+          ),
+        );
+        const draft = settings.taskToDraft(initial.task);
+        assert(typeof draft === "object" && draft !== null);
+        const creation = settings.scheduleFromDraft(
+          {
+            ...draft,
+            editingId: null,
+            enabled: false,
+            signatureSecret: "voice-test-secret",
+          },
+          true,
+        );
+        assert(creation);
+        const { task: created } = yield* input.service.upsert(
+          yield* webhookTaskInput({
+            enabled: false,
+            threadId: initial.task.threadId,
+            schedule: creation,
+          }),
+        );
+        const edit = settings.scheduleFromDraft(settings.taskToDraft(created), true);
+        assert(edit);
+        yield* input.service.upsert(
+          yield* webhookTaskInput({
+            enabled: false,
+            threadId: created.threadId,
+            schedule: edit,
+          }),
+        );
+        const { task } = yield* input.service.setEnabled({ id: created.id, enabled: true });
+        assert(task.generation);
+        const binding = { ...initial.binding, generation: task.generation };
+        input.bind(binding);
         class VoiceHttpTestApi extends HttpApi.make("environment").add(
           EnvironmentHttpApi.groups.webhooks,
         ) {}
@@ -595,7 +638,12 @@ it.effect("dispatches signed HTTP bytes once through the real webhook service an
             ),
           );
         });
-        const accepted = yield* waitForSpan(send(), "VoiceWebhookAction.dispatch");
+        const accepted = yield* waitForSpan(
+          send().pipe(
+            Effect.tap((response) => Effect.sync(() => assert.equal(response.status, 202))),
+          ),
+          "VoiceWebhookAction.dispatch",
+        );
         assert.equal(accepted.status, 202);
         const launch = yield* Queue.take(input.launches);
         assert.equal(launch.projectId, task.projectId);

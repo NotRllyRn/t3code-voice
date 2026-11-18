@@ -188,6 +188,7 @@ const EMPTY_DRAFT: DraftState = {
   interactionMode: "default",
   baseModelSelection: null,
   webhookAction: undefined,
+  savedSchedule: null,
   hasStoredSignatureSecret: false,
   signatureEnabled: false,
   ...WEBHOOK_SIGNATURE_DEFAULTS,
@@ -1900,10 +1901,9 @@ function ScheduledTaskEditorForm({
                 <Field label="Action" htmlFor="scheduled-task-webhook-action">
                   <Select
                     value={draft.webhookAction ?? "prompt"}
-                    disabled={
-                      task?.schedule.type === "webhook" && task.schedule.action !== undefined
-                    }
+                    disabled={draft.editingId !== null}
                     onValueChange={(value) => {
+                      if (draft.editingId !== null) return;
                       if (value !== "prompt" && value !== "voice-upstream-release") return;
                       if (value === "voice-upstream-release" && !offersVoiceActions) return;
                       setDraft((current) => ({
@@ -1913,6 +1913,9 @@ function ScheduledTaskEditorForm({
                           ? {
                               enabled: false,
                               signatureEnabled: true,
+                              replayKey: "",
+                              coalesceKey: "",
+                              coalesceWindowSeconds: "",
                               ...WEBHOOK_SIGNATURE_DEFAULTS,
                             }
                           : {}),
@@ -1967,62 +1970,66 @@ function ScheduledTaskEditorForm({
                   filters={draft.filters}
                   onChange={(filters) => setDraft((current) => ({ ...current, filters }))}
                 />
-                <Field
-                  label="Duplicate request key"
-                  hint="template, optional"
-                  htmlFor="scheduled-task-replay-key"
-                >
-                  <Input
-                    id="scheduled-task-replay-key"
-                    placeholder="{{headers.delivery-id}}"
-                    value={draft.replayKey}
-                    onChange={(event) =>
-                      setDraft((current) => ({ ...current, replayKey: event.target.value }))
-                    }
-                  />
-                </Field>
-                <p className="text-xs text-muted-foreground">
-                  Requests with the same key run only once within 7 days.
-                </p>
-                <Field
-                  label="Coalesce key"
-                  hint="template, optional"
-                  htmlFor="scheduled-task-coalesce-key"
-                >
-                  <Input
-                    id="scheduled-task-coalesce-key"
-                    placeholder="{{body.id}}"
-                    value={draft.coalesceKey}
-                    onChange={(event) =>
-                      setDraft((current) => ({ ...current, coalesceKey: event.target.value }))
-                    }
-                  />
-                </Field>
-                <Field
-                  label="Coalesce window"
-                  hint="seconds, 10–3600"
-                  htmlFor="scheduled-task-coalesce-window"
-                >
-                  <Input
-                    id="scheduled-task-coalesce-window"
-                    type="number"
-                    nativeInput
-                    min={10}
-                    max={3600}
-                    placeholder="120"
-                    value={draft.coalesceWindowSeconds}
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        coalesceWindowSeconds: event.target.value,
-                      }))
-                    }
-                  />
-                </Field>
-                <p className="text-xs text-muted-foreground">
-                  Coalescing runs the latest payload once when the window from the first delivery
-                  closes. Empty keys run normally.
-                </p>
+                {draft.webhookAction === undefined ? (
+                  <>
+                    <Field
+                      label="Duplicate request key"
+                      hint="template, optional"
+                      htmlFor="scheduled-task-replay-key"
+                    >
+                      <Input
+                        id="scheduled-task-replay-key"
+                        placeholder="{{headers.delivery-id}}"
+                        value={draft.replayKey}
+                        onChange={(event) =>
+                          setDraft((current) => ({ ...current, replayKey: event.target.value }))
+                        }
+                      />
+                    </Field>
+                    <p className="text-xs text-muted-foreground">
+                      Requests with the same key run only once within 7 days.
+                    </p>
+                    <Field
+                      label="Coalesce key"
+                      hint="template, optional"
+                      htmlFor="scheduled-task-coalesce-key"
+                    >
+                      <Input
+                        id="scheduled-task-coalesce-key"
+                        placeholder="{{body.id}}"
+                        value={draft.coalesceKey}
+                        onChange={(event) =>
+                          setDraft((current) => ({ ...current, coalesceKey: event.target.value }))
+                        }
+                      />
+                    </Field>
+                    <Field
+                      label="Coalesce window"
+                      hint="seconds, 10–3600"
+                      htmlFor="scheduled-task-coalesce-window"
+                    >
+                      <Input
+                        id="scheduled-task-coalesce-window"
+                        type="number"
+                        nativeInput
+                        min={10}
+                        max={3600}
+                        placeholder="120"
+                        value={draft.coalesceWindowSeconds}
+                        onChange={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            coalesceWindowSeconds: event.target.value,
+                          }))
+                        }
+                      />
+                    </Field>
+                    <p className="text-xs text-muted-foreground">
+                      Coalescing runs the latest payload once when the window from the first
+                      delivery closes. Empty keys run normally.
+                    </p>
+                  </>
+                ) : null}
                 <div className="flex items-center justify-between gap-4">
                   <div className="min-w-0 space-y-1">
                     <Label htmlFor="scheduled-task-signature">Require signature</Label>
