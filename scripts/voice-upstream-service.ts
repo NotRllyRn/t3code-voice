@@ -13,7 +13,7 @@ import {
 } from "./voice-upstream-coordinator.ts";
 import { githubJson, type GitHubApi } from "./voice-upstream-poll.ts";
 
-// Trusted bound coordinator: write signed {{body}} as data, then invoke `launch <file> <state-dir>`.
+// Webhook JSON is data: use structured stdin/file input, never shell interpolation.
 // Managed scheduler verifies HMAC before that prompt; this CLI is not an HTTP/signature verifier.
 // A separate bound periodic prompt invokes `audit <state-dir>`; offline audits miss deadlines.
 const PROJECT = "mcp:65bad731-4011-462c-96b6-58b9e4fe1cee";
@@ -360,14 +360,29 @@ export async function readCandidateFile(path: string, now: Date) {
     const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
     if (bytesRead > 1024) throw new Error("Candidate file too large");
     const text = buffer.subarray(0, bytesRead).toString("utf8");
-    const candidate = parseCandidate(JSON.parse(text) as unknown, now);
-    // Candidate values are primitives; every syntactic property must occur exactly once.
-    if ([...text.matchAll(/"(?:[^"\\]|\\.)*"\s*:/g)].length !== Object.keys(candidate).length)
-      throw new Error("Duplicate candidate keys");
-    return candidate;
+    return parseCandidateText(text, now);
   } finally {
     await file.close();
   }
+}
+
+function parseCandidateText(text: string, now: Date) {
+  const candidate = parseCandidate(JSON.parse(text) as unknown, now);
+  // Candidate values are primitives; every syntactic property must occur exactly once.
+  if ([...text.matchAll(/"(?:[^"\\]|\\.)*"\s*:/g)].length !== Object.keys(candidate).length)
+    throw new Error("Duplicate candidate keys");
+  return candidate;
+}
+
+export async function readCandidateStdin(input: AsyncIterable<Uint8Array>, now: Date) {
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for await (const chunk of input) {
+    size += chunk.byteLength;
+    if (size > 1024) throw new Error("Candidate stdin too large");
+    chunks.push(chunk);
+  }
+  return parseCandidateText(Buffer.concat(chunks).toString("utf8"), now);
 }
 
 async function main() {
@@ -375,17 +390,18 @@ async function main() {
   const [action, first, second, ...extra] = process.argv.slice(2);
   if (extra.length || !first || (action === "launch" ? !second : action !== "audit" || second))
     throw new Error(
-      "Usage: node scripts/voice-upstream-service.ts launch <candidate.json> <private-state-dir> | audit <private-state-dir>",
+      "Usage: node scripts/voice-upstream-service.ts launch <candidate.json|-> <private-state-dir> | audit <private-state-dir>",
     );
   const transport = acpTransport();
   const now = new Date();
   const result =
     action === "launch"
-      ? await launchCandidate(await readCandidateFile(first, now), {
-          stateDir: second!,
-          transport,
-          now,
-        })
+      ? await launchCandidate(
+          first === "-"
+            ? await readCandidateStdin(process.stdin, now)
+            : await readCandidateFile(first, now),
+          { stateDir: second!, transport, now },
+        )
       : await auditDeadline({ stateDir: first, transport, now });
   console.log(JSON.stringify(result));
 }

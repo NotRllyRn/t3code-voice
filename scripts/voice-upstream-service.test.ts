@@ -7,6 +7,7 @@ import {
   auditDeadline,
   launchCandidate,
   readCandidateFile,
+  readCandidateStdin,
   reconcileLaunchedThread,
   type T3ToolTransport,
 } from "./voice-upstream-service.ts";
@@ -759,15 +760,31 @@ test("bounded candidate JSON rejects duplicates, extra keys, shell payload and o
     const path = NodePath.join(stateDir, "candidate.json");
     await NodeFSP.writeFile(path, JSON.stringify(candidate));
     expect(await readCandidateFile(path, now)).toEqual(candidate);
+    const stdin = async function* (text: string) {
+      const bytes = Buffer.from(text);
+      yield bytes.subarray(0, 17);
+      yield bytes.subarray(17);
+    };
+    expect(await readCandidateStdin(stdin(JSON.stringify(candidate)), now)).toEqual(candidate);
     for (const text of [
       `{"schema":1,${JSON.stringify(candidate).slice(1)}`,
       JSON.stringify({ ...candidate, env: { KEY: "secret" } }),
       JSON.stringify({ ...candidate, sha: "$(touch /tmp/never-run)" }),
       " ".repeat(1025),
+      "",
+      JSON.stringify({ ...candidate, upstream: "fictional/wrong-repository" }),
+      JSON.stringify({ ...candidate, expiresAt: now.toISOString() }),
+      JSON.stringify({ ...candidate, tag: "v0.1.10-rc.1" }),
     ]) {
       await NodeFSP.writeFile(path, text);
       await expect(readCandidateFile(path, now)).rejects.toThrow();
+      await expect(readCandidateStdin(stdin(text), now)).rejects.toThrow();
     }
+    const oversized = async function* () {
+      yield Buffer.alloc(1025);
+      throw new Error("Oversized stdin must not be drained");
+    };
+    await expect(readCandidateStdin(oversized(), now)).rejects.toThrow("stdin too large");
     expect(() => acpTransport({})).toThrow("T3_ACP_MCP_NODE");
     expect(() => acpTransport({ T3_ACP_MCP_NODE: "untrusted-command" })).toThrow();
     expect(() =>
