@@ -7,10 +7,13 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import * as NodePlatformCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import {
   type ManagedPolicyDocument,
+  EnvironmentHttpApi,
+  EnvironmentId,
   ProviderInstanceId,
   ProviderDriverKind,
   ScheduledTaskUpsertInput,
@@ -24,6 +27,11 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Etag from "effect/http/Etag";
+import * as HttpPlatform from "effect/http/HttpPlatform";
+import * as HttpRouter from "effect/http/HttpRouter";
+import * as HttpApi from "effect/http-api/HttpApi";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as Queue from "effect/Queue";
 import * as EffectScheduler from "effect/Scheduler";
 import * as Schema from "effect/Schema";
@@ -32,6 +40,10 @@ import * as TestClock from "effect/testing/TestClock";
 import * as Tracer from "effect/Tracer";
 
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as RelayDeliveryProof from "./RelayDeliveryProof.ts";
+import * as WebhookRoute from "./webhookRoute.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
@@ -527,6 +539,90 @@ const bindVoiceTask = (input: Parameters<Parameters<typeof withVoiceService>[0]>
     input.bind(binding);
     return { task: current, binding };
   });
+
+it.effect("dispatches signed HTTP bytes once through the real webhook service and action", () =>
+  withVoiceService((input) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { task, binding } = yield* bindVoiceTask(input);
+        class VoiceHttpTestApi extends HttpApi.make("environment").add(
+          EnvironmentHttpApi.groups.webhooks,
+        ) {}
+        const { handler } = yield* Effect.acquireRelease(
+          Effect.sync(() =>
+            HttpRouter.toWebHandler(
+              HttpApiBuilder.layer(VoiceHttpTestApi).pipe(
+                Layer.provide(WebhookRoute.layer),
+                Layer.provide(RelayDeliveryProof.layer),
+                Layer.provide(
+                  Layer.succeed(ScheduledTaskService.ScheduledTaskService, input.service),
+                ),
+                Layer.provide(
+                  Layer.mock(ServerSecretStore.ServerSecretStore)({
+                    get: () => Effect.succeedNone,
+                  }),
+                ),
+                Layer.provide(
+                  Layer.mock(ServerEnvironment.ServerEnvironment)({
+                    getEnvironmentId: Effect.succeed(EnvironmentId.make("environment:voice-http")),
+                  }),
+                ),
+                Layer.provide(
+                  HttpPlatform.layer.pipe(
+                    Layer.provideMerge(NodeServices.layer),
+                    Layer.provideMerge(Etag.layerWeak),
+                  ),
+                ),
+                Layer.provide([NodeServices.layer, NodePlatformCrypto.layerSignature]),
+              ),
+              { disableLogger: true },
+            ),
+          ),
+          ({ dispose }) => Effect.promise(dispose),
+        );
+        const bytes = new TextEncoder().encode(JSON.stringify(voiceCandidate));
+        const headers = signedVoiceRequest(task, bytes).headers;
+        const send = Effect.fn("VoiceHttpTest.send")(function* (body = bytes) {
+          const context = yield* Effect.context<never>();
+          return yield* Effect.promise(() =>
+            handler(
+              new Request(`http://voice.test${task.webhook!.path}`, {
+                method: "POST",
+                body,
+                headers,
+              }),
+              context,
+            ),
+          );
+        });
+        const accepted = yield* waitForSpan(send(), "VoiceWebhookAction.dispatch");
+        assert.equal(accepted.status, 202);
+        const launch = yield* Queue.take(input.launches);
+        assert.equal(launch.projectId, task.projectId);
+        assert.equal(launch.enforceNoSetupScripts, true);
+        const tampered = yield* send(
+          new TextEncoder().encode(JSON.stringify({ ...voiceCandidate, sha: "c".repeat(40) })),
+        );
+        assert.equal(tampered.status, 401);
+        const duplicate = yield* waitForSpan(send(), "VoiceWebhookAction.dispatch");
+        assert.equal(duplicate.status, 202);
+        assert.equal(yield* Queue.size(input.launches), 0);
+        yield* input.service.setEnabled({ id: task.id, enabled: false });
+        const enabled = yield* input.service.setEnabled({ id: task.id, enabled: true });
+        assert.notEqual(enabled.task.generation, binding.generation);
+        assert.equal((yield* send()).status, 409);
+        assert.equal(yield* Queue.size(input.launches), 0);
+        const state = yield* decodeVoiceState(
+          yield* Effect.promise(() =>
+            NodeFSP.readFile(NodePath.join(input.stateDir, "state.json"), "utf8"),
+          ),
+        );
+        assert.deepEqual(state.identities, [`${voiceCandidate.tag}:${voiceCandidate.sha}`]);
+        assert.deepEqual(state.deliveries, [voiceCandidate.deliveryId]);
+      }),
+    ),
+  ),
+);
 
 it.effect(
   "hands only verified original bytes to the app action, never history or decoded text",

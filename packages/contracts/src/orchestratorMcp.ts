@@ -741,6 +741,7 @@ export type OrchestratorMcpSaveScheduledTaskInput =
 
 export const OrchestratorMcpScheduledTask = Schema.Struct({
   scheduledTaskId: ScheduledTaskId,
+  generation: Schema.optionalKey(Schema.String),
   title: Schema.String,
   prompt: Schema.String,
   enabled: Schema.Boolean,

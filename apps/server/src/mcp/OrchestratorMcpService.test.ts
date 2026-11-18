@@ -11,6 +11,7 @@ import {
   ORCHESTRATOR_MCP_RUNNING_TASK_NEXT,
   type OrchestratorMcpCapabilitiesResult,
   type OrchestratorMcpListScheduledTasksInput,
+  OrchestratorMcpScheduledTask,
   type Project,
   OrchestratorMcpTarget,
   type OrchestrationV2ThreadShell,
@@ -79,6 +80,13 @@ import type { ProjectionRecordFilter } from "../orchestration-v2/ProjectionStore
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 const decodeTarget = Schema.decodeUnknownEffect(OrchestratorMcpTarget);
+const encodeScheduledTaskJson = Schema.encodeEffect(
+  Schema.fromJsonString(OrchestratorMcpScheduledTask),
+);
+const decodeScheduledTaskJson = Schema.decodeEffect(
+  Schema.fromJsonString(OrchestratorMcpScheduledTask),
+);
+const decodeUnknownJson = Schema.decodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
@@ -3477,6 +3485,8 @@ describe("OrchestratorMcpService provider resolution", () => {
           listed.tasks.map((summary) => [summary.webhookUrl, summary.webhookSignature]),
           [[undefined, "none"]],
         );
+        const encoded = yield* encodeScheduledTaskJson(listed.tasks[0]!);
+        assert.deepEqual(yield* decodeScheduledTaskJson(encoded), listed.tasks[0]);
       }),
     );
 
@@ -3484,7 +3494,8 @@ describe("OrchestratorMcpService provider resolution", () => {
       Effect.gen(function* () {
         const upserted = yield* Ref.make(0);
         const first = task({});
-        const second = task({ id: ScheduledTaskId.make("scheduled-task:second") });
+        const generation = "a".repeat(32);
+        const second = task({ id: ScheduledTaskId.make("scheduled-task:second"), generation });
         const elsewhere = task({
           id: ScheduledTaskId.make("scheduled-task:elsewhere"),
           projectId: ProjectId.make("project:elsewhere"),
@@ -3498,13 +3509,19 @@ describe("OrchestratorMcpService provider resolution", () => {
             .pipe(Effect.map(({ tasks }) => tasks.map((summary) => summary.scheduledTaskId)));
         assert.deepEqual(yield* ids({ scheduledTaskId: second.id }), [second.id]);
         assert.deepEqual(yield* ids({ projectId, scheduledTaskId: elsewhere.id }), []);
+        const listed = yield* mcp.listScheduledTasks(supervisedClient, {
+          scheduledTaskId: second.id,
+        });
+        const encoded = yield* encodeScheduledTaskJson(listed.tasks[0]!);
+        assert.deepEqual(yield* decodeUnknownJson(encoded), { ...listed.tasks[0], generation });
       }),
     );
 
     it.effect("returns a webhook URL when creating a task, not when updating it", () =>
       Effect.gen(function* () {
         const upserted = yield* Ref.make(0);
-        const hook = task({});
+        const generation = "b".repeat(32);
+        const hook = task({ generation });
         const timer = task({
           schedule: { type: "interval", everyMs: 3_600_000 },
           webhook: undefined,
@@ -3530,6 +3547,10 @@ describe("OrchestratorMcpService provider resolution", () => {
           Effect.provide(service([timer], null, upserted, hook)),
         );
         assert.equal(converted.webhookUrl, undefined);
+        for (const result of [created, converted]) {
+          const encoded = yield* encodeScheduledTaskJson(result);
+          assert.deepEqual(yield* decodeUnknownJson(encoded), { ...result, generation });
+        }
       }),
     );
 

@@ -283,6 +283,7 @@ function errorMessage(error: unknown): string {
 function scheduledTaskSummary(task: ScheduledTask, mayRun: boolean): OrchestratorMcpScheduledTask {
   return {
     scheduledTaskId: task.id,
+    ...(task.generation === undefined ? {} : { generation: task.generation }),
     title: task.title,
     prompt: task.prompt,
     enabled: task.enabled,
