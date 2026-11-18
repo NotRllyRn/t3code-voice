@@ -78,6 +78,7 @@ import {
 } from "./webhookDedupe.ts";
 import { describeFailedWebhookFilter, findFailedWebhookFilter } from "./webhookFilter.ts";
 import { constantTimeEquals, verifyWebhookSignature } from "./webhookVerification.ts";
+import * as VoiceWebhookAction from "./VoiceWebhookAction.ts";
 
 export const WEBHOOK_ROUTE_PREFIX = "/api/hooks";
 const isScheduledTaskError = Schema.is(ScheduledTaskError);
@@ -212,6 +213,7 @@ function resolveThreadMode(
 
 interface ScheduledTaskRow {
   readonly task_id: string;
+  readonly task_generation: string;
   readonly title: string;
   readonly prompt: string;
   readonly enabled: number;
@@ -401,6 +403,7 @@ const decodeRow = Effect.fnUntraced(
     const modelSelection = yield* decodeModelSelectionJson(row.model_selection_json);
     return yield* decodeTask({
       id: row.task_id,
+      generation: row.task_generation,
       title: row.title,
       prompt: row.prompt,
       enabled: row.enabled === 1,
@@ -477,6 +480,7 @@ export const layer = Layer.effect(
     const digest = yield* Digest.Digest;
     const mac = yield* Mac.Mac;
     const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
+    const voiceAction = yield* Effect.serviceOption(VoiceWebhookAction.VoiceWebhookAction);
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
     const serviceScope = yield* Effect.scope;
     const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
@@ -525,6 +529,7 @@ export const layer = Layer.effect(
       sql<ScheduledTaskRow>`
       SELECT
         task_id,
+        task_generation,
         title,
         prompt,
         enabled,
@@ -567,6 +572,7 @@ export const layer = Layer.effect(
       sql<ScheduledTaskRow>`
       SELECT
         task_id,
+        task_generation,
         title,
         prompt,
         enabled,
@@ -938,6 +944,11 @@ export const layer = Layer.effect(
         readonly dispatched: Ref.Ref<boolean>;
       },
     ) {
+      if (task.schedule.type === "webhook" && task.schedule.action !== undefined) {
+        return yield* taskError("App-owned webhook actions require verified ingress.", {
+          taskId: task.id,
+        });
+      }
       // Read before reserving: nothing between the reservation and its release may fail.
       const startedAt = yield* localNow;
       const startedAtIso = iso(startedAt);
@@ -954,6 +965,16 @@ export const layer = Layer.effect(
             return yield* taskError("Schedule task not found.", { taskId: task.id });
           }
           return { task, threadId: null, dispatchFailed: false };
+        }
+        if (active.schedule.type === "webhook" && active.schedule.action !== undefined) {
+          if (webhook !== undefined) {
+            return yield* new WebhookDeliverySkipped({
+              reason: "The task's trigger changed before this delivery ran.",
+            });
+          }
+          return yield* taskError("App-owned webhook actions require verified ingress.", {
+            taskId: active.id,
+          });
         }
         if (
           webhook !== undefined &&
@@ -1459,6 +1480,12 @@ export const layer = Layer.effect(
         input.schedule.type === "webhook"
           ? {
               type: "webhook",
+              ...(input.schedule.action !== undefined
+                ? { action: input.schedule.action }
+                : existingTask?.schedule.type === "webhook" &&
+                    existingTask.schedule.action !== undefined
+                  ? { action: existingTask.schedule.action }
+                  : {}),
               signature:
                 input.schedule.signature == null
                   ? null
@@ -1614,9 +1641,7 @@ export const layer = Layer.effect(
         return yield* taskError("Schedule task not found.", { taskId: input.id });
       }
       yield* notifyChanged;
-      return {
-        task: { ...existing, enabled: input.enabled, nextRunAt: next, updatedAt: iso(now) },
-      };
+      return { task: yield* loadTask(input.id) };
     });
 
     const forgetWebhookTask = (id: ScheduledTaskId) =>
@@ -2231,7 +2256,19 @@ export const layer = Layer.effect(
               id: deliveryId,
               taskId: task.id,
               receivedAt: iso(receivedAt),
-              request,
+              request:
+                schedule.action === undefined
+                  ? request
+                  : {
+                      hookId: request.hookId,
+                      token: "",
+                      method: request.method,
+                      path: request.path,
+                      body: new Uint8Array(),
+                      bodyText: "",
+                      headers: {},
+                      query: "",
+                    },
               outcome,
               signatureVerified: details.signatureVerified ?? false,
               missing: details.missing ?? [],
@@ -2294,7 +2331,27 @@ export const layer = Layer.effect(
             });
           });
 
-          const failedFilter = findFailedWebhookFilter(schedule.filters ?? [], request);
+          const preparedAction =
+            schedule.action === undefined
+              ? undefined
+              : Option.isNone(voiceAction) || signature === null
+                ? null
+                : yield* voiceAction.value
+                    .prepare(task, request.body, DateTime.toDateUtc(now))
+                    .pipe(Effect.orElseSucceed(() => null));
+          if (preparedAction === null) {
+            yield* log("disabled", { signatureVerified: signature !== null });
+            yield* observe("disabled");
+            return { _tag: "disabled" as const };
+          }
+          const filterRequest =
+            preparedAction === undefined
+              ? request
+              : {
+                  ...request,
+                  bodyText: new TextDecoder("utf-8", { fatal: true }).decode(request.body),
+                };
+          const failedFilter = findFailedWebhookFilter(schedule.filters ?? [], filterRequest);
           if (failedFilter !== null) {
             if (yield* takeFilteredLogSlot(task.id, DateTime.toEpochMillis(now))) {
               yield* log("filtered", {
@@ -2309,6 +2366,43 @@ export const layer = Layer.effect(
               deliveryId,
               outcome: "filtered" as const,
             });
+          }
+
+          if (preparedAction !== undefined && Option.isSome(voiceAction)) {
+            const slot = yield* takeRateSlot(task.id, DateTime.toEpochMillis(now));
+            if (slot !== "allowed") {
+              yield* observe("rate_limited");
+              return yield* releaseClaim({
+                _tag: "rate_limited",
+                outcome: "rate_limited",
+              } as const);
+            }
+            yield* refundRejectionSlot;
+            const guard = Effect.gen(function* () {
+              const current = yield* findTask(task.id);
+              if (
+                webhookPolicyBlock !== undefined ||
+                current === null ||
+                !current.enabled ||
+                current.generation !== task.generation ||
+                current.id !== task.id ||
+                current.projectId !== task.projectId ||
+                current.threadId !== task.threadId ||
+                current.schedule.type !== "webhook" ||
+                current.schedule.action !== schedule.action
+              )
+                return yield* taskError("Voice webhook binding changed.", { taskId: task.id });
+            });
+            yield* log("accepted", { signatureVerified: true });
+            const permit = yield* webhookPermit(task.id);
+            yield* voiceAction.value.dispatch(preparedAction, guard).pipe(
+              permit.withPermits(1),
+              Effect.catch(() => markDeliveryFailed(deliveryId, "Voice webhook action refused.")),
+              Effect.forkIn(serviceScope),
+            );
+            yield* observe("accepted");
+            claimAcquired = false;
+            return { _tag: "accepted" as const, deliveryId, outcome: "accepted" as const };
           }
 
           const runWindow = (yield* Ref.get(webhookRateWindows)).get(task.id);

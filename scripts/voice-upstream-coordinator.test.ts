@@ -2,14 +2,14 @@ import * as NodeAssert from "node:assert/strict";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import { test } from "vitest";
+import { test } from "vite-plus/test";
 import {
   claimCandidate,
   overdueInterruptRequest,
   parseCandidate,
   recordChildThread,
 } from "./voice-upstream-coordinator.ts";
-import type { GitHubApi } from "./voice-upstream-poll.ts";
+import type { GitHubApi } from "./lib/voice-upstream-poll.ts";
 
 const OLD = "a".repeat(40),
   NEW = "b".repeat(40);

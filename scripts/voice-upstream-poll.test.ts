@@ -1,6 +1,131 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Runs the real Node CLI and bundle in isolated filesystem and subprocess fixtures.
 import * as NodeCrypto from "node:crypto";
-import { expect, test } from "vitest";
-import { githubJson, pollUpstream, postCandidate, type GitHubApi } from "./voice-upstream-poll.ts";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeUtil from "node:util";
+import { build } from "vite-plus";
+import { expect, test } from "vite-plus/test";
+import {
+  githubJson,
+  pollUpstream,
+  postCandidate,
+  type GitHubApi,
+} from "./lib/voice-upstream-poll.ts";
+
+test("a single-file server import never invokes the poll CLI", async () => {
+  const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "voice-poll-import-"));
+  try {
+    const file = NodePath.join(dir, "server.mjs");
+    await build({
+      configFile: false,
+      root: dir,
+      logLevel: "silent",
+      build: {
+        ssr: NodeURL.fileURLToPath(new URL("./voice-upstream-coordinator.ts", import.meta.url)),
+        outDir: dir,
+        emptyOutDir: false,
+        minify: false,
+        target: "esnext",
+        rolldownOptions: {
+          treeshake: false,
+          output: { entryFileNames: "server.mjs", codeSplitting: false },
+        },
+      },
+    });
+    const { stdout } = await NodeUtil.promisify(NodeChildProcess.execFile)(process.execPath, [
+      "--input-type=module",
+      "-e",
+      `
+      let fetches = 0;
+      let errors = 0;
+      globalThis.fetch = async () => { fetches++; throw new Error("Network forbidden"); };
+      console.error = () => { errors++; };
+      process.env.VOICE_AUTOMATION_ENABLED = "0";
+      process.argv = [process.execPath, ${JSON.stringify(file)}];
+      process.once("beforeExit", () => {
+        console.log(JSON.stringify({ fetches, errors, exitCode: process.exitCode ?? 0 }));
+        process.exitCode = 0;
+      });
+      await import(${JSON.stringify(NodeURL.pathToFileURL(file).href)});
+    `,
+    ]);
+    expect(JSON.parse(stdout)).toEqual({ fetches: 0, errors: 0, exitCode: 0 });
+  } finally {
+    await NodeFSP.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the sender CLI runs from the workflow's sparse checkout with only fake IO", async () => {
+  const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "voice-poll-sparse-"));
+  try {
+    const workflow = await NodeFSP.readFile(
+      new URL("../.github/workflows/voice-upstream-watch.yml", import.meta.url),
+      "utf8",
+    );
+    const sparse = /sparse-checkout: \|\n((?: {12}[^\n]+\n)+)/
+      .exec(workflow)?.[1]
+      ?.trim()
+      .split("\n")
+      .map((line) => line.trim());
+    expect(sparse).toContain("scripts/lib/voice-upstream-poll.ts");
+    for (const file of sparse!) {
+      const destination = NodePath.join(dir, file);
+      await NodeFSP.mkdir(NodePath.dirname(destination), { recursive: true });
+      await NodeFSP.copyFile(new URL(`../${file}`, import.meta.url), destination);
+    }
+    const bootstrap = NodePath.join(dir, "fake-io.mjs");
+    await NodeFSP.writeFile(
+      bootstrap,
+      `
+      import { createHmac } from "node:crypto";
+      let gets = 0;
+      let posts = 0;
+      globalThis.fetch = async (input, init) => {
+        const url = String(input);
+        if (url === "https://example.test/hook" && init.method === "POST") {
+          posts++;
+          const expected = "sha256=" + createHmac("sha256", "test-only-key").update(init.body).digest("hex");
+          if (init.headers["x-hub-signature-256"] !== expected) throw new Error("Bad sender signature");
+          return new Response("{}", { status: 202 });
+        }
+        if (!url.startsWith("https://api.github.com/repos/pingdotgg/t3code/")) throw new Error("Unexpected fake request");
+        gets++;
+        const sha = "b".repeat(40);
+        const value = url.endsWith("/releases/latest")
+          ? { draft: false, prerelease: false, tag_name: "v99.0.0", id: 42, published_at: "2026-11-16T00:00:00Z" }
+          : url.endsWith("/git/ref/tags/v99.0.0")
+            ? { ref: "refs/tags/v99.0.0", object: { type: "commit", sha } }
+            : url.includes("/compare/") ? { status: "ahead" } : null;
+        if (value === null) throw new Error("Unexpected fake API path");
+        return new Response(JSON.stringify(value));
+      };
+      process.once("beforeExit", () => console.log(JSON.stringify({ gets, posts })));
+    `,
+    );
+    const { stdout } = await NodeUtil.promisify(NodeChildProcess.execFile)(
+      process.execPath,
+      [
+        "--import",
+        bootstrap,
+        NodePath.join(dir, "scripts/voice-upstream-poll.ts"),
+        "--enable-webhook",
+      ],
+      {
+        env: {
+          ...process.env,
+          VOICE_UPSTREAM_WEBHOOK_URL: "https://example.test/hook",
+          VOICE_UPSTREAM_WEBHOOK_SECRET: "test-only-key",
+        },
+      },
+    );
+    expect(JSON.parse(stdout.trim().split("\n").at(-1)!)).toEqual({ gets: 3, posts: 1 });
+  } finally {
+    await NodeFSP.rm(dir, { recursive: true, force: true });
+  }
+});
 
 const OLD = "a".repeat(40);
 const NEW = "b".repeat(40);

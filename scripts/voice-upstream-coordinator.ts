@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off - Native file locking and ISO timestamps are shared with the dependency-free Node coordinator.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeCrypto from "node:crypto";
 import * as NodePath from "node:path";
@@ -8,7 +9,7 @@ import {
   validatePin,
   type Candidate,
   type GitHubApi,
-} from "./voice-upstream-poll.ts";
+} from "./lib/voice-upstream-poll.ts";
 
 const PROJECT = "mcp:65bad731-4011-462c-96b6-58b9e4fe1cee";
 const BASE = "feature/codex-voice-stable";
@@ -52,7 +53,7 @@ type State = {
   deliveries: string[];
 };
 export type LaunchRequest = {
-  projectId: typeof PROJECT;
+  projectId: string;
   title: string;
   workspaceStrategy: {
     type: "worktree";
@@ -249,13 +250,15 @@ export async function claimCandidate(
     api: GitHubApi;
     now: Date;
     project: { id: string; scripts: readonly unknown[]; autoPull: boolean };
+    authorizedProjectId?: string;
+    beforeClaim?: () => Promise<Date>;
   },
 ): Promise<LaunchRequest> {
   if (process.env.VOICE_AUTOMATION_ENABLED !== "1") throw new Error("Voice automation disabled");
   const candidate = parseCandidate(input, opts.now);
   const pin = validatePin(opts.pin);
   if (
-    opts.project.id !== PROJECT ||
+    opts.project.id !== (opts.authorizedProjectId ?? PROJECT) ||
     opts.project.autoPull !== false ||
     !Array.isArray(opts.project.scripts) ||
     opts.project.scripts.length !== 0
@@ -282,7 +285,9 @@ export async function claimCandidate(
       verified.publishedAt !== candidate.publishedAt
     )
       throw new Error("Release no longer matches independent GitHub check");
-    const claimedAt = opts.now.toISOString();
+    const claimNow = opts.beforeClaim ? await opts.beforeClaim() : opts.now;
+    parseCandidate(candidate, claimNow);
+    const claimedAt = claimNow.toISOString();
     const branchName = branch(candidate.tag, candidate.sha);
     state.active = {
       tag: candidate.tag,
@@ -292,14 +297,14 @@ export async function claimCandidate(
       phase: "launching",
       threadId: null,
       claimedAt,
-      deadline: new Date(opts.now.getTime() + 7_200_000).toISOString(),
+      deadline: new Date(claimNow.getTime() + 7_200_000).toISOString(),
     };
     state.launches.push(claimedAt);
     state.identities.push(identity);
     state.deliveries.push(candidate.deliveryId);
     await save(dir, state);
     return {
-      projectId: PROJECT,
+      projectId: opts.project.id,
       title: `Upgrade voice fork to ${candidate.tag}`,
       workspaceStrategy: {
         type: "worktree",

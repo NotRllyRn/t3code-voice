@@ -1,7 +1,7 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import { expect, test } from "vitest";
+import { expect, test } from "vite-plus/test";
 import {
   acpTransport,
   auditDeadline,
@@ -12,7 +12,7 @@ import {
   type T3ToolTransport,
 } from "./voice-upstream-service.ts";
 import { claimCandidate, recordChildThread } from "./voice-upstream-coordinator.ts";
-import type { GitHubApi } from "./voice-upstream-poll.ts";
+import type { GitHubApi } from "./lib/voice-upstream-poll.ts";
 
 const PROJECT = "mcp:65bad731-4011-462c-96b6-58b9e4fe1cee";
 const THREAD = "mcp:00000000-0000-4000-8000-000000000002";

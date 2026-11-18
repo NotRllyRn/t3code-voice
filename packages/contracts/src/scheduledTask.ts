@@ -155,8 +155,12 @@ const ScheduledTaskWebhookFilters = Schema.Array(ScheduledTaskWebhookFilter)
     description: "All must match. Max 16. Omitted: keep stored. [] clears.",
   });
 
+export const VoiceWebhookAction = Schema.Literal("voice-upstream-release");
+export type VoiceWebhookAction = typeof VoiceWebhookAction.Type;
+
 const ScheduledTaskWebhookSchedule = Schema.Struct({
   type: Schema.Literal("webhook"),
+  action: Schema.optionalKey(VoiceWebhookAction),
   signature: Schema.NullOr(ScheduledTaskWebhookSignature),
   maxDeliveryAgeMinutes: Schema.optional(Schema.NullOr(WebhookMaxDeliveryAgeMinutes)),
   dedupe: Schema.optional(ScheduledTaskWebhookDedupe),
@@ -167,6 +171,7 @@ const ScheduledTaskWebhookSchedule = Schema.Struct({
 
 const ScheduledTaskUpsertWebhookSchedule = Schema.Struct({
   type: Schema.Literal("webhook"),
+  action: Schema.optionalKey(VoiceWebhookAction),
   signature: Schema.optional(
     Schema.NullOr(
       Schema.Struct({
@@ -240,6 +245,7 @@ export function scheduledTaskThreadMode(
 
 export const ScheduledTask = Schema.Struct({
   id: ScheduledTaskId,
+  generation: Schema.optionalKey(Schema.String),
   title: TrimmedNonEmptyString,
   prompt: TrimmedNonEmptyString,
   enabled: Schema.Boolean,

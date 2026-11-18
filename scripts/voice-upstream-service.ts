@@ -11,7 +11,7 @@ import {
   parseCandidate,
   recordChildThread,
 } from "./voice-upstream-coordinator.ts";
-import { githubJson, type GitHubApi } from "./voice-upstream-poll.ts";
+import { githubJson, type GitHubApi } from "./lib/voice-upstream-poll.ts";
 
 // Webhook JSON is data: use structured stdin/file input, never shell interpolation.
 // Managed scheduler verifies HMAC before that prompt; this CLI is not an HTTP/signature verifier.

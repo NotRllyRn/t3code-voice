@@ -25,6 +25,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             scripts/voice-upstream-poll.ts
+            scripts/lib/voice-upstream-poll.ts
             packages/shared/src/forkIdentity.ts
           sparse-checkout-cone-mode: false
       - uses: actions/setup-node@v6
