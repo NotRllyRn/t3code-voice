@@ -2,7 +2,6 @@
 import * as NodeCrypto from "node:crypto";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Real durable coordinator state, isolated in a temporary directory.
 import * as NodeFSP from "node:fs/promises";
-// @effect-diagnostics-next-line nodeBuiltinImport:off -- Temporary test directory.
 import * as NodeOS from "node:os";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Temporary test directory.
 import * as NodePath from "node:path";
