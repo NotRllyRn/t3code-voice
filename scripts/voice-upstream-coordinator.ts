@@ -29,6 +29,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 const TAG = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
 const SHA = /^[a-f0-9]{40}$/;
 const T3_THREAD_ID = /^mcp:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const LAUNCH_THREAD_ID = /^mcp:launch:[0-9a-f]{64}$/;
 const MAX_CANDIDATE_BYTES = 1024;
 const DAY = 86_400_000;
 const LIMIT = 300_000;
@@ -155,7 +156,8 @@ function decodeState(input: unknown): State {
       !["launching", "launched"].includes(a.phase as string) ||
       (a.phase === "launching"
         ? a.threadId !== null
-        : typeof a.threadId !== "string" || !T3_THREAD_ID.test(a.threadId)) ||
+        : typeof a.threadId !== "string" ||
+          !(T3_THREAD_ID.test(a.threadId) || LAUNCH_THREAD_ID.test(a.threadId))) ||
       time(a.deadline) !== time(a.claimedAt) + 7_200_000
     )
       throw new Error("Corrupt active run");
@@ -327,7 +329,8 @@ export async function overdueInterruptRequest(
 }
 
 export async function recordChildThread(stateDir: string, threadId: string): Promise<void> {
-  if (!T3_THREAD_ID.test(threadId)) throw new Error("Invalid thread ID");
+  if (!(T3_THREAD_ID.test(threadId) || LAUNCH_THREAD_ID.test(threadId)))
+    throw new Error("Invalid thread ID");
   await locked(stateDir, async (dir, state) => {
     if (!state.active) throw new Error("No launch to reconcile");
     if (state.active.phase === "launched") {
