@@ -18,6 +18,9 @@ import { githubJson, type GitHubApi } from "./voice-upstream-poll.ts";
 // A separate bound periodic prompt invokes `audit <state-dir>`; offline audits miss deadlines.
 const PROJECT = "mcp:65bad731-4011-462c-96b6-58b9e4fe1cee";
 const THREAD_ID = /^mcp:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const LAUNCH_THREAD_ID = /^mcp:launch:[0-9a-f]{64}$/;
+const VOICE_MODEL = "codex-broker/gpt-6.1-sol";
+type Thinking = "medium" | "provider_default";
 const MAX_RESPONSE = 65_536;
 const TOOL_TIMEOUT = 30_000;
 const CLEAN_PROVIDER_CONSTRAINT = {
@@ -80,12 +83,17 @@ async function call(
   }
 }
 
-function isVoiceSelection(value: unknown): boolean {
+function isVoiceSelection(value: unknown, thinking: Thinking): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const selection = object(value);
-  if (selection.instanceId !== "voice-automation" || selection.model !== "codex-broker/gpt-6.1-sol")
-    return false;
+  if (selection.instanceId !== "voice-automation" || selection.model !== VOICE_MODEL) return false;
   const options = selection.options;
+  if (thinking === "provider_default")
+    return (
+      options === undefined ||
+      (Array.isArray(options) && options.length === 0) ||
+      (!!options && typeof options === "object" && Object.keys(options).length === 0)
+    );
   if (Array.isArray(options)) {
     if (options.length !== 1) return false;
     const option = options[0];
@@ -110,7 +118,7 @@ export async function launchCandidate(input: unknown, opts: Options) {
   enabled();
   const now = opts.now ?? new Date();
   const candidate = parseCandidate(input, now);
-  await requireSafeProvider(opts.transport);
+  const thinking = await requireSafeProvider(opts.transport);
   const project = await call(opts.transport, "t3_project_read", { projectId: PROJECT });
   if (
     project.id !== PROJECT ||
@@ -142,19 +150,20 @@ export async function launchCandidate(input: unknown, opts: Options) {
     cleanProviderConstraint: { ...CLEAN_PROVIDER_CONSTRAINT },
     modelSelection: {
       instanceId: "voice-automation",
-      model: "codex-broker/gpt-6.1-sol",
-      options: { thinking: "medium" },
+      model: VOICE_MODEL,
+      ...(thinking === "medium" ? { options: { thinking: "medium" } } : {}),
     },
   });
   return reconcileLaunchedThread(launched, {
     ...opts,
     workspaceRoot: project.workspaceRoot,
     branch: request.workspaceStrategy.branch,
+    thinking,
   });
 }
 
-async function requireSafeProvider(transport: T3ToolTransport): Promise<void> {
-  const capabilities = await call(transport, "orchestrator_capabilities", {});
+async function requireSafeProvider(transport: T3ToolTransport): Promise<Thinking> {
+  const capabilities = await call(transport, "orchestrator_capabilities", { search: VOICE_MODEL });
   const providers = capabilities.providers;
   if (!Array.isArray(providers)) throw new Error("Provider configuration readback unsupported");
   const matches = providers.filter(
@@ -175,7 +184,33 @@ async function requireSafeProvider(transport: T3ToolTransport): Promise<void> {
     object(cleanStart).supportsConstraint !== true
   )
     throw new Error("Voice automation requires a supported clean Pi launch constraint");
+  const models = object(matches[0]).models;
+  const targets = Array.isArray(models)
+    ? models.filter(
+        (model: unknown) =>
+          model &&
+          typeof model === "object" &&
+          !Array.isArray(model) &&
+          object(model).id === VOICE_MODEL,
+      )
+    : [];
+  if (targets.length !== 1) throw new Error("Provider must advertise the exact voice model");
+  const options = object(targets[0]).options;
+  if (options === undefined) return "provider_default";
+  const thinking = Array.isArray(options)
+    ? options.filter(
+        (option: unknown) =>
+          option &&
+          typeof option === "object" &&
+          !Array.isArray(option) &&
+          object(option).id === "thinking",
+      )
+    : [];
+  const values = thinking.length === 1 ? object(thinking[0]).values : undefined;
+  if (!Array.isArray(values) || !values.includes("medium"))
+    throw new Error("Voice model must advertise medium thinking");
   // Readback is a preflight; the server enforces the constraint at provider spawn.
+  return "medium";
 }
 
 function isCleanProviderConstraint(value: unknown): boolean {
@@ -191,16 +226,22 @@ function isCleanProviderConstraint(value: unknown): boolean {
 
 export async function reconcileLaunchedThread(
   launched: Record<string, unknown>,
-  opts: Pick<Options, "stateDir" | "transport"> & { workspaceRoot: string; branch: string },
+  opts: Pick<Options, "stateDir" | "transport"> & {
+    workspaceRoot: string;
+    branch: string;
+    thinking?: Thinking;
+  },
 ) {
   enabled();
+  const thinking = opts.thinking ?? "medium";
+  const preference = thinking === "provider_default" ? { thinking } : {};
   if (
     launched.enforceNoSetupScripts !== true ||
     !isCleanProviderConstraint(launched.cleanProviderConstraint) ||
     launched.projectId !== PROJECT ||
     typeof launched.threadId !== "string" ||
-    !THREAD_ID.test(launched.threadId) ||
-    !isVoiceSelection(launched.modelSelection)
+    !(THREAD_ID.test(launched.threadId) || LAUNCH_THREAD_ID.test(launched.threadId)) ||
+    !isVoiceSelection(launched.modelSelection, thinking)
   )
     throw new Error("Launch response identity mismatch; manual reconciliation required");
   const threadId = launched.threadId;
@@ -216,14 +257,17 @@ export async function reconcileLaunchedThread(
     thread.threadId !== threadId ||
     thread.projectId !== PROJECT ||
     thread.providerInstanceId !== "voice-automation" ||
-    thread.model !== "codex-broker/gpt-6.1-sol"
+    thread.model !== VOICE_MODEL
   )
     throw new Error("Recorded thread identity mismatch; manual reconciliation required");
   const configuration = await call(opts.transport, "t3_thread_configure", { threadId });
-  if (configuration.threadId !== threadId || !isVoiceSelection(configuration.modelSelection))
+  if (
+    configuration.threadId !== threadId ||
+    !isVoiceSelection(configuration.modelSelection, thinking)
+  )
     throw new Error("Recorded thread selection mismatch; manual reconciliation required");
   if (thread.status === "preparing")
-    return { threadId, binding: "pending_reconciliation" as const };
+    return { threadId, binding: "pending_reconciliation" as const, ...preference };
   if (
     thread.branch !== opts.branch ||
     typeof thread.worktreePath !== "string" ||
@@ -239,7 +283,7 @@ export async function reconcileLaunchedThread(
     await NodeFSP.lstat(NodePath.join(worktree, ".env"));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    return { threadId, binding: "verified" as const };
+    return { threadId, binding: "verified" as const, ...preference };
   }
   // This post-launch diagnostic cannot establish pre-start environment isolation.
   throw new Error("Worktree contains .env; manual reconciliation required");

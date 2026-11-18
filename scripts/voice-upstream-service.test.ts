@@ -15,6 +15,12 @@ import type { GitHubApi } from "./voice-upstream-poll.ts";
 
 const PROJECT = "mcp:65bad731-4011-462c-96b6-58b9e4fe1cee";
 const THREAD = "mcp:00000000-0000-4000-8000-000000000002";
+const LAUNCH_THREAD = `mcp:launch:${"c".repeat(64)}`;
+const capabilitySearch = { search: "codex-broker/gpt-6.1-sol" };
+const advertisedModel = {
+  id: "codex-broker/gpt-6.1-sol",
+  options: [{ id: "thinking", values: ["low", "medium", "high"], default: "low" }],
+};
 const OLD = "a".repeat(40);
 const NEW = "b".repeat(40);
 const BRANCH = `auto/upstream-v0.1.10-${NEW.slice(0, 12)}`;
@@ -96,6 +102,8 @@ async function fixture(
         providerInstanceId: "voice-automation",
         driverKind: "pi",
         cleanStart: { environmentMode: "clean", supportsConstraint: true },
+        models: [structuredClone(advertisedModel)],
+        omittedModels: 12,
       },
     ],
   };
@@ -179,7 +187,7 @@ test.each([
       { providerInstanceId: "voice-automation", driverKind: "pi", cleanStart },
     ];
     await expect(launchCandidate(candidate, opts)).rejects.toThrow("clean Pi launch constraint");
-    expect(calls).toEqual([{ tool: "orchestrator_capabilities", args: {} }]);
+    expect(calls).toEqual([{ tool: "orchestrator_capabilities", args: capabilitySearch }]);
     await expect(NodeFSP.stat(NodePath.join(stateDir, "state.json"))).rejects.toMatchObject({
       code: "ENOENT",
     });
@@ -199,6 +207,7 @@ test("valid clean provider launches with an explicit constraint and retains the 
       "t3_thread_read",
       "t3_thread_configure",
     ]);
+    expect(calls[0]).toEqual({ tool: "orchestrator_capabilities", args: capabilitySearch });
     const request = calls[2]?.args;
     expect(request).toMatchObject({
       projectId: PROJECT,
@@ -225,6 +234,153 @@ test("valid clean provider launches with an explicit constraint and retains the 
     });
     await expect(launchCandidate(candidate, opts)).rejects.toThrow("Active run");
     expect(calls.filter(({ tool }) => tool === "t3_thread_launch")).toHaveLength(1);
+  }));
+
+test.each(
+  [undefined, [], [{ id: "other-model" }], [advertisedModel, advertisedModel]].map((models) => ({
+    models,
+  })),
+)(
+  "missing or ambiguous exact model %j cannot claim or borrow another instance's catalog",
+  async ({ models }) =>
+    fixture(async ({ opts, capabilities, calls, stateDir }) => {
+      capabilities.providers = [
+        {
+          providerInstanceId: "voice-automation",
+          driverKind: "pi",
+          cleanStart: { environmentMode: "clean", supportsConstraint: true },
+          models,
+        },
+        {
+          providerInstanceId: "other",
+          driverKind: "pi",
+          models: [advertisedModel],
+        },
+      ];
+      await expect(launchCandidate(candidate, opts)).rejects.toThrow("exact voice model");
+      expect(calls).toEqual([{ tool: "orchestrator_capabilities", args: capabilitySearch }]);
+      await expect(NodeFSP.stat(NodePath.join(stateDir, "state.json"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    }),
+);
+
+test("absent option descriptors preserve the provider default without requesting medium", async () =>
+  fixture(async ({ opts, capabilities, launch, configuration, calls }) => {
+    capabilities.providers = [
+      {
+        providerInstanceId: "voice-automation",
+        driverKind: "pi",
+        cleanStart: { environmentMode: "clean", supportsConstraint: true },
+        models: [{ id: selection.model }],
+      },
+    ];
+    const defaultSelection = { instanceId: selection.instanceId, model: selection.model };
+    Object.assign(launch, { modelSelection: defaultSelection });
+    configuration.modelSelection = { ...defaultSelection, options: [] };
+    expect(await launchCandidate(candidate, opts)).toEqual({
+      threadId: THREAD,
+      binding: "verified",
+      thinking: "provider_default",
+    });
+    expect(calls.find(({ tool }) => tool === "t3_thread_launch")?.args.modelSelection).toEqual(
+      defaultSelection,
+    );
+  }));
+
+test.each([
+  { instanceId: "other", model: selection.model },
+  { instanceId: selection.instanceId, model: "other" },
+  selection,
+  { ...selection, options: { thinking: "high" } },
+  { ...selection, options: { extra: true } },
+])(
+  "provider-default acknowledgment %j must not add options or change target",
+  async (modelSelection) =>
+    fixture(async ({ opts, capabilities, launch, calls, stateDir }) => {
+      capabilities.providers = [
+        {
+          providerInstanceId: "voice-automation",
+          driverKind: "pi",
+          cleanStart: { environmentMode: "clean", supportsConstraint: true },
+          models: [{ id: selection.model }],
+        },
+      ];
+      Object.assign(launch, { modelSelection });
+      await expect(launchCandidate(candidate, opts)).rejects.toThrow("identity mismatch");
+      expect(calls.map(({ tool }) => tool)).toEqual([
+        "orchestrator_capabilities",
+        "t3_project_read",
+        "t3_thread_launch",
+      ]);
+      const state = JSON.parse(
+        await NodeFSP.readFile(NodePath.join(stateDir, "state.json"), "utf8"),
+      );
+      expect(state.active.threadId).toBeNull();
+    }),
+);
+
+test("provider-default reconciliation checks persisted options before accepting preparation", async () =>
+  fixture(async ({ opts, launch, configuration, claim, thread, root }) => {
+    await claim();
+    const defaultSelection = { instanceId: selection.instanceId, model: selection.model };
+    Object.assign(launch, { modelSelection: defaultSelection });
+    thread.status = "preparing";
+    await expect(
+      reconcileLaunchedThread(launch, {
+        ...opts,
+        workspaceRoot: root,
+        branch: BRANCH,
+        thinking: "provider_default",
+      }),
+    ).rejects.toThrow("selection mismatch");
+    configuration.modelSelection = defaultSelection;
+    expect(
+      await reconcileLaunchedThread(launch, {
+        ...opts,
+        workspaceRoot: root,
+        branch: BRANCH,
+        thinking: "provider_default",
+      }),
+    ).toEqual({
+      threadId: THREAD,
+      binding: "pending_reconciliation",
+      thinking: "provider_default",
+    });
+  }));
+
+test.each(
+  [
+    null,
+    [],
+    [{ id: "thinking", values: ["high"] }],
+    [{ id: "thinking", values: "medium" }],
+    [advertisedModel.options[0], advertisedModel.options[0]],
+  ].map((options) => ({ options })),
+)("unsupported advertised thinking options %j cannot claim", async ({ options }) =>
+  fixture(async ({ opts, capabilities, calls }) => {
+    capabilities.providers = [
+      {
+        providerInstanceId: "voice-automation",
+        driverKind: "pi",
+        cleanStart: { environmentMode: "clean", supportsConstraint: true },
+        models: [{ id: selection.model, options }],
+      },
+    ];
+    await expect(launchCandidate(candidate, opts)).rejects.toThrow("medium thinking");
+    expect(calls).toEqual([{ tool: "orchestrator_capabilities", args: capabilitySearch }]);
+  }),
+);
+
+test("source-generated launch IDs reach durable recording", async () =>
+  fixture(async ({ opts, launch, thread, configuration }) => {
+    launch.threadId = LAUNCH_THREAD;
+    thread.threadId = LAUNCH_THREAD;
+    configuration.threadId = LAUNCH_THREAD;
+    expect(await launchCandidate(candidate, opts)).toEqual({
+      threadId: LAUNCH_THREAD,
+      binding: "verified",
+    });
   }));
 
 test("provider mode changed since a successful readback rejects the next attempt before claim", async () =>
@@ -332,7 +488,7 @@ test.each([
     await expect(launchCandidate(candidate, opts)).rejects.toThrow(
       /readback unsupported|actual Pi driver/,
     );
-    expect(calls).toEqual([{ tool: "orchestrator_capabilities", args: {} }]);
+    expect(calls).toEqual([{ tool: "orchestrator_capabilities", args: capabilitySearch }]);
     await expect(NodeFSP.stat(NodePath.join(stateDir, "state.json"))).rejects.toMatchObject({
       code: "ENOENT",
     });
@@ -428,19 +584,47 @@ test.each(selectionMismatches)(
     }),
 );
 
-test.each([{ projectId: "other" }, { threadId: "invalid" }, { enforceNoSetupScripts: undefined }])(
-  "rejects launch identity mismatch %j before recording",
-  async (changes) =>
-    fixture(async ({ claim, reconcile, launch, stateDir }) => {
-      await claim();
-      Object.assign(launch, changes);
-      await expect(reconcile()).rejects.toThrow("identity mismatch");
-      const state = JSON.parse(
-        await NodeFSP.readFile(NodePath.join(stateDir, "state.json"), "utf8"),
-      );
-      expect(state.active.threadId).toBeNull();
-    }),
+test.each([
+  { projectId: "other" },
+  ...[
+    "invalid",
+    `mcp:launch:${"c".repeat(63)}`,
+    `mcp:launch:${"c".repeat(65)}`,
+    `mcp:launch:${"C".repeat(64)}`,
+    `mcp:launch:${"g".repeat(64)}`,
+    `mcp:launch:${"c".repeat(64)}:extra`,
+    ` mcp:launch:${"c".repeat(64)}`,
+    `mcp:launch:${"c".repeat(64)}\n`,
+    "mcp:00000000-0000-1000-8000-000000000002",
+  ].map((threadId) => ({ threadId })),
+  { enforceNoSetupScripts: undefined },
+])("rejects launch identity mismatch %j before recording", async (changes) =>
+  fixture(async ({ claim, reconcile, launch, stateDir }) => {
+    await claim();
+    Object.assign(launch, changes);
+    await expect(reconcile()).rejects.toThrow("identity mismatch");
+    const state = JSON.parse(await NodeFSP.readFile(NodePath.join(stateDir, "state.json"), "utf8"));
+    expect(state.active.threadId).toBeNull();
+  }),
 );
+
+test("durable launch IDs round-trip and malformed stored IDs fail closed", async () =>
+  fixture(async ({ claim, stateDir }) => {
+    await claim();
+    const id = `mcp:launch:${"c".repeat(64)}`;
+    await recordChildThread(stateDir, id);
+    await recordChildThread(stateDir, id);
+    const path = NodePath.join(stateDir, "state.json");
+    const saved = JSON.parse(await NodeFSP.readFile(path, "utf8"));
+    expect(saved.active.threadId).toBe(id);
+    for (const invalid of [`${id} `, ` ${id}`, `${id}:extra`, `mcp:launch:${"C".repeat(64)}`]) {
+      await NodeFSP.writeFile(
+        path,
+        JSON.stringify({ ...saved, active: { ...saved.active, threadId: invalid } }),
+      );
+      await expect(recordChildThread(stateDir, id)).rejects.toThrow();
+    }
+  }));
 
 test("preparing remains pending and can reconcile the same thread when ready", async () =>
   fixture(async ({ claim, reconcile, thread, calls, worktree, stateDir }) => {
