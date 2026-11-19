@@ -38,9 +38,9 @@ required; credentials and upstream destinations are never supplied by the browse
    Use **Start without a project** for Scratch.
 2. Start voice and wait for it to connect before speaking. The microphone is off
    while connecting or waiting for a provider refresh. Stop remains available.
-3. Speak your request. Identified final speech is saved in the same conversation;
-   generated delegations carry their matching final transcript into normal T3
-   queue delivery. Final human corrections and constraints control the task.
+3. Speak your request. Final speech is saved once in the conversation. When
+   coding work is requested, that same transcript enters the normal T3 queue.
+   Generated paraphrases do not replace your words or add another user message.
 4. Mute to turn off microphone input, or Stop to end voice capture and playback.
    Stop does not cancel a coding task. Use the normal coding Stop for that.
 
@@ -50,6 +50,13 @@ and results share that thread. Voice uses the normal coding agent and approval
 UI; it cannot approve tools or answer permission requests. Check written results
 and resolve questions there. Brief spoken feedback is based on actual T3 output;
 its accuracy and complete audible delivery remain alpha validation requirements.
+
+Voice replies appear in the same timeline. The coding agent receives newly
+recorded voice context before its next eligible turn, with generated replies
+attributed to voice. A voice-triggered turn includes context preceding its
+human transcript; later replies wait for the next eligible turn. They remain
+visible and are not inserted into an already-running turn. Earlier delivered
+voice context is not resent on each delegation.
 
 Stop ends capture and playback immediately. It may retain the silent media peer
 while the server finishes an in-flight create and hangs up its returned call ID.
@@ -68,8 +75,9 @@ The requested alias is `gpt-live-1.1-codex`. The effective served model and vers
 are unknown; the alias does not establish a latest model version or entitlement.
 The native Live adapter uses observed parent-turn fields whose upstream stability
 and semantic accuracy are not guaranteed. Missing or stale associations fail
-closed. Conflicting generated instructions are retained with their provenance;
-no second executor or automatic permission bypass is used.
+closed. Delegation keeps its internal correlation to the recorded human turn;
+generated instructions are not submitted as human input. No second executor or
+automatic permission bypass is used.
 
 ## Fork and other surfaces
 

@@ -7056,7 +7056,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             "Only the recorded voice user input can be dispatched, without rewriting or steering.",
         });
       }
-      if (recordedVoice.runId !== null) return;
+      if (recordedVoice.runId !== null) {
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: command.threadId,
+          occurredAt: yield* DateTime.now,
+          payload: projection.thread,
+        });
+        return;
+      }
     }
     // Freeze the committed conversation high-water mark, not a proposed/pre-normalized position.
     const lastStoredOrdinal =
@@ -7067,7 +7078,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
           ),
         )) - 1;
-    const voiceHistoryCutoffOrdinal = lastStoredOrdinal > 0 ? lastStoredOrdinal : undefined;
+    // Later voice replies stay visible now but enter provider history before the next eligible turn.
+    const historyOrdinal = recordedVoiceItem ? recordedVoiceItem.ordinal - 1 : lastStoredOrdinal;
+    const voiceHistoryCutoffOrdinal = historyOrdinal > 0 ? historyOrdinal : undefined;
     if (command.manualContinuationOfRunId !== undefined) {
       const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
       const limited = latestRootProviderFailure(source ?? null, projection.turnItems);

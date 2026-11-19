@@ -1,3 +1,4 @@
+import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it, vi } from "vite-plus/test";
@@ -3170,6 +3171,20 @@ for (const mode of ["native", "unsupported", "inline"] as const) {
         expect(prompt).toContain("not verified tool execution");
         expect(prompt.match(/CURRENT_EXECUTION_INPUT/g)).toHaveLength(1);
       }
+      const serialized = JSON.stringify({
+        input: prompt,
+        items:
+          mode === "native" && injected
+            ? historyResponseItems(injected.messages, injected.context)
+            : [],
+      });
+      for (const text of [
+        "CURRENT_EXECUTION_INPUT",
+        "PRIOR_VOICE_QUESTION",
+        "GENERATED_VOICE_REPLY",
+      ])
+        expect(serialized.split(text)).toHaveLength(2);
+      expect(serialized).not.toContain("MUST_WAIT_UNTIL_NEXT_TURN");
       expect(prompt).not.toContain("MUST_WAIT_UNTIL_NEXT_TURN");
       expect(harness.projection().contextHandoffs[0]?.delivery?.status).toBe(
         mode === "native" ? "injected" : "inline",
@@ -3198,6 +3213,33 @@ for (const mode of ["native", "unsupported", "inline"] as const) {
       yield* next.start;
       expect(next.injectHistory).not.toHaveBeenCalled();
       expect(next.startTurn.mock.calls[0]?.[0].message.text).toBe("SECOND_EXECUTION_INPUT");
+      const later = makeLocalCommandHarness({ text: "THIRD_EXECUTION_INPUT", voiceHistory: mode });
+      const laterProjection = later.projection();
+      later.setProjection({
+        ...laterProjection,
+        providerThreads: after.providerThreads,
+        turnItems: after.turnItems,
+        runs: [
+          { ...after.runs.at(-1)!, id: previousRunId, status: "completed" },
+          { ...laterProjection.runs.at(-1)!, ordinal: 4, voiceHistoryCutoffOrdinal: 3 },
+        ],
+        contextHandoffs: next.projection().contextHandoffs,
+      });
+      yield* later.start;
+      const laterPrompt = later.startTurn.mock.calls[0]![0].message.text;
+      const laterHistory = later.injectHistory.mock.calls[0]?.[0];
+      const deliveredLater = JSON.stringify({
+        input: laterPrompt,
+        items:
+          mode === "native" && laterHistory
+            ? historyResponseItems(laterHistory.messages, laterHistory.context)
+            : [],
+      });
+      expect(deliveredLater.split("MUST_WAIT_UNTIL_NEXT_TURN")).toHaveLength(2);
+      expect(deliveredLater).not.toContain("GENERATED_VOICE_REPLY");
+      expect(deliveredLater).not.toContain("PRIOR_VOICE_QUESTION");
+      yield* later.start;
+      expect(later.startTurn).toHaveBeenCalledOnce();
       const cleared = makeLocalCommandHarness({ text: "FRESH_INPUT", voiceHistory: mode });
       const freshProjection = cleared.projection();
       cleared.setProjection({

@@ -503,27 +503,33 @@ it.effect.each([false, true])(
         expect(caption.voice?.transcriptFinality).toBe("application_frozen");
         expect(caption.voice?.delivery).toBe("unknown");
         expect(caption.voice?.itemId).toBe("fictional-user-turn");
-        const derived = history.messages.find((message) =>
-          message.text.includes("Live delegated instruction"),
-        )!;
-        expect(derived.createdBy).toBe("agent");
-        expect(derived.creationSource).toBe("server");
-        expect(derived.text).toContain("NOT a verbatim human quotation");
-        expect(derived.text).toContain(instructions);
-        expect(derived.text).toContain(original);
+        expect(history.messages).toHaveLength(1);
+        expect(caption.runId).toBe(history.runs[0]!.id);
+        expect(caption.createdBy).toBe("user");
+        expect(caption.creationSource).toBe("web");
         const receipt = yield* sendLiveDelegation({
           projectId: VoiceFixture.projectId,
           threadId,
           sessionId: caption.voice!.sessionId,
           delegationId: "fictional-delegation",
-          instructions,
           userTurnId: "fictional-user-turn",
           userTranscript: original,
           expectedUserMessageCount: 0,
-          context: [{ role: "user", text: original }],
         }).pipe(Effect.provideService(ThreadManagement.ThreadManagementService, f.management));
         expect(receipt.run.id).toBe(history.runs[0]!.id);
-        expect(receipt.message.id).toBe(derived.id);
+        expect(receipt.message.id).toBe(caption.id);
+        const replayed = yield* sendLiveDelegation({
+          projectId: VoiceFixture.projectId,
+          threadId,
+          sessionId: caption.voice!.sessionId,
+          delegationId: "fictional-reconnected-retry",
+          userTurnId: "fictional-user-turn",
+          userTranscript: original,
+          expectedUserMessageCount: 0,
+        }).pipe(Effect.provideService(ThreadManagement.ThreadManagementService, f.management));
+        expect(replayed.run.id).toBe(receipt.run.id);
+        expect(replayed.message.id).toBe(caption.id);
+
         // Replays and assistant speech do not create another coding request.
         f.native(nativeDelegation("fictional-delegation"));
         f.native(nativeDelegation("fictional-replay"));
@@ -541,8 +547,9 @@ it.effect.each([false, true])(
         );
         yield* f.worker.drain();
         const turn = yield* Queue.take(f.started);
-        expect(turn.message.text).toContain(derived.text);
-        expect(turn.message.text).toContain("Historical user; user_message");
+        expect(turn.message.text).toBe(original);
+        expect(turn.message.text).not.toContain(instructions);
+        expect(turn.message.text).not.toContain("native_live_delegation");
         expect(turn.runtimePolicy.runtimeMode).toBe("approval-required");
         expect((yield* f.management.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(1);
         const running = yield* f.orchestrator.getThreadProjection(threadId);
@@ -570,11 +577,12 @@ it.effect.each([false, true])(
           Stream.runDrain,
           Effect.forkScoped,
         );
+        const { voice: _voice, ...canonicalInput } = caption;
         yield* Queue.offer(f.providerEvents, {
           type: "message.updated",
           driver,
           message: {
-            ...derived,
+            ...canonicalInput,
             id: finalId,
             runId: turn.runId,
             nodeId: turn.rootNodeId,

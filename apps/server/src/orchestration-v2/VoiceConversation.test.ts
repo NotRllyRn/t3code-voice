@@ -64,16 +64,32 @@ it.effect(
         createdBy: "user" as const,
         creationSource: "web" as const,
       };
+      const reply = yield* recordVoiceMessage({
+        ...input,
+        role: "assistant",
+        text: "I will inspect it; nothing has run yet.",
+        voice: {
+          ...voice,
+          itemId: "reply-after-input",
+          sequence: 1,
+          responseId: "reply",
+          textKind: "generated_voice_reply",
+        },
+      });
       const run = yield* threads.sendToThread(execute);
       const retried = yield* threads.sendToThread(execute);
       expect(retried.run.id).toBe(run.run.id);
+      expect(run.run.voiceHistoryCutoffOrdinal).toBeUndefined();
       projection = yield* store.getThreadRecords(threadId, [
         "messages",
         "turnItems",
         "runs",
         "providerTurns",
       ]);
-      expect(projection.messages).toHaveLength(1);
+      expect(projection.messages.find((message) => message.id === reply.messageId)?.text).toBe(
+        "I will inspect it; nothing has run yet.",
+      );
+      expect(projection.messages).toHaveLength(2);
       expect(projection.runs).toHaveLength(1);
       expect(projection.messages[0]).toMatchObject({
         id: first.messageId,
@@ -105,7 +121,7 @@ it.effect(
       expect(
         queued.projection.messages.filter((message) => message.id === second.messageId),
       ).toHaveLength(1);
-      expect(queued.run.voiceHistoryCutoffOrdinal).toBe(secondItem.ordinal);
+      expect(queued.run.voiceHistoryCutoffOrdinal).toBe(secondItem.ordinal - 1);
       const editError = yield* Effect.flip(
         threads.dispatch({
           type: "queued-run.edit",

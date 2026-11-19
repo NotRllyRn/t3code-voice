@@ -134,10 +134,10 @@ it.effect(
           );
           expect(speech).toBeDefined();
           const submitted = records.messages.find(
-            (message) => message.runId && message.text.includes(`"userTurnId":"turn_${name}"`),
+            (message) => message.runId && message.id === speech!.id,
           );
           expect(submitted?.text).toContain(speech!.text.trim());
-          expect(submitted?.createdBy).toBe("agent");
+          expect(submitted?.createdBy).toBe("user");
         }
         expect(records.messages.filter((message) => message.voice)).toHaveLength(4);
       }),
@@ -145,7 +145,7 @@ it.effect(
 );
 
 it.live(
-  "direct conversation is canonical history only; derived delegation enters ONE normal run without relabeling speech",
+  "delegation promotes canonical speech once and keeps generated voice history separate",
   () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -224,13 +224,13 @@ it.live(
         const after = yield* threads.getThreadRecords(threadId, ["messages", "runs"]);
         expect(after.runs).toHaveLength(1);
         const submitted = after.messages.find((message) => message.runId === after.runs[0]!.id)!;
-        expect(submitted.createdBy).toBe("agent");
-        expect(submitted.creationSource).toBe("server");
-        expect(submitted.voice).toBeUndefined();
-        expect(submitted.text).toContain("NOT a verbatim human quotation");
-        expect(submitted.text).toContain('"source":"native_live_delegation"');
-        expect(submitted.text).toContain(delegation.instructions);
-        expect(after.messages.find((message) => message.id === speech.id)?.text).toBe(speech.text);
+        expect(after.messages).toHaveLength(2);
+        expect(submitted.id).toBe(speech.id);
+        expect(submitted.createdBy).toBe("user");
+        expect(submitted.creationSource).toBe("web");
+        expect(submitted.voice).toEqual(speech.voice);
+        expect(submitted.text).toBe(speech.text);
+        expect(submitted.text).not.toContain(delegation.instructions);
         expect(appends.some((event) => event.text.includes("ambiguous_repeat"))).toBe(true);
         expect(appends.some((event) => event.text.includes("not a completion result"))).toBe(true);
         const replay: NativeLiveAppend[] = [];
@@ -1246,13 +1246,9 @@ it.live.each([
       expect(records.runs).toHaveLength(1);
       expect(records.messages.find((message) => message.voice)?.text).toBe(finalText);
       const task = records.messages.find((message) => message.runId)?.text;
-      expect(task).toContain(finalText);
-      expect(task).toContain("Edit the file.");
-      if (finalText.startsWith("Actually")) expect(task).toContain('"delegationId":"early"');
-      expect(task).toContain("The finalized human userTranscript controls the task");
-      expect(task).toContain(
-        "corrections and constraints override conflicting generated instructions",
-      );
+      expect(task).toBe(finalText);
+      expect(records.messages.filter((message) => message.role === "user")).toHaveLength(1);
+      expect(task).not.toContain("Edit the file.");
     }),
   ).pipe(Effect.provide(services)),
 );
@@ -1337,9 +1333,8 @@ it.effect.each(["reordered", "interleaved", "unassociated", "handoff-replay"] as
         if (scenario === "reordered" || scenario === "interleaved") {
           const parent = scenario === "reordered" ? "one" : "two";
           const task = records.messages.find((message) => message.runId)!;
-          expect(task.text).toContain(`"userTurnId":"${parent}"`);
-          expect(task.text).toContain(`Generated instruction for ${parent}.`);
-          expect(task.text).toContain("Corrected final. Keep blue only; do not edit.");
+          expect(task.voice?.itemId).toBe(parent);
+          expect(task.text).toBe("Corrected final. Keep blue only; do not edit.");
           expect(records.messages.find((message) => message.voice?.itemId === parent)?.text).toBe(
             "Corrected final. Keep blue only; do not edit.",
           );
