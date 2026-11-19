@@ -20,6 +20,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Socket from "effect/socket/Socket";
 import { HttpClient, HttpClientRequest, HttpClientResponse, FetchHttpClient } from "effect/http";
+import type * as HttpClientError from "effect/http/HttpClientError";
 import {
   decodeNativeLiveCreateResponse,
   encodeNativeLiveCreate,
@@ -226,6 +227,43 @@ export const acquireLiveCall = Effect.fn("LiveTransport.acquireCall")(function* 
   return { type: "created" as const, answerSdp: result.answerSdp, socket: ownedSocket };
 });
 
+const transportCodes = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ETIMEDOUT",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "CERT_HAS_EXPIRED",
+  "CERT_NOT_YET_VALID",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+]);
+
+// Fetch wraps Node's network/TLS error in TypeError.cause; never serialize either error.
+function createTransportCode(error: HttpClientError.HttpClientError): string {
+  try {
+    let cause: unknown = error.reason._tag === "TransportError" ? error.reason.cause : undefined;
+    for (let depth = 0; depth < 4 && typeof cause === "object" && cause !== null; depth++) {
+      const code = "code" in cause ? cause.code : undefined;
+      if (typeof code === "string" && transportCodes.has(code)) return code;
+      const name = "name" in cause ? cause.name : undefined;
+      if (name === "AbortError" || name === "TimeoutError") return name;
+      cause = "cause" in cause ? cause.cause : undefined;
+    }
+  } catch {
+    // Diagnostics must not turn an unusual fetch rejection into a defect.
+  }
+  return "unknown";
+}
+
 const safeFailure = () => new LiveConnectionError({ reason: "temporarily-unavailable" });
 const boundedBody = (response: Response) =>
   Effect.suspend(() => {
@@ -289,7 +327,6 @@ export const liveNetworkLayer = Layer.effect(
             signal: options?.signal ? AbortSignal.any([options.signal, deadline]) : deadline,
           });
         }),
-        Effect.mapError(safeFailure),
       );
     return LiveNetwork.of({
       create: Effect.fn("LiveNetwork.create")(function* (connection, body) {
@@ -309,9 +346,28 @@ export const liveNetworkLayer = Layer.effect(
           ),
           LIVE_VOICE_CREATE_TIMEOUT_MS,
           deadline.signal,
+        ).pipe(
+          Effect.tapError((error) =>
+            Effect.logWarning("Live create failed", {
+              failureStage: "create-transport",
+              transportCode: createTransportCode(error),
+            }),
+          ),
+          Effect.mapError(safeFailure),
         );
         const web = HttpClientResponse.toWeb(response);
-        if (Option.isNone(web)) return yield* safeFailure();
+        if (Option.isNone(web)) {
+          yield* Effect.logWarning("Live create failed", {
+            failureStage: "create-response-conversion",
+            httpStatus: response.status,
+          });
+          return yield* safeFailure();
+        }
+        if (response.status !== 201)
+          yield* Effect.logWarning("Live create failed", {
+            failureStage: "create-http",
+            httpStatus: response.status,
+          });
         return {
           status: response.status,
           contentType: response.headers["content-type"] ?? null,
@@ -326,7 +382,7 @@ export const liveNetworkLayer = Layer.effect(
             HttpClientRequest.setHeaders(Redacted.value(connection.headers)),
           ),
           5000,
-        );
+        ).pipe(Effect.mapError(safeFailure));
         const web = HttpClientResponse.toWeb(response);
         if (Option.isSome(web))
           yield* Effect.promise(() => web.value.body?.cancel() ?? Promise.resolve());

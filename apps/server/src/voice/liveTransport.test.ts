@@ -1,4 +1,5 @@
 import * as NodeWS from "@effect/platform-node/NodeWS";
+import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- fictional loopback HTTP/WS boundary, no provider calls.
 import * as NodeHttp from "node:http";
 import { expect, it, vi } from "@effect/vitest";
@@ -672,4 +673,212 @@ it.live("native sideband releases send reservations for an ordinary reading peer
       expect(wire?.listenerCount("close")).toBe(0);
     }),
   ),
+);
+
+it.effect.each([
+  ["ECONNREFUSED", "ECONNREFUSED"],
+  ["ENOTFOUND", "ENOTFOUND"],
+  ["EAI_AGAIN", "EAI_AGAIN"],
+  ["ECONNRESET", "ECONNRESET"],
+  ["ETIMEDOUT", "ETIMEDOUT"],
+  ["UND_ERR_CONNECT_TIMEOUT", "UND_ERR_CONNECT_TIMEOUT"],
+  ["ERR_TLS_CERT_ALTNAME_INVALID", "ERR_TLS_CERT_ALTNAME_INVALID"],
+  ["CERT_HAS_EXPIRED", "CERT_HAS_EXPIRED"],
+  ["UNABLE_TO_VERIFY_LEAF_SIGNATURE", "UNABLE_TO_VERIFY_LEAF_SIGNATURE"],
+  ["fictional-private-code", "unknown"],
+  ["AbortError", "AbortError"],
+  ["TimeoutError", "TimeoutError"],
+  ["cyclic", "unknown"],
+  ["throwing-getter", "unknown"],
+  ["changing-getter", "ECONNREFUSED"],
+] as const)("create diagnostics retain only the allowlisted fetch cause %s", ([code, expected]) =>
+  Effect.gen(function* () {
+    const logs: unknown[] = [];
+    let requests = 0;
+    const fetch: typeof globalThis.fetch = async (_url, init) => {
+      requests++;
+      expect(init?.redirect).toBe("manual");
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      if (code === "AbortError" || code === "TimeoutError")
+        throw new DOMException("fictional-private-abort", code);
+      if (code === "changing-getter") {
+        let reads = 0;
+        throw Object.defineProperty({}, "code", {
+          get() {
+            return reads++ === 0 ? "ECONNREFUSED" : "fictional-private-getter";
+          },
+        });
+      }
+      if (code === "throwing-getter") {
+        throw Object.defineProperty({}, "code", {
+          get() {
+            throw new Error("fictional-private-getter");
+          },
+        });
+      }
+      if (code === "cyclic") {
+        const error = new Error("fictional-private-cycle");
+        error.cause = error;
+        throw error;
+      }
+      throw new TypeError("fictional-private-fetch-message", {
+        cause: Object.assign(new Error("fictional-private-cause-message"), {
+          code,
+          hostname: "fictional-private-host",
+          headers: { Authorization: "Bearer fictional-private-key" },
+        }),
+      });
+    };
+    const result = yield* Effect.scoped(
+      Effect.gen(function* () {
+        const network = yield* LiveNetwork;
+        return yield* network.create(connection, "fictional-private-body");
+      }),
+    ).pipe(
+      Effect.provide(liveNetworkLayer.pipe(Layer.provide(FetchHttpClient.layer))),
+      Effect.provideService(FetchHttpClient.Fetch, fetch),
+      Effect.provide(
+        Logger.layer([Logger.make(({ message, cause }) => logs.push({ message, cause }))], {
+          mergeWithExisting: false,
+        }),
+      ),
+      Effect.result,
+    );
+    expect(result._tag).toBe("Failure");
+    if (result._tag === "Failure") expect(result.failure.reason).toBe("temporarily-unavailable");
+    expect(requests).toBe(1);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({
+      message: [
+        "Live create failed",
+        {
+          failureStage: "create-transport",
+          transportCode: expected,
+        },
+      ],
+    });
+    expect(JSON.stringify(logs)).not.toMatch(/fictional|Bearer|relay\.example|v=0/);
+  }),
+);
+
+it.effect.each([201, 401, 403, 404, 429, 503] as const)(
+  "create diagnostics retain HTTP %s without private response data or retries",
+  (httpStatus) =>
+    Effect.gen(function* () {
+      const logs: unknown[] = [];
+      let requests = 0;
+      const fetch: typeof globalThis.fetch = async () => {
+        requests++;
+        return new Response(httpStatus === 201 ? sdp : "fictional-private-response", {
+          status: httpStatus,
+          headers: { "content-type": "application/sdp", "x-private": "fictional-private-header" },
+        });
+      };
+      const response = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const network = yield* LiveNetwork;
+          const result = yield* network.create(connection, "fictional-private-body");
+          return { status: result.status, body: yield* result.body };
+        }),
+      ).pipe(
+        Effect.provide(liveNetworkLayer.pipe(Layer.provide(FetchHttpClient.layer))),
+        Effect.provideService(FetchHttpClient.Fetch, fetch),
+        Effect.provide(
+          Logger.layer([Logger.make(({ message, cause }) => logs.push({ message, cause }))], {
+            mergeWithExisting: false,
+          }),
+        ),
+      );
+      expect(response).toEqual({
+        status: httpStatus,
+        body: httpStatus === 201 ? sdp : "fictional-private-response",
+      });
+      expect(requests).toBe(1);
+      expect(logs).toHaveLength(httpStatus === 201 ? 0 : 1);
+      if (httpStatus !== 201)
+        expect(logs[0]).toMatchObject({
+          message: [
+            "Live create failed",
+            {
+              failureStage: "create-http",
+              httpStatus,
+            },
+          ],
+        });
+      expect(JSON.stringify(logs)).not.toMatch(/fictional|Bearer|relay\.example|v=0/);
+    }),
+);
+
+it.live.each(["fetch", "node"] as const)(
+  "create distinguishes an actual %s response conversion from a transport failure",
+  (backend) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* Effect.acquireRelease(
+          Effect.promise(
+            () =>
+              new Promise<NodeHttp.Server>((resolve) => {
+                const server = NodeHttp.createServer((_request, response) => {
+                  response.writeHead(201, { "Content-Type": "application/sdp" });
+                  response.end(sdp);
+                });
+                server.listen(0, "127.0.0.1", () => resolve(server));
+              }),
+          ),
+          (server) =>
+            Effect.promise(
+              () =>
+                new Promise<void>((resolve) => {
+                  server.closeAllConnections();
+                  server.close(() => resolve());
+                }),
+            ),
+        );
+        const address = server.address();
+        if (!address || typeof address === "string") throw new Error("Expected loopback port");
+        const logs: unknown[] = [];
+        const response = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const network = yield* LiveNetwork;
+            const result = yield* network.create(
+              {
+                ...connection,
+                createUrl: `http://127.0.0.1:${address.port}/v1/live`,
+              },
+              "fictional-private-body",
+            );
+            return yield* result.body;
+          }),
+        ).pipe(
+          Effect.provide([
+            liveNetworkLayer.pipe(
+              Layer.provide(
+                backend === "fetch" ? FetchHttpClient.layer : NodeHttpClient.layerNodeHttp,
+              ),
+            ),
+            Logger.layer([Logger.make(({ message, cause }) => logs.push({ message, cause }))], {
+              mergeWithExisting: false,
+            }),
+          ]),
+          Effect.result,
+        );
+        if (backend === "fetch") {
+          expect(response).toMatchObject({ _tag: "Success", success: sdp });
+          expect(logs).toEqual([]);
+        } else {
+          expect(response._tag).toBe("Failure");
+          expect(logs).toHaveLength(1);
+          expect(logs[0]).toMatchObject({
+            message: [
+              "Live create failed",
+              {
+                failureStage: "create-response-conversion",
+                httpStatus: 201,
+              },
+            ],
+          });
+        }
+        expect(JSON.stringify(logs)).not.toMatch(/fictional|Bearer|127\.0\.0\.1|v=0/);
+      }),
+    ),
 );
