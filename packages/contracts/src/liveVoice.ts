@@ -52,8 +52,12 @@ export const LiveVoiceDraft = Schema.Struct({
   interactionMode: ProviderInteractionMode,
 });
 export type LiveVoiceDraft = typeof LiveVoiceDraft.Type;
+export const LiveVoiceResumeRunIds = Schema.Array(RunId).check(Schema.isMaxLength(32));
 export const LiveVoiceBinding = Schema.Union([
-  Schema.Struct({ threadId: ThreadId }),
+  Schema.Struct({
+    threadId: ThreadId,
+    resumeRunIds: Schema.optionalKey(LiveVoiceResumeRunIds),
+  }),
   Schema.Struct({ draft: LiveVoiceDraft }),
 ]);
 export type LiveVoiceBinding = typeof LiveVoiceBinding.Type;
@@ -86,6 +90,7 @@ export const LiveVoiceReason = Schema.Literals([
   "media-denied",
   "playback-blocked",
   "disconnected",
+  "recovery-limit",
 ]);
 export type LiveVoiceReason = typeof LiveVoiceReason.Type;
 export class LiveVoiceStartupError extends Schema.TaggedError<LiveVoiceStartupError>()(

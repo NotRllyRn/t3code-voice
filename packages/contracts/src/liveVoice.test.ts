@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 import {
+  LiveVoiceBinding,
   LIVE_VOICE_MAX_FRAME_BYTES,
   LIVE_VOICE_MAX_SDP_BYTES,
   decodeLiveVoiceClientEvent,
@@ -130,4 +131,20 @@ describe("Live control boundary", () => {
     });
     expect(() => decode({ ...legacy, transcriptFinality: "heard" })).toThrow();
   });
+});
+
+it("bounds reconnect hints and never accepts result content or draft hints", () => {
+  const decode = Schema.decodeUnknownSync(LiveVoiceBinding, { onExcessProperty: "error" });
+  expect(decode({ threadId: "same-thread", resumeRunIds: ["run"] })).toMatchObject({
+    resumeRunIds: ["run"],
+  });
+  expect(() =>
+    decode({
+      threadId: "same-thread",
+      resumeRunIds: Array.from({ length: 33 }, (_, i) => `run-${i}`),
+    }),
+  ).toThrow();
+  expect(() =>
+    decode({ threadId: "same-thread", resumeRunIds: ["run"], result: "forged" }),
+  ).toThrow();
 });

@@ -708,3 +708,23 @@ it("keeps Send, mic mute, original coding Stop; accessible refresh and playback 
   await userEvent.click(screen.getByRole("button", { name: "Stop live voice" }));
   expect(h.audio).toHaveBeenCalledTimes(1);
 });
+
+it("shows reconnecting without a final error and Stop cancels recovery", async () => {
+  using h = setup();
+  await using screen = await render(<VoiceComposer />);
+  await userEvent.click(screen.getByRole("button", { name: "Start live voice" }));
+  await vi.waitFor(() => expect(h.sockets).toHaveLength(1));
+  await act(() => h.sockets[0]!.dispatchEvent(new Event("close")));
+  await expect
+    .element(screen.getByRole("button", { name: "Reconnecting live voice (1/4)" }))
+    .toBeVisible();
+  await expect
+    .element(screen.getByRole("button", { name: "Live voice error" }))
+    .not.toBeInTheDocument();
+  await page.screenshot({
+    element: screen.container,
+    path: "../../../../.t3/t3voice-live-reconnecting.png",
+  });
+  await userEvent.click(screen.getByRole("button", { name: "Stop live voice" }));
+  await expect.element(screen.getByRole("button", { name: "Start live voice" })).toBeVisible();
+});

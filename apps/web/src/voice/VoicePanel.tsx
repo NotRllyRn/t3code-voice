@@ -272,17 +272,22 @@ export function ComposerLiveVoiceControls({ live }: { live: LiveVoice }) {
       <AudioLinesIcon aria-hidden="true" />,
       { disabled: !allowed, tooltip: unavailableReason },
     );
-  const waiting = voice.phase === "connecting" || voice.phase === "refresh_wait";
+  const waiting =
+    voice.phase === "connecting" ||
+    voice.phase === "refresh_wait" ||
+    voice.phase === "reconnecting";
   const microphoneLabel =
-    voice.phase === "connecting"
-      ? "Connecting live voice"
-      : voice.phase === "refresh_wait"
-        ? "Waiting for provider refresh"
-        : voice.phase === "stopping"
-          ? "Live microphone off"
-          : voice.muted
-            ? "Unmute live microphone"
-            : "Mute live microphone";
+    voice.phase === "reconnecting"
+      ? `Reconnecting live voice (${voice.recoveryAttempt}/4)`
+      : voice.phase === "connecting"
+        ? "Connecting live voice"
+        : voice.phase === "refresh_wait"
+          ? "Waiting for provider refresh"
+          : voice.phase === "stopping"
+            ? "Live microphone off"
+            : voice.muted
+              ? "Unmute live microphone"
+              : "Mute live microphone";
   const busyIcon = (
     <LoaderCircleIcon aria-hidden="true" className="animate-spin motion-reduce:animate-none" />
   );
@@ -334,13 +339,15 @@ export function ComposerLiveVoiceFeedback({ live }: { live: LiveVoice }) {
         {active
           ? voice.phase === "stopping"
             ? "Stopping voice. Microphone and playback are off."
-            : voice.phase === "refresh_wait"
-              ? "Waiting for the selected provider to refresh. You can stop voice at any time."
-              : voice.phase !== "connected"
-                ? "Connecting voice…"
-                : voice.muted
-                  ? "Mic muted"
-                  : "Listening"
+            : voice.phase === "reconnecting"
+              ? `Reconnecting voice, attempt ${voice.recoveryAttempt} of 4. Microphone is off; Stop is available.`
+              : voice.phase === "refresh_wait"
+                ? "Waiting for the selected provider to refresh. You can stop voice at any time."
+                : voice.phase !== "connected"
+                  ? "Connecting voice…"
+                  : voice.muted
+                    ? "Mic muted"
+                    : "Listening"
           : ""}
       </span>
       <span role="alert" className="sr-only">

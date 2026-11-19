@@ -278,7 +278,12 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
       ).pipe(
         Effect.tapError(() => diagnose("native-read", "unknown")),
         Effect.mapError(unavailable),
-        Effect.catch(() => Deferred.succeed(stop, undefined)),
+        Effect.catch(() =>
+          send({ type: "live.status", sessionId, phase: "error", reason: "disconnected" }).pipe(
+            Effect.ignore,
+            Effect.andThen(Deferred.succeed(stop, undefined)),
+          ),
+        ),
         Effect.forkScoped,
         Effect.provideService(Scope.Scope, resources),
       );

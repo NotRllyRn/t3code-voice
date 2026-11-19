@@ -1,3 +1,4 @@
+// @effect-diagnostics globalDate:off - Recovery deadlines use the same browser clock as lifecycle timers.
 // @effect-diagnostics globalTimers:off - The injected browser lifecycle is independent of an Effect runtime.
 import {
   decodeLiveVoiceClientEvent,
@@ -14,16 +15,27 @@ import {
   type LiveVoicePhase,
   type LiveVoiceReason,
   type LiveVoiceServerEvent,
-  type ThreadId,
+  ThreadId,
+  type RunId,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import type { VoiceSocket } from "./media.ts";
 import type { LiveMedia, LiveMediaFactory } from "./liveMedia.ts";
 
+const recoveryDelays = [2000, 5000, 10000, 20000] as const;
+const recoverable = new Set<LiveVoiceReason>([
+  "disconnected",
+  "timeout",
+  "temporarily-unavailable",
+  "rate-limited",
+  "refresh-pending",
+]);
+
 const isStartupError = Schema.is(LiveVoiceStartupError);
 
 export interface LiveVoiceState {
-  phase: LiveVoicePhase;
+  phase: LiveVoicePhase | "reconnecting";
+  recoveryAttempt?: number | undefined;
   muted: boolean;
   error: string;
   cleanupResult?: LiveVoiceCleanupResult | undefined;
@@ -60,6 +72,8 @@ const reasons: Record<LiveVoiceReason, string> = {
   "media-denied": "Microphone access failed. Check microphone permission and try again.",
   "playback-blocked": "Voice playback was blocked. Allow audio playback and start voice again.",
   disconnected: "Live voice disconnected. Start voice again.",
+  "recovery-limit":
+    "Voice recovery supports up to 32 pending tasks. Voice stopped; coding tasks continue in chat.",
 };
 
 interface Attempt {
@@ -98,6 +112,17 @@ export class LiveVoiceController {
   state: LiveVoiceState = { ...INITIAL_LIVE_VOICE_STATE };
   private session: Session | undefined;
   private disposed = false;
+  private wantedMuted = false;
+  private recoveryAttempt = 0;
+  private recoveryDeadline = 0;
+  private recoveryTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly pendingRuns = new Set<RunId>();
+  private cancelRecovery() {
+    clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = undefined;
+    this.recoveryAttempt = 0;
+    this.recoveryDeadline = 0;
+  }
   private readonly deps: LiveVoiceDependencies;
   private readonly publish: (state: LiveVoiceState) => void;
   constructor(deps: LiveVoiceDependencies, publish: (state: LiveVoiceState) => void) {
@@ -157,10 +182,35 @@ export class LiveVoiceController {
         /* A failed finalizer must not retain other resources. */
       }
     }
+    const reason = session.stopReason;
+    if (!this.disposed && reason && recoverable.has(reason)) {
+      if (!this.recoveryDeadline) this.recoveryDeadline = Date.now() + LIVE_VOICE_CONNECT_BUDGET_MS;
+      const delay = recoveryDelays[this.recoveryAttempt];
+      if (delay !== undefined && Date.now() + delay < this.recoveryDeadline) {
+        this.recoveryAttempt++;
+        this.update({
+          phase: "reconnecting",
+          error: "",
+          reason,
+          muted: this.wantedMuted,
+          recoveryAttempt: this.recoveryAttempt,
+          retryAt: Date.now() + delay,
+          deadlineAt: this.recoveryDeadline,
+          cleanupResult: result,
+        });
+        this.recoveryTimer = setTimeout(() => {
+          this.recoveryTimer = undefined;
+          void this.connect();
+        }, delay);
+        return;
+      }
+    }
     this.update({
       phase: session.stopReason ? "error" : "idle",
       error: session.stopReason
-        ? reasons[session.stopReason]
+        ? (this.recoveryAttempt >= recoveryDelays.length
+            ? "Live voice could not reconnect after 4 attempts. "
+            : "") + reasons[session.stopReason]
         : result === "acknowledged" || !session.hadCall
           ? ""
           : "Voice stopped. Remote cleanup was not acknowledged.",
@@ -185,8 +235,13 @@ export class LiveVoiceController {
     } catch {
       immediate = true;
     }
+    const recovering =
+      reason !== undefined &&
+      recoverable.has(reason) &&
+      this.recoveryAttempt < recoveryDelays.length;
     this.update({
-      phase: "stopping",
+      phase: recovering ? "reconnecting" : "stopping",
+      recoveryAttempt: recovering ? this.recoveryAttempt + 1 : undefined,
       muted: true,
       reason,
       retryAt: undefined,
@@ -210,6 +265,13 @@ export class LiveVoiceController {
     session.finalizers.push(() => clearTimeout(deadline));
   }
   async start() {
+    if (this.disposed || this.session || this.recoveryTimer !== undefined) return;
+    this.cancelRecovery();
+    this.pendingRuns.clear();
+    this.wantedMuted = false;
+    await this.connect();
+  }
+  private async connect() {
     if (this.disposed || this.session) return;
     const session: Session = {
       abort: new AbortController(),
@@ -220,16 +282,35 @@ export class LiveVoiceController {
       hadCall: false,
     };
     this.session = session;
-    this.state = { ...INITIAL_LIVE_VOICE_STATE, phase: "connecting" };
+    this.state = {
+      ...INITIAL_LIVE_VOICE_STATE,
+      threadId: this.state.threadId,
+      muted: this.wantedMuted,
+      phase: this.recoveryAttempt ? "reconnecting" : "connecting",
+      recoveryAttempt: this.recoveryAttempt,
+    };
     this.update({});
-    const deadline = setTimeout(() => {
-      if (this.alive(session) && !session.attempt?.active) this.end("timeout");
-    }, LIVE_VOICE_CONNECT_BUDGET_MS);
+    const deadline = setTimeout(
+      () => {
+        if (this.alive(session) && !session.attempt?.active) this.end("timeout");
+      },
+      this.recoveryDeadline
+        ? Math.max(1, this.recoveryDeadline - Date.now())
+        : LIVE_VOICE_CONNECT_BUDGET_MS,
+    );
     session.finalizers.push(() => clearTimeout(deadline));
     try {
-      const url = await this.deps.url(session.abort.signal);
+      const url = new URL(await this.deps.url(session.abort.signal));
       if (!this.alive(session)) return;
-      const socket = this.deps.socket(url);
+      const boundThread = this.state.threadId ?? url.searchParams.get("threadId");
+      if (boundThread) this.update({ threadId: ThreadId.make(boundThread) });
+      if (this.state.threadId) {
+        url.searchParams.delete("draft");
+        url.searchParams.set("threadId", this.state.threadId);
+        if (this.pendingRuns.size)
+          url.searchParams.set("resumeRunIds", JSON.stringify([...this.pendingRuns]));
+      }
+      const socket = this.deps.socket(url.toString());
       session.socket = socket;
       const message = ({ data }: { data: unknown }) => {
         if (!this.current(session)) return;
@@ -278,6 +359,7 @@ export class LiveVoiceController {
       }
     }
     if (event.type === "live.cleanup") {
+      if (!session.stopping) session.stopReason = "disconnected";
       this.finish(session, event.result);
       this.deps.event?.(event);
       return;
@@ -322,7 +404,7 @@ export class LiveVoiceController {
         }
         if (event.phase === "connecting") {
           this.update({
-            phase: "connecting",
+            phase: this.recoveryAttempt ? "reconnecting" : "connecting",
             reason: event.reason,
             retryAt: undefined,
             deadlineAt: event.deadlineAt,
@@ -365,7 +447,15 @@ export class LiveVoiceController {
         this.update({ threadId: event.threadId });
         break;
       case "live.caption":
+        break;
       case "live.agent":
+        if (event.runId) {
+          if (event.status === "completed" || event.status === "failed")
+            this.pendingRuns.delete(event.runId);
+          else if (this.pendingRuns.has(event.runId) || this.pendingRuns.size < 32)
+            this.pendingRuns.add(event.runId);
+          else this.end("recovery-limit");
+        }
         break;
     }
     this.deps.event?.(event);
@@ -442,7 +532,14 @@ export class LiveVoiceController {
       if (this.alive(session, attempt) && session.connected) {
         attempt.active = true;
         attempt.media.microphone(!this.state.muted);
-        this.update({ phase: "connected", reason: undefined, retryAt: undefined });
+        this.cancelRecovery();
+        this.update({
+          phase: "connected",
+          reason: undefined,
+          retryAt: undefined,
+          recoveryAttempt: undefined,
+          deadlineAt: undefined,
+        });
       }
     } catch {
       if (this.alive(session, attempt)) this.end("playback-blocked");
@@ -451,7 +548,8 @@ export class LiveVoiceController {
   mute() {
     const session = this.session;
     if (!session || session.stopping) return;
-    const muted = !this.state.muted;
+    const muted = !this.wantedMuted;
+    this.wantedMuted = muted;
     this.update({ muted });
     session.attempt?.media?.microphone(
       this.state.phase === "connected" && session.attempt.ready && session.attempt.active && !muted,
@@ -464,10 +562,17 @@ export class LiveVoiceController {
     }
   }
   stop() {
-    this.end();
+    this.cancelRecovery();
+    this.pendingRuns.clear();
+    if (this.session?.stopping) {
+      this.session.stopReason = undefined;
+      this.update({ phase: "stopping", recoveryAttempt: undefined });
+    }
+    if (this.session) this.end();
+    else this.update({ ...INITIAL_LIVE_VOICE_STATE });
   }
   dispose() {
     this.disposed = true;
-    this.end();
+    this.stop();
   }
 }

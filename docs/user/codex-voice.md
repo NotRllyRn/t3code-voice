@@ -58,6 +58,19 @@ human transcript; later replies wait for the next eligible turn. They remain
 visible and are not inserted into an already-running turn. Earlier delivered
 voice context is not resent on each delegation.
 
+After a temporary disconnect, Voice tries up to four recoveries with 2, 5, 10,
+and 20 second cooldowns, within a three minute recovery budget. The composer
+shows reconnecting; mute stays muted. Stop or leaving the conversation cancels
+recovery. Rejected credentials, permission errors and unsupported connections
+stop immediately so you can correct the setting; waiting cannot repair them.
+
+Recovery keeps the same conversation and follows its pending tasks without
+rerunning them or approving anything. Results completed while disconnected can
+be sent for narration after recovery. Acknowledged result notifications are not
+repeated, but successful submission to voice is not proof that audio was heard.
+Recovery tracks up to 32 pending tasks; exceeding that limit stops voice with an
+error while coding tasks continue normally.
+
 Stop ends capture and playback immediately. It may retain the silent media peer
 while the server finishes an in-flight create and hangs up its returned call ID.
 Normal cleanup has a 12-second client bound; a pending create adds up to 30 seconds.

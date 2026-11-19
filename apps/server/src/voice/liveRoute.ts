@@ -5,6 +5,7 @@ import {
   LIVE_VOICE_PROTOCOL,
   LIVE_VOICE_REQUESTED_MODEL,
   LiveVoiceBinding,
+  LiveVoiceResumeRunIds,
   type LiveVoiceReason,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -27,6 +28,7 @@ import { VoiceOwners } from "./owner.ts";
 import { runLiveSession } from "./liveSession.ts";
 import { liveNetworkLayer } from "./liveTransport.ts";
 
+const decodeResume = Schema.decodeUnknownEffect(Schema.fromJsonString(LiveVoiceResumeRunIds));
 const decodeBinding = Schema.decodeUnknownEffect(Schema.fromJsonString(LiveVoiceBinding), {
   onExcessProperty: "error",
 });
@@ -79,11 +81,22 @@ export const liveVoiceRouteLayer = Layer.unwrap(
         const query = new URL(request.url, "http://localhost").searchParams;
         if (
           query.getAll("threadId").length + query.getAll("draft").length !== 1 ||
-          [...query.keys()].some((key) => !["threadId", "draft", "wsTicket"].includes(key))
+          query.getAll("resumeRunIds").length > 1 ||
+          (query.has("resumeRunIds") &&
+            (!query.has("threadId") ||
+              new TextEncoder().encode(query.get("resumeRunIds") ?? "").byteLength > 8192)) ||
+          [...query.keys()].some(
+            (key) => !["threadId", "draft", "wsTicket", "resumeRunIds"].includes(key),
+          )
         )
           return HttpServerResponse.empty({ status: 400 });
+        const resume = yield* decodeResume(query.get("resumeRunIds") ?? "[]").pipe(Effect.result);
+        if (resume._tag === "Failure") return HttpServerResponse.empty({ status: 400 });
         const rawBinding = query.has("threadId")
-          ? encodeSelection({ threadId: query.get("threadId") })
+          ? encodeSelection({
+              threadId: query.get("threadId"),
+              ...(query.has("resumeRunIds") ? { resumeRunIds: resume.success } : {}),
+            })
           : `{"draft":${query.get("draft")}}`;
         const decoded = yield* decodeBinding(rawBinding).pipe(Effect.result);
         if (decoded._tag === "Failure") return HttpServerResponse.empty({ status: 400 });
@@ -92,6 +105,19 @@ export const liveVoiceRouteLayer = Layer.unwrap(
         const thread = threadId ? yield* threads.getThreadShell(threadId) : undefined;
         if (threadId && (!thread || thread.archivedAt || thread.deletedAt))
           return yield* startupFailure(request, "connection-changed");
+        if ("threadId" in binding && binding.resumeRunIds?.length) {
+          const requested = new Set(binding.resumeRunIds);
+          const records = yield* threads.getThreadRecords(binding.threadId, ["runs"], {
+            runIds: [...requested],
+          });
+          if (
+            [...requested].some(
+              (id) =>
+                !records.runs.some((run) => run.id === id && run.threadId === binding.threadId),
+            )
+          )
+            return HttpServerResponse.empty({ status: 400 });
+        }
         const selection =
           thread?.modelSelection ?? ("draft" in binding ? binding.draft.modelSelection : undefined);
         if (!selection) return yield* startupFailure(request, "connection-changed");
@@ -99,7 +125,7 @@ export const liveVoiceRouteLayer = Layer.unwrap(
         if (!provider?.enabled || provider.driverKind !== "codex" || !provider.liveConnection)
           return yield* startupFailure(request, "unsupported-provider");
         if (active.has(session.sessionId))
-          return yield* startupFailure(request, "connection-changed");
+          return yield* startupFailure(request, "temporarily-unavailable");
         const resolved = yield* provider.liveConnection.resolveLiveConnection().pipe(Effect.result);
         if (resolved._tag === "Failure")
           return yield* startupFailure(request, resolved.failure.reason);

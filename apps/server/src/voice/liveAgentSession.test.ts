@@ -1830,3 +1830,72 @@ it.effect.each([1, 4])("result snapshots stay constant per poll with %s tracked 
     }),
   ).pipe(Effect.provide(services)),
 );
+
+it.effect(
+  "resumes a result completed during outage once, without executing or approving work",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { run, attempt, providerTurn, typedFinal, finalMessage } =
+          decodeCapturedResult(resultCapture);
+        const threadId = run.threadId;
+        yield* VoiceFixture.create(threadId);
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const base = {
+          id: EventId.make("outage-result"),
+          threadId,
+          occurredAt: finalMessage.updatedAt,
+        };
+        yield* store.apply({ ...base, type: "run.updated", payload: run });
+        yield* store.apply({ ...base, type: "run-attempt.updated", payload: attempt });
+        yield* store.apply({ ...base, type: "provider-turn.updated", payload: providerTurn });
+        yield* store.apply({ ...base, type: "message.updated", payload: finalMessage });
+        yield* store.apply({ ...base, type: "turn-item.updated", payload: typedFinal });
+        const appends: NativeLiveAppend[] = [];
+        const delivered: LiveVoiceServerEvent[] = [];
+        const make = (resumeRunIds: RunId[]) =>
+          makeLiveAgentSession({
+            binding: { threadId, resumeRunIds },
+            sessionId: "outage",
+            onBound: () => {},
+            send: (event) =>
+              Effect.sync(() => {
+                delivered.push(event);
+              }),
+            append: (event) =>
+              Effect.sync(() => {
+                appends.push(event);
+              }),
+          });
+        const resumed = yield* make([run.id]);
+        yield* resumed.seed;
+        yield* resumed.poll;
+        yield* resumed.poll;
+        expect(appends.filter((event) => event.text.includes("actualAgentResult"))).toHaveLength(1);
+        expect(
+          delivered.filter((event) => event.type === "live.agent" && event.status === "completed"),
+        ).toHaveLength(1);
+        const next = yield* make([]);
+        yield* next.seed;
+        yield* next.poll;
+        expect(appends.filter((event) => event.text.includes("actualAgentResult"))).toHaveLength(1);
+        const records = yield* threads.getThreadRecords(threadId, ["runs", "runtimeRequests"]);
+        expect(records.runs).toHaveLength(1);
+        expect(records.runtimeRequests).toHaveLength(0);
+        const foreignThread = ThreadId.make("foreign-thread");
+        const foreignRun = RunId.make("foreign-run");
+        yield* VoiceFixture.create(foreignThread);
+        yield* store.apply({
+          ...base,
+          threadId: foreignThread,
+          type: "run.updated",
+          payload: { ...run, id: foreignRun, threadId: foreignThread },
+        });
+        const invalid = yield* make([foreignRun]);
+        const rejected = yield* invalid.seed.pipe(Effect.result);
+        expect(rejected._tag).toBe("Failure");
+        expect(appends.filter((event) => event.text.includes("actualAgentResult"))).toHaveLength(1);
+      }),
+    ).pipe(Effect.provide(services)),
+);

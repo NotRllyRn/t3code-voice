@@ -288,6 +288,14 @@ it.effect.each(["peer-close", "error", "approval-pending"] as const)(
       yield* Fiber.join(fiber);
       expect(hangups).toBe(1);
       expect(up.closed()).toBe(true);
+      if (mode === "peer-close") {
+        expect(JSON.parse(yield* Queue.take(down.output))).toMatchObject({
+          type: "live.status",
+          phase: "error",
+          reason: "disconnected",
+        });
+        expect(JSON.parse(yield* Queue.take(down.output))).toMatchObject({ type: "live.cleanup" });
+      }
       expect(logs).toEqual([
         [
           "Live session ended",

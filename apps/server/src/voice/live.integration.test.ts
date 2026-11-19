@@ -20,6 +20,7 @@ import {
   ThreadId,
   type LiveVoiceServerEvent,
 } from "@t3tools/contracts";
+import { LiveConnectionError } from "@t3tools/provider-core/server/liveConnection";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Context from "effect/Context";
@@ -406,6 +407,32 @@ const setup = Effect.fn("LiveIntegration.setup")(function* (
   );
   return {
     controller,
+    probe: (query: string) =>
+      Effect.tryPromise({
+        try: () =>
+          new Promise<{ status?: number | undefined; reason?: string | undefined }>(
+            (resolve, reject) => {
+              const probe = new NodeWS.WebSocket(`${origin}${LIVE_VOICE_PATH}?${query}`, {
+                headers: { Authorization: `Bearer ${session.token}` },
+              });
+              probe.on("error", () => {
+                reject(new LiveConnectionError({ reason: "temporarily-unavailable" }));
+                probe.terminate();
+              });
+              probe.once("unexpected-response", (_request, response) => {
+                response.resume();
+                resolve({ status: response.statusCode });
+                probe.terminate();
+              });
+              probe.once("message", (data) => {
+                const event = JSON.parse(data.toString());
+                resolve({ reason: event.reason });
+                probe.close();
+              });
+            },
+          ),
+        catch: () => new LiveConnectionError({ reason: "temporarily-unavailable" }),
+      }),
     revoke: Context.get(services, SessionStore.SessionStore).revoke(session.sessionId),
     disable: Effect.sync(() => {
       providerEnabled = false;
@@ -1034,4 +1061,60 @@ it.effect("assistant feedback alone cannot re-authorize a terminal delegation un
       expect((yield* threads.getThreadRecords(id, ["runs"])).runs).toHaveLength(2);
     }),
   ).pipe(Effect.provide(agentServices)),
+);
+
+it.effect(
+  "route rejects foreign and oversized resume hints before allocation; active cleanup is retryable",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const f = yield* setup("cleanup");
+        const otherThread = ThreadId.make("thread:other-resume");
+        yield* f.orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("create:other-resume"),
+          threadId: otherThread,
+          projectId: VoiceFixture.projectId,
+          title: "Other fixture",
+          modelSelection: { instanceId, model: "gpt-5" },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const receipt = yield* f.management.sendToThread({
+          projectId: VoiceFixture.projectId,
+          threadId,
+          commandId: CommandId.make("resume-fixture-run"),
+          messageId: MessageId.make("resume-fixture-message"),
+          text: "Do not change files.",
+          attachments: [],
+          mode: "queue",
+          createdBy: "user",
+          creationSource: "web",
+        });
+        expect(
+          yield* f.probe(
+            `threadId=${encodeURIComponent(otherThread)}&resumeRunIds=${encodeURIComponent(JSON.stringify([receipt.run.id]))}`,
+          ),
+        ).toEqual({ status: 400 });
+        expect(
+          yield* f.probe(
+            `threadId=${encodeURIComponent(threadId)}&resumeRunIds=${encodeURIComponent(JSON.stringify(Array.from({ length: 33 }, () => receipt.run.id)))}`,
+          ),
+        ).toEqual({ status: 400 });
+        expect(f.allocationCount()).toBe(0);
+        yield* Effect.promise(() => f.controller.start());
+        yield* take(
+          f.browserEvents,
+          (event) => event.type === "live.status" && event.phase === "connecting",
+        );
+        expect(yield* f.probe(`threadId=${encodeURIComponent(threadId)}`)).toEqual({
+          reason: "temporarily-unavailable",
+        });
+        f.controller.stop();
+      }),
+    ),
 );

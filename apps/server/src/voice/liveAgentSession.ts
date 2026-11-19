@@ -216,18 +216,27 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
     if (seeded) return;
     seeded = true;
     if (!threadId) return;
-    const history = yield* readLiveHistory(threadId);
+    yield* input.validateOwner ?? Effect.void;
     const all = yield* threads.getThreadRecords(threadId, ["runs"]);
+    const resume = new Set("threadId" in input.binding ? (input.binding.resumeRunIds ?? []) : []);
+    if (
+      resume.size > 32 ||
+      [...resume].some((id) => !all.runs.some((run) => run.id === id && run.threadId === threadId))
+    )
+      return yield* fail();
+    const history = yield* readLiveHistory(threadId);
     observedOrdinal = Math.max(0, ...all.runs.map((run) => run.ordinal));
-    const outstanding = all.runs.filter((run) => !terminal.has(run.status));
+    const outstanding = all.runs.filter((run) => !terminal.has(run.status) || resume.has(run.id));
     if (outstanding.length > MAX_TRACKED_RUNS) return yield* fail();
-    for (const run of outstanding)
+    for (const run of outstanding) {
+      yield* input.send({ type: "live.agent", status: "started", runId: run.id });
       feedback.set(run.id, {
         runId: run.id,
         status: run.status,
         progress: 0,
         seen: new Set(),
       });
+    }
     yield* append(undefined, "quiet", {
       source: "T3_bound_history",
       threadId,
@@ -626,11 +635,6 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
           .map((message) => message.text)
           .join("\n")
           .trim();
-        yield* input.send({
-          type: "live.agent",
-          status: run.status === "completed" ? "completed" : "failed",
-          runId: run.id,
-        });
         yield* append(
           current.delegationId,
           "speakable",
@@ -651,6 +655,11 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
             scope: "This result does not prove any other work has finished.",
           },
         );
+        yield* input.send({
+          type: "live.agent",
+          status: run.status === "completed" ? "completed" : "failed",
+          runId: run.id,
+        });
         feedback.delete(run.id);
         progressSourceAt = Math.max(progressSourceAt, yield* Clock.currentTimeMillis);
         narrationGeneration++;

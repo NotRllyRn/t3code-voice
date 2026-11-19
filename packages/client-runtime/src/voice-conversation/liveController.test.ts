@@ -36,7 +36,8 @@ class Socket extends EventTarget {
   }
 }
 function harness(acquire?: (media: LiveMedia, options: LiveMediaOptions) => Promise<LiveMedia>) {
-  const socket = new Socket();
+  let socket = new Socket();
+  const urls: string[] = [];
   const attempts: Array<{
     media: LiveMedia;
     options: LiveMediaOptions;
@@ -74,7 +75,11 @@ function harness(acquire?: (media: LiveMedia, options: LiveMediaOptions) => Prom
   const publish = vi.fn();
   const controller = new LiveVoiceController(
     {
-      socket: () => socket as unknown as VoiceSocket,
+      socket: (url) => {
+        urls.push(url);
+        if (socket.readyState === 3) socket = new Socket();
+        return socket as unknown as VoiceSocket;
+      },
       url: async () => "wss://t3.example/api/voice/live?wsTicket=fictional",
       media: mediaFactory,
       event,
@@ -84,7 +89,10 @@ function harness(acquire?: (media: LiveMedia, options: LiveMediaOptions) => Prom
   return {
     publish,
     controller,
-    socket,
+    get socket() {
+      return socket;
+    },
+    urls,
     attempts,
     mediaFactory,
     event,
@@ -401,6 +409,8 @@ test("server connected status cannot bypass the total startup deadline while pla
     expect(h.attempts[0]!.media.stopAudio).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(LIVE_VOICE_STOP_TIMEOUT_MS);
     expect(h.attempts[0]!.media.dispose).toHaveBeenCalledTimes(1);
+    expect(h.controller.state.phase).toBe("reconnecting");
+    h.controller.stop();
     expect(vi.getTimerCount()).toBe(0);
   } finally {
     vi.useRealTimers();
@@ -444,6 +454,8 @@ test("Stop cancels refresh immediately and the absolute startup budget bounds a 
     await silent.controller.start();
     await vi.advanceTimersByTimeAsync(LIVE_VOICE_CONNECT_BUDGET_MS);
     expect(silent.controller.state.reason).toBe("timeout");
+    expect(silent.controller.state.phase).toBe("reconnecting");
+    silent.controller.stop();
     expect(vi.getTimerCount()).toBe(0);
   } finally {
     vi.useRealTimers();
@@ -553,7 +565,7 @@ test("Stop during create retains the peer past 12s, rejects Start, and bounds mi
   }
 });
 
-test.each(["forbidden", "environment-auth-required", "temporarily-unavailable"] as const)(
+test.each(["forbidden", "environment-auth-required", "auth-required"] as const)(
   "safe %s startup failures do not acquire media or retry",
   async (reason) => {
     const media = vi.fn();
@@ -572,3 +584,128 @@ test.each(["forbidden", "environment-auth-required", "temporarily-unavailable"] 
     controller.dispose();
   },
 );
+
+test("reconnects four times with cooldown then stops; Stop cancels cooldown", async () => {
+  vi.useFakeTimers();
+  const sockets: Socket[] = [];
+  const controller = new LiveVoiceController(
+    {
+      url: async () => "wss://t3.example/live",
+      socket: () => {
+        const socket = new Socket();
+        sockets.push(socket);
+        return socket as unknown as VoiceSocket;
+      },
+      media: async () => {
+        throw Error("unused");
+      },
+    },
+    () => {},
+  );
+  try {
+    await controller.start();
+    for (const delay of [2000, 5000, 10000, 20000]) {
+      const count = sockets.length;
+      sockets.at(-1)!.close();
+      expect(controller.state.phase).toBe("reconnecting");
+      expect(controller.state.error).toBe("");
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(sockets).toHaveLength(count);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(sockets).toHaveLength(count + 1);
+    }
+    sockets.at(-1)!.close();
+    expect(controller.state.phase).toBe("error");
+    await controller.start();
+    sockets.at(-1)!.close();
+    controller.stop();
+    const count = sockets.length;
+    await vi.advanceTimersByTimeAsync(200000);
+    expect(sockets).toHaveLength(count);
+    expect(controller.state.phase).toBe("idle");
+  } finally {
+    controller.dispose();
+    vi.useRealTimers();
+  }
+});
+
+test("recovery preserves mute and pending run identity, drops acknowledged results and resets after success", async () => {
+  vi.useFakeTimers();
+  try {
+    using h = harness();
+    const connect = async () => {
+      h.authorize();
+      await vi.advanceTimersByTimeAsync(0);
+      h.answer();
+      h.attempts.at(-1)!.options.peer("connected");
+      h.connected();
+      await vi.advanceTimersByTimeAsync(0);
+    };
+    await h.controller.start();
+    await connect();
+    h.controller.mute();
+    h.socket.event({
+      type: "live.bound",
+      threadId: "same-thread" as import("@t3tools/contracts").ThreadId,
+    });
+    h.socket.event({
+      type: "live.agent",
+      status: "started",
+      runId: "same-run" as import("@t3tools/contracts").RunId,
+    });
+    const old = h.attempts[0]!;
+    h.socket.close();
+    expect(old.enabled).toBe(false);
+    expect(old.media.dispose).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2000);
+    const retryUrl = new URL(h.urls.at(-1)!);
+    expect(retryUrl.searchParams.get("threadId")).toBe("same-thread");
+    expect(JSON.parse(retryUrl.searchParams.get("resumeRunIds")!)).toEqual(["same-run"]);
+    await connect();
+    expect(h.controller.state.phase).toBe("connected");
+    expect(h.controller.state.muted).toBe(true);
+    expect(h.attempts[1]!.enabled).toBe(false);
+    expect(h.attempts[1]!.media.microphone).not.toHaveBeenCalledWith(true);
+    expect(h.socket.sent).toContainEqual({ type: "live.mute", muted: true });
+    h.socket.event({
+      type: "live.agent",
+      status: "completed",
+      runId: "same-run" as import("@t3tools/contracts").RunId,
+    });
+    h.socket.close();
+    expect(h.controller.state.recoveryAttempt).toBe(1);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(new URL(h.urls.at(-1)!).searchParams.has("resumeRunIds")).toBe(false);
+    h.controller.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("unexpected cleanup recovers; pending task overflow stops explicitly without replay", async () => {
+  vi.useFakeTimers();
+  try {
+    using h = harness();
+    await h.controller.start();
+    h.authorize();
+    await vi.advanceTimersByTimeAsync(0);
+    h.cleanup();
+    expect(h.controller.state.phase).toBe("reconnecting");
+    await vi.advanceTimersByTimeAsync(2000);
+    h.authorize();
+    await vi.advanceTimersByTimeAsync(0);
+    for (let i = 0; i < 33; i++)
+      h.socket.event({
+        type: "live.agent",
+        status: "started",
+        runId: `run-${i}` as import("@t3tools/contracts").RunId,
+      });
+    h.cleanup();
+    expect(h.controller.state.reason).toBe("recovery-limit");
+    expect(h.controller.state.error).toContain("32 pending tasks");
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    vi.useRealTimers();
+  }
+});
