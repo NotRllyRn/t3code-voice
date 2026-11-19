@@ -716,6 +716,12 @@ export const OrchestrationV2ThreadLaunchWorkspaceStrategy = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("existing_worktree"),
+    approvedBase: Schema.optional(
+      Schema.Struct({
+        branch: TrimmedNonEmptyString,
+        commit: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/)),
+      }),
+    ),
     cleanProviderConstraint: Schema.optional(ProviderCleanStartConstraint),
     worktreePath: TrimmedNonEmptyString,
     branch: Schema.optional(TrimmedNonEmptyString),
@@ -725,6 +731,12 @@ export const OrchestrationV2ThreadLaunchWorkspaceStrategy = Schema.Union([
     type: Schema.Literal("worktree"),
     cleanProviderConstraint: Schema.optional(ProviderCleanStartConstraint),
     baseRef: TrimmedNonEmptyString,
+    approvedBase: Schema.optional(
+      Schema.Struct({
+        branch: TrimmedNonEmptyString,
+        commit: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/)),
+      }),
+    ),
     branch: Schema.optional(TrimmedNonEmptyString),
     startFromOrigin: Schema.optional(Schema.Boolean),
     enforceNoSetupScripts: Schema.optional(Schema.Boolean),

@@ -3599,3 +3599,137 @@ it.effect("replays an accepted send after the project disables the instance", ()
     }
   }).pipe(Effect.provide(Layer.mergeAll(harness.layer, layerFiles)));
 });
+
+it.effect.each(["deleted", "moved", "missing-commit", "moved-after-checkout", "valid"] as const)(
+  "pins approved worktree preparation without fallback (%s)",
+  (state) =>
+    Effect.gen(function* () {
+      const commit = "a".repeat(40);
+      let checks = 0;
+      const harness = makeHarness({
+        hasCommit: ({ refName }) =>
+          Effect.succeed(state !== "missing-commit" && refName === commit),
+        git: {
+          resolveApprovedWorktreeBase: () =>
+            checks++ < (state === "moved-after-checkout" ? 2 : 1)
+              ? Effect.succeed(commit)
+              : state === "deleted"
+                ? Effect.fail(
+                    new GitCommandError({
+                      operation: "approved-base",
+                      command: "git",
+                      cwd: "/repo",
+                      detail: "Missing approved branch.",
+                    }),
+                  )
+                : Effect.succeed(
+                    state === "moved" || state === "moved-after-checkout" ? "b".repeat(40) : commit,
+                  ),
+          resolveWorktreeBaseRemote: () => Effect.die("Pinned launches must not resolve a remote"),
+          resolvePrimaryRemoteName: () => Effect.die("Pinned launches must not fall back"),
+        },
+      });
+      yield* Effect.gen(function* () {
+        const launches = yield* ThreadLaunch.ThreadLaunchService;
+        const launched = yield* launches.launch(
+          launchInput({
+            command: `approved:${state}`,
+            thread: `approved:${state}`,
+            message: "Update",
+            workspace: {
+              type: "worktree",
+              baseRef: commit,
+              branch: "update",
+              startFromOrigin: false,
+              approvedBase: { branch: "release/approved", commit },
+            },
+          }),
+        );
+        const projection = yield* preparationSettled(launched.threadId);
+        assert.equal(projection.runs[0]?.status, state === "valid" ? "starting" : "failed");
+        assert.equal(
+          harness.createWorktree.mock.calls.length,
+          state === "valid" || state === "moved-after-checkout" ? 1 : 0,
+        );
+        if (state === "valid") {
+          assert.equal(harness.createWorktree.mock.calls[0]?.[0].refName, commit);
+          assert.equal(harness.createWorktree.mock.calls[0]?.[0].baseRefName, "release/approved");
+        }
+      }).pipe(Effect.provide(harness.layer));
+    }),
+);
+
+it.effect.each(["deleted", "moved", "valid"] as const)(
+  "recovers approved worktree preparation with its persisted pin (%s)",
+  (state) =>
+    Effect.gen(function* () {
+      const commit = "a".repeat(40);
+      let checks = 0;
+      const harness = makeHarness({
+        hasCommit: ({ refName }) => Effect.succeed(refName === commit),
+        git: {
+          resolveApprovedWorktreeBase: () =>
+            checks++ === 0
+              ? Effect.succeed(commit)
+              : state === "deleted"
+                ? Effect.fail(
+                    new GitCommandError({
+                      operation: "approved-base",
+                      command: "git",
+                      cwd: "/repo",
+                      detail: "Missing approved branch.",
+                    }),
+                  )
+                : Effect.succeed(state === "moved" ? "b".repeat(40) : commit),
+          resolveWorktreeBaseRemote: () => Effect.die("Pinned recovery must not fetch"),
+          resolvePrimaryRemoteName: () => Effect.die("Pinned recovery must not fall back"),
+        },
+      });
+      yield* Effect.gen(function* () {
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const launches = yield* ThreadLaunch.ThreadLaunchService;
+        const input = launchInput({
+          command: `approved:recover:${state}`,
+          thread: `approved:recover:${state}`,
+          message: "Recover update",
+          workspace: {
+            type: "worktree",
+            baseRef: commit,
+            branch: "update",
+            startFromOrigin: false,
+            approvedBase: { branch: "release/approved", commit },
+          },
+        });
+        const { initialMessage, ...threadInput } = input;
+        yield* threads.dispatch({
+          ...threadInput,
+          type: "thread.create",
+          branch: "update",
+          worktreePath: "/repo-update",
+        });
+        yield* threads.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`${input.commandId}:initial-message`),
+          threadId: input.threadId,
+          messageId: initialMessage!.messageId,
+          text: initialMessage!.text,
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: "defer_start", workspaceStrategy: input.workspaceStrategy },
+          createdBy: input.createdBy,
+          creationSource: input.creationSource,
+        });
+        const seeded = yield* threads.getThreadProjection(input.threadId);
+        yield* launches.prepareRun({
+          commandId: CommandId.make(`${input.commandId}:prepare`),
+          threadId: input.threadId,
+          runId: seeded.runs[0]!.id,
+        });
+        const projection = yield* preparationSettled(input.threadId);
+        assert.equal(projection.runs[0]?.status, state === "valid" ? "starting" : "failed");
+        assert.deepEqual(projection.runs[0]?.workspacePreparation, input.workspaceStrategy);
+        assert.equal(harness.createWorktree.mock.calls.length, 0);
+        assert.equal(harness.runSetup.mock.calls.length, state === "valid" ? 1 : 0);
+      }).pipe(Effect.provide(harness.layer));
+    }),
+);

@@ -29,6 +29,7 @@ import {
   type Candidate,
   type GitHubApi,
 } from "../../../../scripts/lib/voice-upstream-poll.ts";
+import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as ServerConfig from "../config.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
@@ -42,6 +43,12 @@ export const VoiceWebhookBinding = Schema.Struct({
   enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   action: Schema.Literal("voice-upstream-release"),
   launchPolicy: Schema.Literal("configured-codex-v1"),
+  baseBranch: Schema.String.check(
+    Schema.isPattern(
+      /^(?![-/])(?!.*(?:\.\.|@\{|\/\/|[\\ ~^:?*[]))(?!.*(?:\.lock|[/.])$)[A-Za-z0-9][A-Za-z0-9._/-]*$/,
+    ),
+  ),
+  acceptedSource: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/)),
   taskId: ScheduledTaskId,
   generation: Schema.String.check(Schema.isPattern(/^[a-f0-9]{32}$/)),
   projectId: ProjectId,
@@ -130,6 +137,7 @@ export const layer = Layer.effect(
     const settingsService = yield* ServerSettings.ServerSettingsService;
     const instances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
     const launches = yield* ThreadLaunchService.ThreadLaunchService;
+    const git = yield* GitWorkflow.GitWorkflowService;
 
     const requireBinding = Effect.fn("VoiceWebhookAction.requireBinding")(function* (
       expected?: VoiceWebhookBinding,
@@ -140,6 +148,8 @@ export const layer = Layer.effect(
         (expected !== undefined &&
           (binding.action !== expected.action ||
             binding.launchPolicy !== expected.launchPolicy ||
+            binding.baseBranch !== expected.baseBranch ||
+            binding.acceptedSource !== expected.acceptedSource ||
             binding.taskId !== expected.taskId ||
             binding.generation !== expected.generation ||
             binding.projectId !== expected.projectId ||
@@ -229,12 +239,33 @@ export const layer = Layer.effect(
       const binding = yield* requireBinding(prepared.binding);
       yield* guard;
       const { project } = yield* preflight(binding);
+      const baseCommit = yield* git
+        .resolveApprovedWorktreeBase({
+          cwd: project.workspaceRoot,
+          branch: binding.baseBranch,
+          acceptedCommit: binding.acceptedSource,
+        })
+        .pipe(Effect.mapError(() => new VoiceWebhookActionError({ reason: "project" })));
+      const approvedBase = { branch: binding.baseBranch, commit: baseCommit };
+      const validateBase = launches
+        .checkWorktreeBase({
+          projectId: binding.projectId,
+          workspaceStrategy: {
+            type: "worktree",
+            baseRef: baseCommit,
+            startFromOrigin: false,
+            approvedBase,
+          },
+        })
+        .pipe(Effect.mapError(() => new VoiceWebhookActionError({ reason: "project" })));
+      yield* validateBase;
       const now = DateTime.toDateUtc(yield* DateTime.now);
       const context = yield* Effect.context<never>();
       const beforeClaim = Effect.gen(function* () {
         yield* requireBinding(binding);
         yield* guard;
         yield* preflight(binding);
+        yield* validateBase;
         return DateTime.toDateUtc(yield* DateTime.now);
       });
       const request = yield* Effect.tryPromise({
@@ -242,6 +273,7 @@ export const layer = Layer.effect(
           claimCandidate(prepared.candidate, {
             stateDir: binding.stateDir,
             authorizedProjectId: binding.projectId,
+            approvedBase,
             project: { id: project.id, scripts: project.scripts, autoPull: false },
             pin: {
               repository: FORK_RELEASE.upstream.repository,
@@ -262,6 +294,7 @@ export const layer = Layer.effect(
         try: () => parseCandidate(prepared.candidate, launchNow),
         catch: () => new VoiceWebhookActionError({ reason: "body" }),
       });
+      yield* validateBase;
       const launched = yield* launches
         .launch({
           commandId: CommandId.make(

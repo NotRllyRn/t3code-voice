@@ -384,6 +384,46 @@ const make = Effect.gen(function* () {
       ],
       { concurrency: "unbounded" },
     );
+    if (strategy.approvedBase !== undefined) {
+      const project = Option.getOrUndefined(projectOption);
+      if (
+        isScratch ||
+        project === undefined ||
+        strategy.startFromOrigin !== false ||
+        strategy.baseRef !== strategy.approvedBase.commit
+      )
+        return yield* new ThreadLaunchBaseRefError({
+          projectId: input.projectId,
+          projectTitle: project?.title ?? "",
+          workspaceRoot: project?.workspaceRoot ?? "",
+          baseRef: strategy.baseRef,
+        });
+      const resolved = yield* git
+        .resolveApprovedWorktreeBase({
+          cwd: project.workspaceRoot,
+          branch: strategy.approvedBase.branch,
+          acceptedCommit: strategy.approvedBase.commit,
+        })
+        .pipe(
+          Effect.mapError(
+            () =>
+              new ThreadLaunchBaseRefError({
+                projectId: project.id,
+                projectTitle: project.title,
+                workspaceRoot: project.workspaceRoot,
+                baseRef: strategy.baseRef,
+              }),
+          ),
+        );
+      if (resolved !== strategy.approvedBase.commit)
+        return yield* new ThreadLaunchBaseRefError({
+          projectId: project.id,
+          projectTitle: project.title,
+          workspaceRoot: project.workspaceRoot,
+          baseRef: strategy.baseRef,
+        });
+      return;
+    }
     // launch() turns a Scratch worktree request into a root launch.
     if (isScratch) return;
     if (Option.isSome(receipt) && receipt.value.status === "accepted") return;
@@ -630,6 +670,34 @@ const make = Effect.gen(function* () {
       } else {
         branch = yield* launchBranch(input.workspaceStrategy, project.workspaceRoot);
       }
+      if (
+        input.workspaceStrategy.type === "existing_worktree" &&
+        input.workspaceStrategy.approvedBase !== undefined
+      ) {
+        const pin = input.workspaceStrategy.approvedBase;
+        yield* checkWorktreeBase({
+          projectId: input.projectId,
+          workspaceStrategy: {
+            type: "worktree",
+            baseRef: pin.commit,
+            approvedBase: pin,
+            startFromOrigin: false,
+          },
+        }).pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)));
+        const current = yield* git
+          .resolveApprovedWorktreeBase({
+            cwd: input.workspaceStrategy.worktreePath,
+            branch: branch!,
+            acceptedCommit: pin.commit,
+          })
+          .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)));
+        if (current !== pin.commit)
+          return yield* mapError(
+            input,
+            "provision-worktree",
+            threadId,
+          )("Prepared worktree no longer matches the approved commit.");
+      }
       let worktreePath =
         input.workspaceStrategy.type === "existing_worktree"
           ? input.workspaceStrategy.worktreePath
@@ -646,9 +714,14 @@ const make = Effect.gen(function* () {
             })
             .pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
         }
+        if (input.workspaceStrategy.approvedBase !== undefined) {
+          yield* checkWorktreeBase(input).pipe(
+            Effect.mapError(mapError(input, "provision-worktree", threadId)),
+          );
+        }
         const requestedBaseRef = input.workspaceStrategy.baseRef;
         let startRef = requestedBaseRef;
-        let baseRefName = requestedBaseRef;
+        let baseRefName = input.workspaceStrategy.approvedBase?.branch ?? requestedBaseRef;
         const remote =
           input.workspaceStrategy.startFromOrigin === true
             ? yield* git
@@ -688,6 +761,13 @@ const make = Effect.gen(function* () {
               refName: startRef === "-" ? "@{-1}" : startRef,
             })
             .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId))));
+        if (!recordedBaseResolves && input.workspaceStrategy.approvedBase !== undefined) {
+          return yield* mapError(
+            input,
+            "provision-worktree",
+            threadId,
+          )("Approved base commit is unavailable.");
+        }
         if (!recordedBaseResolves) {
           const remoteName =
             remote?.remoteName ??
@@ -1020,6 +1100,21 @@ const make = Effect.gen(function* () {
       }
       // The agent must start on the branch name the thread will show.
       if (branchRename !== null) yield* Fiber.join(branchRename);
+      if (
+        input.workspaceStrategy.type !== "root" &&
+        input.workspaceStrategy.approvedBase !== undefined
+      ) {
+        const pin = input.workspaceStrategy.approvedBase;
+        yield* checkWorktreeBase({
+          projectId: input.projectId,
+          workspaceStrategy: {
+            type: "worktree",
+            baseRef: pin.commit,
+            approvedBase: pin,
+            startFromOrigin: false,
+          },
+        }).pipe(Effect.mapError(mapError(input, "release-run", threadId)));
+      }
       yield* setupTracker.markUncancellable(threadId);
       yield* setupTracker.stageStatus(threadId, "agent", "running");
       if (runId !== null) {
@@ -1208,6 +1303,7 @@ const make = Effect.gen(function* () {
       // durable preparation and retries use the thread's own Scratch folder.
       const normalizedStrategy: ThreadLaunchWorkspaceStrategy =
         request.workspaceStrategy.type === "worktree" &&
+        request.workspaceStrategy.approvedBase === undefined &&
         (yield* managedFolders.isScratchProject(request.projectId))
           ? {
               type: "root",
@@ -1632,6 +1728,27 @@ const make = Effect.gen(function* () {
     run: OrchestrationV2ThreadProjection["runs"][number],
     workspacePreparation: ThreadLaunchWorkspaceStrategy,
   ) {
+    if (
+      workspacePreparation.type === "worktree" &&
+      workspacePreparation.approvedBase !== undefined
+    ) {
+      yield* checkWorktreeBase({
+        projectId: thread.projectId,
+        workspaceStrategy: workspacePreparation,
+      }).pipe(
+        Effect.mapError(
+          mapError(
+            {
+              commandId: input.commandId,
+              projectId: thread.projectId,
+              workspaceStrategy: workspacePreparation,
+            },
+            "provision-worktree",
+            input.threadId,
+          ),
+        ),
+      );
+    }
     const { messages } = yield* threads.getThreadRecords(input.threadId, ["messages"], {
       messageIds: [run.userMessageId],
     });
@@ -1645,6 +1762,9 @@ const make = Effect.gen(function* () {
               type: "existing_worktree" as const,
               worktreePath: thread.worktreePath,
               branch: thread.branch,
+              ...(workspacePreparation.approvedBase === undefined
+                ? {}
+                : { approvedBase: workspacePreparation.approvedBase }),
               ...(workspacePreparation.enforceNoSetupScripts === true
                 ? { enforceNoSetupScripts: true }
                 : {}),

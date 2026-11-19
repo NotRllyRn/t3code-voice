@@ -174,7 +174,6 @@ test("resolves annotated tags, compares numeric stable versions, and omits untru
     schema: 1,
     upstream: "pingdotgg/t3code",
     fork: "NotRllyRn/t3code-voice",
-    base: "feature/codex-voice-stable",
     tag: "v0.1.10",
     sha: NEW,
     releaseId: 42,

@@ -14,6 +14,7 @@ import {
   type ManagedPolicyDocument,
   EnvironmentHttpApi,
   EnvironmentId,
+  GitCommandError,
   ProviderInstanceId,
   ProviderDriverKind,
   ScheduledTaskUpsertInput,
@@ -52,6 +53,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 import { renderWebhookPrompt } from "./webhookTemplate.ts";
+import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as VoiceWebhookAction from "./VoiceWebhookAction.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
@@ -272,6 +274,7 @@ const withService = <A, E>(
       readonly binding: Effect.Effect<VoiceWebhookAction.VoiceWebhookBinding | null>;
       readonly api: GitHubApi;
       readonly scratch?: boolean;
+      readonly baseUnavailable?: boolean;
     };
   } = {},
 ) =>
@@ -332,7 +335,21 @@ const withService = <A, E>(
                 options.workers!.set(name, work.pipe(Effect.provideContext(context), Effect.orDie));
               }),
           }),
+      Layer.mock(GitWorkflow.GitWorkflowService)({
+        resolveApprovedWorktreeBase: () =>
+          options.voice?.baseUnavailable
+            ? Effect.fail(
+                new GitCommandError({
+                  operation: "approved-worktree-base",
+                  command: "git",
+                  cwd: "/repo",
+                  detail: "Unapproved branch.",
+                }),
+              )
+            : Effect.succeed("c".repeat(40)),
+      }),
       Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+        checkWorktreeBase: () => Effect.void,
         launch: (input) =>
           Effect.suspend(() => {
             if (options.completedLaunches?.has(input.commandId))
@@ -442,7 +459,6 @@ const voiceCandidate = {
   schema: 1,
   upstream: "pingdotgg/t3code",
   fork: "NotRllyRn/t3code-voice",
-  base: "feature/codex-voice-stable",
   tag: "v99.0.0",
   sha: "b".repeat(40),
   releaseId: 42,
@@ -494,6 +510,7 @@ const withVoiceService = <A, E>(
   ) => Effect.Effect<A, E>,
   api: GitHubApi = voiceApi,
   scratch = false,
+  baseUnavailable = false,
 ) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -515,7 +532,7 @@ const withVoiceService = <A, E>(
               binding = value;
             },
           }),
-        { voice: { binding: Effect.sync(() => binding), api, scratch } },
+        { voice: { binding: Effect.sync(() => binding), api, scratch, baseUnavailable } },
       );
     }),
   );
@@ -558,6 +575,8 @@ const bindVoiceTask = (input: Parameters<Parameters<typeof withVoiceService>[0]>
       enabled: true,
       action: "voice-upstream-release",
       launchPolicy: "configured-codex-v1",
+      baseBranch: "release/approved",
+      acceptedSource: "a".repeat(40),
       taskId: current.id,
       generation: current.generation,
       projectId: current.projectId,
@@ -769,7 +788,8 @@ it.effect(
         });
         assert.deepEqual(launch.workspaceStrategy, {
           type: "worktree",
-          baseRef: "feature/codex-voice-stable",
+          baseRef: "c".repeat(40),
+          approvedBase: { branch: "release/approved", commit: "c".repeat(40) },
           branch: `auto/upstream-${voiceCandidate.tag}-${voiceCandidate.sha.slice(0, 12)}`,
           startFromOrigin: false,
         });
@@ -790,14 +810,14 @@ it.effect(
     ),
 );
 
-it.effect.each(["unset", "other-provider", "scratch"] as const)(
+it.effect.each(["unset", "other-provider", "scratch", "unapproved-base"] as const)(
   "refuses an unsafe automation target before claiming (%s)",
   (target) =>
     withVoiceService(
       (input) =>
         Effect.gen(function* () {
           const { task } = yield* bindVoiceTask(input);
-          if (target !== "scratch")
+          if (target !== "scratch" && target !== "unapproved-base")
             yield* input.voiceSettings!.updateSettings({
               defaultModelSelection:
                 target === "unset"
@@ -820,6 +840,7 @@ it.effect.each(["unset", "other-provider", "scratch"] as const)(
         }),
       voiceApi,
       target === "scratch",
+      target === "unapproved-base",
     ),
 );
 
@@ -872,6 +893,18 @@ it.effect("refuses wrong or disabled private bindings at ingress", () =>
   withVoiceService((input) =>
     Effect.gen(function* () {
       const { task, binding } = yield* bindVoiceTask(input);
+      for (const mutation of [
+        { baseBranch: "../bad" },
+        { baseBranch: "-bad" },
+        { acceptedSource: "main" },
+        { baseBranch: undefined },
+        { acceptedSource: undefined },
+      ]) {
+        assert.equal(
+          (yield* decodeVoiceBinding({ ...binding, ...mutation }).pipe(Effect.result))._tag,
+          "Failure",
+        );
+      }
       const { launchPolicy: _retiredPolicy, ...oldBinding } = binding;
       assert.equal((yield* decodeVoiceBinding(oldBinding).pipe(Effect.result))._tag, "Failure");
       for (const mutation of [
@@ -906,6 +939,8 @@ it.effect(
         "binding-project",
         "binding-manager",
         "binding-generation",
+        "binding-base",
+        "binding-source",
         "expired",
       ] as const) {
         const started = Promise.withResolvers<void>();
@@ -945,6 +980,10 @@ it.effect(
                 } as VoiceWebhookAction.VoiceWebhookBinding);
               if (mutation === "binding-generation")
                 input.bind({ ...binding, generation: "a".repeat(32) });
+              if (mutation === "binding-base")
+                input.bind({ ...binding, baseBranch: "release/other" });
+              if (mutation === "binding-source")
+                input.bind({ ...binding, acceptedSource: "b".repeat(40) });
               if (mutation === "expired") yield* TestClock.adjust("6 minutes");
               release.resolve();
               yield* Fiber.join(worker);

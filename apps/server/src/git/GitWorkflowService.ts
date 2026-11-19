@@ -38,6 +38,11 @@ export class GitWorkflowService extends Context.Service<
   GitWorkflowService,
   {
     readonly repositoryRoot: (cwd: string) => Effect.Effect<string | null, GitManagerServiceError>;
+    readonly resolveApprovedWorktreeBase: (input: {
+      readonly cwd: string;
+      readonly branch: string;
+      readonly acceptedCommit: string;
+    }) => Effect.Effect<string, GitCommandError>;
     readonly hasCommit: (input: {
       readonly cwd: string;
       readonly refName: string;
@@ -302,6 +307,42 @@ export const make = Effect.gen(function* () {
         ),
       );
     }),
+    resolveApprovedWorktreeBase: Effect.fn("GitWorkflowService.resolveApprovedWorktreeBase")(
+      function* (input) {
+        const refuse = () =>
+          new GitCommandError({
+            operation: "approved-worktree-base",
+            command: "git",
+            cwd: input.cwd,
+            detail: "Approved local branch or accepted-source ancestry is invalid.",
+          });
+        if (
+          !/^[a-f0-9]{40}$/.test(input.acceptedCommit) ||
+          !input.branch ||
+          input.branch.startsWith("-") ||
+          input.branch.startsWith("refs/")
+        )
+          return yield* refuse();
+        yield* ensureGitCommand("GitWorkflowService.resolveApprovedWorktreeBase", input.cwd);
+        yield* git.execute({
+          operation: "approved-worktree-base",
+          cwd: input.cwd,
+          args: ["check-ref-format", `refs/heads/${input.branch}`],
+        });
+        const { commitSha } = yield* git.resolveCommit({
+          cwd: input.cwd,
+          revision: `refs/heads/${input.branch}`,
+        });
+        const ancestor = yield* git.execute({
+          operation: "approved-worktree-base",
+          cwd: input.cwd,
+          args: ["merge-base", "--is-ancestor", input.acceptedCommit, commitSha],
+          allowNonZeroExit: true,
+        });
+        if (ancestor.exitCode !== 0) return yield* refuse();
+        return commitSha;
+      },
+    ),
     hasCommit: Effect.fn("GitWorkflowService.hasCommit")(function (input) {
       return ensureGitCommand("GitWorkflowService.hasCommit", input.cwd).pipe(
         Effect.andThen(

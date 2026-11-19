@@ -3,7 +3,6 @@ import * as NodeCrypto from "node:crypto";
 
 const UPSTREAM = "pingdotgg/t3code";
 const FORK = "NotRllyRn/t3code-voice";
-const BASE = "feature/codex-voice-stable";
 const API = `https://api.github.com/repos/${UPSTREAM}`;
 const SHA = /^[a-f0-9]{40}$/;
 const TAG = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -14,7 +13,6 @@ export type Candidate = {
   schema: 1;
   upstream: typeof UPSTREAM;
   fork: typeof FORK;
-  base: typeof BASE;
   tag: string;
   sha: string;
   releaseId: number;
@@ -166,7 +164,6 @@ export async function pollUpstream(
     schema: 1,
     upstream: UPSTREAM,
     fork: FORK,
-    base: BASE,
     tag,
     sha,
     releaseId: release.id as number,

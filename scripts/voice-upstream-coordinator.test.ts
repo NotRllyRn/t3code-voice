@@ -19,7 +19,6 @@ const candidate = {
   schema: 1,
   upstream: "pingdotgg/t3code",
   fork: "NotRllyRn/t3code-voice",
-  base: "feature/codex-voice-stable",
   tag: "v0.1.10",
   sha: NEW,
   releaseId: 42,
@@ -68,6 +67,7 @@ const opts = (dir: string) => ({
   now,
   project,
   authorizedProjectId: project.id,
+  approvedBase: { branch: "release/approved", commit: "c".repeat(40) },
 });
 
 test("strict candidate rejects extra fields, wrong IDs, future, expired, excessive lifetime and text", () => {
@@ -95,11 +95,25 @@ test("claims once before returning fixed worktree request; top-level thread reco
     NodeAssert.equal(request.projectId, project.id);
     NodeAssert.deepEqual(request.workspaceStrategy, {
       type: "worktree",
-      baseRef: "feature/codex-voice-stable",
+      baseRef: "c".repeat(40),
+      approvedBase: { branch: "release/approved", commit: "c".repeat(40) },
       branch: `auto/upstream-v0.1.10-${NEW.slice(0, 12)}`,
       startFromOrigin: false,
     });
     NodeAssert.ok(request.message.includes(NEW));
+    NodeAssert.match(
+      request.message,
+      /Inspect the final diff, PR title and body internally before publishing a reviewable PR against release\/approved/,
+    );
+    NodeAssert.match(request.message, /register its URL with link_pull_request/);
+    NodeAssert.match(
+      request.message,
+      /Never merge, release, publish packages, deploy, install, or change live services/,
+    );
+    NodeAssert.ok(!request.message.includes("feature/codex-voice-stable"));
+    NodeAssert.ok(
+      request.message.includes(`based on ${request.workspaceStrategy.approvedBase.branch}`),
+    );
     NodeAssert.ok(!request.message.includes("malicious release notes"));
     const statePath = NodePath.join(dir, "state.json");
     const state = JSON.parse(await NodeFSP.readFile(statePath, "utf8"));
