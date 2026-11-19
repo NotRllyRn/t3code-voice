@@ -2,7 +2,7 @@
 
 This fork uses `U-voice.R`: `U` is a pinned, stable upstream version and `R` is a positive Voice revision. For example, `0.1.9-voice.1` → `0.1.9-voice.2` → `0.1.10-voice.1`. The pin and channel policy live in [`forkIdentity.ts`](../../packages/shared/src/forkIdentity.ts). Voice versions are SemVer prereleases, not build metadata. The current experimental channel requires GitHub `prerelease: true`; changing that policy needs a reviewed consumer compatibility change. It does not mean upstream stable releases belong in a Voice feed.
 
-Only the exact installed `0.1.9-preview.20261116.1` preview is an allowed legacy current version. Desktop downloads are manual; the ARM64 DMG selector is not an Electron ZIP/feed updater. macOS ad-hoc signing is not Developer ID signing or notarization. iOS version/build can derive from `U`/`R`; unsigned IPA files need signing before installation. Personal Team builds stay private because their profiles contain identity/device details and expire.
+Only the exact installed `0.1.9-preview.20261116.1` preview is an allowed legacy current version. Desktop downloads are manual; the ARM64 DMG selector is not an Electron ZIP/feed updater. macOS ad-hoc signing is not Developer ID signing or notarization. This release targets macOS and its matching server/web client. Fork mobile/iOS work is deferred; upstream mobile source is retained.
 
 ## Build-only evidence, not publication
 

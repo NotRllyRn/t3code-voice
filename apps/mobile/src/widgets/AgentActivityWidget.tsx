@@ -94,12 +94,12 @@ export function AgentActivityWidget(
     ? (props.subtitle ?? "No active agents")
     : "Open T3 Code to load agent activity";
 
-  // Widget functions have no module scope. Keep this literal in sync with FORK_DESKTOP.scheme.
-  // All build variants accept the production fork scheme for taps from their own widgets.
+  // Widget taps open the containing app, and every build accepts the prod
+  // scheme as a link prefix, so dev and preview builds route this too.
   const linkRow = rows[0];
   const deepLink =
     linkRow && linkRow.deepLink.startsWith("/") && !linkRow.deepLink.startsWith("//")
-      ? `t3code-voice://${linkRow.deepLink.slice(1)}`
+      ? `t3code://${linkRow.deepLink.slice(1)}`
       : null;
 
   const background = accessory ? "clear" : isLightScheme ? "#ffffff" : "#1c1c1e";

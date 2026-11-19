@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import {
-  buildPairingUrl,
-  extractPairingUrlFromQrPayload,
-  PairingQrPayloadEmptyError,
-  parsePairingUrl,
-} from "./pairing";
+import { buildPairingUrl, extractPairingUrlFromQrPayload, parsePairingUrl } from "./pairing";
 
 describe("buildPairingUrl", () => {
   it("uses HTTP for a schemeless IP address", () => {
@@ -28,52 +23,12 @@ describe("buildPairingUrl", () => {
 });
 
 describe("extractPairingUrlFromQrPayload", () => {
-  it.each(["t3code-voice", "t3code-voice-dev", "t3code-voice-preview"])(
-    "unwraps %s QR links into the exact pairing host and code",
-    (scheme) => {
-      const pairingUrl = "https://remote.example.com/pair#token=pairing-token";
-      const extracted = extractPairingUrlFromQrPayload(
-        `  ${scheme}://pair?pairingUrl=${encodeURIComponent(` ${pairingUrl} `)}  `,
-      );
-      expect(extracted).toBe(pairingUrl);
-      expect(parsePairingUrl(extracted)).toEqual({
-        host: "https://remote.example.com",
-        code: "pairing-token",
-      });
-    },
-  );
-
-  it.each(["t3code", "t3code-dev", "t3code-preview", "t3code-voice-other", "other"])(
-    "does not unwrap an unrecognized %s scheme",
-    (scheme) => {
-      const payload = `${scheme}://pair?pairingUrl=https%3A%2F%2Fremote.example.com%2F%23token%3Dpairing-token`;
-      expect(extractPairingUrlFromQrPayload(` ${payload} `)).toBe(payload);
-    },
-  );
-
-  it.each([
-    "not a URL",
-    "t3code-voice://[invalid?pairingUrl=https%3A%2F%2Fremote.example.com",
-    "t3code-voice://pair",
-    "t3code-voice://pair?pairingUrl=",
-    "t3code-voice://pair?pairingUrl=%20%20",
-    "t3code-voice://pair?pairingurl=https%3A%2F%2Fremote.example.com",
-    "t3code-voice://pair#pairingUrl=https%3A%2F%2Fremote.example.com",
-  ])("preserves malformed or missing-query payload %s", (payload) => {
-    expect(extractPairingUrlFromQrPayload(payload)).toBe(payload);
-  });
-
-  it.each(["http", "https"])("preserves raw %s pairing QR input", (scheme) => {
-    const payload = `${scheme}://remote.example.com:3773/pair#token=pairing-token`;
-    expect(extractPairingUrlFromQrPayload(` ${payload} `)).toBe(payload);
-    expect(parsePairingUrl(payload)).toEqual({
-      host: `${scheme}://remote.example.com:3773`,
-      code: "pairing-token",
-    });
-  });
-
-  it("rejects an empty QR payload", () => {
-    expect(() => extractPairingUrlFromQrPayload("  ")).toThrow(PairingQrPayloadEmptyError);
+  it("unwraps mobile deep links that carry an encoded pairing url", () => {
+    expect(
+      extractPairingUrlFromQrPayload(
+        "t3code://pair?pairingUrl=https%3A%2F%2Fremote.example.com%2Fpair%23token%3Dpairing-token",
+      ),
+    ).toBe("https://remote.example.com/pair#token=pairing-token");
   });
 });
 

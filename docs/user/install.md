@@ -10,7 +10,8 @@ attached to a published release.
 
 - A matching Voice client and server. This fork requires orchestration protocol
   **3** and `voiceHistoryV1`; stock upstream desktop/web clients and the App Store
-  and Google Play apps cannot connect. Use a matching fork mobile build instead.
+  and Google Play apps cannot connect. This release supports macOS and the
+  web client with its matching server; mobile/iOS fork support is deferred.
 - Installed, authenticated providers on the machine running the server. A server
   bundle alone does not include provider CLIs or their credentials.
 - The native Linux x64 bundle embeds **Node 26.13.1** (ABI **147**); no separate
@@ -37,12 +38,11 @@ your Mac. Manual replacement may prompt again for microphone or Keychain access.
 
 ## Command line
 
-The audited native candidate is
-`t3-0.1.10-voice.1-linux-x64.tar.gz`: matching server and web client from
-`f1184f1c2e94cb21529d673751a4ce62ec6deaef`. It remains an unpublished
-test candidate, not an available release download or a universal install proof.
-Use it only when explicitly supplied for testing or attached to a published
-release. Docker coding support is **unverified/not turnkey** on the tested
+Earlier `f1184f1c2e` Linux and Mac candidates are superseded by the native-Live-only
+source cleanup. They remain historical test artifacts, not release candidates
+for this source. Fresh matching artifacts and acceptance checks are required
+before publication. The native Linux archive layout below remains applicable.
+Docker coding support is **unverified/not turnkey** on the tested
 sandbox boundary; do not bypass Codex's sandbox to make it work.
 
 1. Provision the pinned dependencies first, under a dedicated nonroot Linux
@@ -137,8 +137,9 @@ manual flow; the release instructions take precedence for this fork.
 
 ## Mobile app
 
-Use a matching Voice fork build, not the stock App Store or Google Play app.
-This does not promise mobile Live voice parity; see [voice limitations](./codex-voice.md).
+Mobile/iOS fork work is deferred. The repository retains upstream mobile code;
+this release does not ship a matching mobile client. Stock store apps are not
+compatible with the Voice server. See [voice limitations](./codex-voice.md).
 
 ## Providers
 

@@ -63,8 +63,6 @@ import {
 } from "../../state/use-remote-environment-registry";
 import { useKnownTerminalSessions } from "../../state/use-terminal-session";
 import { uuidv4 } from "../../lib/uuid";
-import { voiceOwner } from "../voice-conversation/voiceOwner";
-import { useQueueVoiceRequest } from "../voice-conversation/useQueueVoiceRequest";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -953,27 +951,6 @@ function ThreadRouteContent(
       serverOwned: false,
     };
   })();
-  const canonicalVoiceProvider = routeEnvironmentRuntime?.serverConfig?.providers.find(
-    (provider) => provider.instanceId === selectedThread?.modelSelection.instanceId,
-  );
-  const nativeVoiceOwner = voiceOwner({
-    thread: selectedThread,
-    effectiveModel: composer.modelSelection ?? selectedThread?.modelSelection ?? null,
-    driver: canonicalVoiceProvider?.driver,
-    providerEnabled: canonicalVoiceProvider?.enabled,
-    ready:
-      canOperateThread &&
-      routeConnectionState === "connected" &&
-      creationState === null &&
-      requests.activePendingApproval === null &&
-      requests.activePendingUserInput === null &&
-      composer.queuedRunEdit === null &&
-      selectedThreadDetail !== null &&
-      !composer.pendingHandoff &&
-      (!composer.runtimeMode || composer.runtimeMode === selectedThread?.runtimeMode) &&
-      (!composer.interactionMode || composer.interactionMode === selectedThread?.interactionMode),
-  });
-  const queueVoiceRequest = useQueueVoiceRequest(nativeVoiceOwner);
   // Queued creation displays its prompt before server creation; temporary not-found is expected.
   const contentPresentation =
     creationState !== null
@@ -1122,9 +1099,6 @@ function ThreadRouteContent(
           onStopThread={awaitingBootstrapTurn ? handleCancelWorktreeSetup : handleStopThread}
           onResumeQueue={composer.canResume ? handleResumeQueue : null}
           onSendMessage={composer.onSendMessage}
-          voice={
-            nativeVoiceOwner ? { owner: nativeVoiceOwner, onQueue: queueVoiceRequest } : undefined
-          }
           offersSideChat={composer.sideChatUnavailableReason === null}
           onReconnectEnvironment={handleReconnectEnvironment}
           canSwitchThreadProvider={composer.canSwitchThreadProvider}

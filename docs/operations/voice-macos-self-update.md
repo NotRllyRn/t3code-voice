@@ -1,8 +1,8 @@
 # Voice macOS self-update
 
-Opt-in support has passed earlier paired full-product update checks. The current
-`f1184f1c2e` package has passed signature checks, but has not repeated first-launch
-or update acceptance. Default/ad-hoc builds remain manual-only. No paid Apple account is required for persistent self-signed update identity, but this does **not** provide notarization or first-install Gatekeeper trust.
+Opt-in support has passed earlier paired full-product update checks. The earlier
+`f1184f1c2e` package passed signature checks but is superseded by the native-Live-only
+source cleanup. Fresh artifacts still require first-launch and update acceptance. Default/ad-hoc builds remain manual-only. No paid Apple account is required for persistent self-signed update identity, but this does **not** provide notarization or first-install Gatekeeper trust.
 
 ## Private publisher setup
 

@@ -13,9 +13,6 @@ import {
   EnvironmentId,
   ExecutionEnvironmentDescriptor,
   MessageId,
-  CLIENT_CAPABILITIES_HEADER,
-  CLIENT_CAPABILITIES_QUERY_PARAM,
-  VOICE_HISTORY_CAPABILITY,
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION,
   OrchestrationV2ShellSnapshot,
@@ -181,7 +178,6 @@ export const startEnvironment = Effect.fn("environment.start")(function* (input:
     HttpClient.mapRequest((request) =>
       request.pipe(
         HttpClientRequest.bearerToken(token),
-        HttpClientRequest.setHeader(CLIENT_CAPABILITIES_HEADER, VOICE_HISTORY_CAPABILITY),
         HttpClientRequest.setHeader(
           ORCHESTRATION_PROTOCOL_HEADER,
           String(ORCHESTRATION_PROTOCOL_VERSION),
@@ -226,7 +222,7 @@ export const startEnvironment = Effect.fn("environment.start")(function* (input:
     RpcClient.layerProtocolSocket().pipe(
       Layer.provide(
         Socket.layerWebSocket(
-          `${origin.replace(/^http/, "ws")}/ws?orchestrationProtocol=${ORCHESTRATION_PROTOCOL_VERSION}&${CLIENT_CAPABILITIES_QUERY_PARAM}=${VOICE_HISTORY_CAPABILITY}&wsTicket=${encodeURIComponent(ticket.ticket)}`,
+          `${origin.replace(/^http/, "ws")}/ws?orchestrationProtocol=${ORCHESTRATION_PROTOCOL_VERSION}&wsTicket=${encodeURIComponent(ticket.ticket)}`,
         ),
       ),
       Layer.provide(RpcSerialization.layerJson),

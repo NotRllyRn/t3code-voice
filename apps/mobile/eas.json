@@ -1,7 +1,7 @@
 {
   "cli": {
     "version": ">= 18.4.0",
-    "appVersionSource": "local",
+    "appVersionSource": "remote",
     "promptToConfigurePushNotifications": false
   },
   "build": {
@@ -11,6 +11,7 @@
         "APP_VARIANT": "development",
         "NODE_OPTIONS": "--max-old-space-size=4096"
       },
+      "channel": "development",
       "developmentClient": true,
       "distribution": "internal",
       "ios": {
@@ -30,6 +31,8 @@
         "APP_VARIANT": "preview",
         "NODE_OPTIONS": "--max-old-space-size=4096"
       },
+      "channel": "preview",
+      "environment": "preview",
       "distribution": "internal",
       "ios": {
         "image": "macos-tahoe-26.6-xcode-27.1"
@@ -42,6 +45,8 @@
         "MOBILE_VERSION_POLICY": "fingerprint",
         "NODE_OPTIONS": "--max-old-space-size=4096"
       },
+      "channel": "preview",
+      "environment": "preview",
       "developmentClient": true,
       "distribution": "internal",
       "android": {
@@ -49,6 +54,12 @@
       },
       "ios": {
         "image": "macos-tahoe-26.6-xcode-27.1"
+      }
+    },
+    "testflight": {
+      "extends": "production",
+      "env": {
+        "T3CODE_MOBILE_VERSION": "3.0.0"
       }
     },
     "production": {
@@ -59,11 +70,27 @@
         "SOURCEMAP_FILE": "/tmp/t3code-ios-main.jsbundle.map",
         "ORG_GRADLE_PROJECT_reactNativeArchitectures": "armeabi-v7a,arm64-v8a"
       },
+      "channel": "production",
+      "environment": "production",
+      "autoIncrement": true,
       "android": {
         "gradleCommand": ":app:bundleRelease -x lintVitalAnalyzeRelease -x lintVitalRelease"
       },
       "ios": {
         "image": "macos-tahoe-26.6-xcode-27.1"
+      }
+    }
+  },
+  "submit": {
+    "testflight": {
+      "extends": "production"
+    },
+    "production": {
+      "ios": {
+        "ascAppId": "6787819824"
+      },
+      "android": {
+        "track": "internal"
       }
     }
   }

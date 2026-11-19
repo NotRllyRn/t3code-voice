@@ -81,14 +81,15 @@ the configured fork update feed once published. See [Voice installation and upda
 Use matching Voice clients and servers: orchestration protocol **3** with
 `voiceHistoryV1` is required. Stock upstream desktop/web clients and App Store or
 Google Play mobile apps are incompatible; they cannot connect to this server.
-A matching fork mobile build is required, not an automatic store upgrade.
+No matching mobile client ships in this release; fork mobile/iOS work is deferred.
 
 The current migration head is **97**. Synthetic migration checks cover
 **67→97**, **81→97** and **88→97**; they do not prove arbitrary installed data
 or safe downgrades. Compare installed migration names and schema before upgrading.
 Back up fork data before changing builds, and do not open it with older upstream
-software. The matching private macOS artifact passed signature checks, but is self-signed
-and unnotarized: Gatekeeper rejection is expected. First install, microphone,
-playback and the complete live journey remain separate acceptance checks.
+software. Earlier private macOS artifacts passed signature checks, but are
+superseded by this source cleanup. They remain self-signed and unnotarized;
+Gatekeeper rejection is expected. Fresh matching artifacts, first install,
+microphone, playback and the complete live journey still need acceptance.
 
 Mobile browsers do not expose the Live control.

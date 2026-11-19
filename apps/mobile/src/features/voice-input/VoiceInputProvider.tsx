@@ -31,7 +31,6 @@ import {
   acquireAudioSession,
   activateAudioSession,
   releaseAudioSession,
-  prepareOwnedAudioSession,
 } from "../../lib/audioSession";
 
 // The native constructor expects platform-flattened options, as built by useAudioRecorder.
@@ -90,10 +89,6 @@ const voiceInputAtom = Atom.make((get) => {
     void session.controller.appMovedToBackground();
   });
   const recorder = createLazyVoiceRecorder({
-    prepareOwned: (prepare) => {
-      if (!audioToken) return Promise.reject(new Error("Recording audio owner expired"));
-      return prepareOwnedAudioSession(audioToken, prepare);
-    },
     getDestination: () => (registry.get(voiceRouteAtom) === null ? "local" : "environment"),
     create: (destination) =>
       destination === "local"
@@ -133,19 +128,18 @@ const voiceInputAtom = Atom.make((get) => {
     },
     requestPermission: permission.requestPermission,
     configureRecording: async () => {
-      const token = acquireAudioSession("recording", () => session.controller.cancel());
+      const token = acquireAudioSession("recording");
       audioToken = token;
       try {
-        if (!(await activateAudioSession(token))) throw new Error("Recording audio owner changed");
+        await activateAudioSession(token);
       } catch (error) {
         await releaseAudioSession(token).catch(() => {});
         throw error;
       }
     },
     releaseRecording: async () => {
-      const token = audioToken;
+      if (audioToken) await releaseAudioSession(audioToken);
       audioToken = null;
-      if (token) await releaseAudioSession(token);
     },
     deleteRecording: (uri) => new File(uri).delete(),
     sampleRecording: () => {
