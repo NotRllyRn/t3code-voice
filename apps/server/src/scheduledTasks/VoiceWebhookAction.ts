@@ -2,9 +2,9 @@ import {
   CommandId,
   ModelSelection,
   ProjectId,
-  ProviderInstanceId,
   ScheduledTaskId,
   ThreadId,
+  resolveProjectProviderInstanceEnabled,
   type ScheduledTask,
   type ScheduledTaskError,
 } from "@t3tools/contracts";
@@ -22,7 +22,7 @@ import * as Schema from "effect/Schema";
 import {
   claimCandidate,
   parseCandidate,
-  recordChildThread,
+  recordLaunchedThread,
 } from "../../../../scripts/voice-upstream-coordinator.ts";
 import {
   githubJson,
@@ -31,17 +31,17 @@ import {
 } from "../../../../scripts/lib/voice-upstream-poll.ts";
 import * as ServerConfig from "../config.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 
-const MODEL = "codex-broker/gpt-6.1-sol";
-const INSTANCE = ProviderInstanceId.make("voice-automation");
 const MAX_BODY_BYTES = 1024;
 
 export const VoiceWebhookBinding = Schema.Struct({
   enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   action: Schema.Literal("voice-upstream-release"),
+  launchPolicy: Schema.Literal("configured-codex-v1"),
   taskId: ScheduledTaskId,
   generation: Schema.String.check(Schema.isPattern(/^[a-f0-9]{32}$/)),
   projectId: ProjectId,
@@ -126,6 +126,7 @@ export const layer = Layer.effect(
     const readBinding = yield* VoiceWebhookBindingSource;
     const api = yield* VoiceGitHubApi;
     const projects = yield* ProjectService.ProjectService;
+    const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
     const settingsService = yield* ServerSettings.ServerSettingsService;
     const instances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
     const launches = yield* ThreadLaunchService.ThreadLaunchService;
@@ -138,6 +139,7 @@ export const layer = Layer.effect(
         !binding?.enabled ||
         (expected !== undefined &&
           (binding.action !== expected.action ||
+            binding.launchPolicy !== expected.launchPolicy ||
             binding.taskId !== expected.taskId ||
             binding.generation !== expected.generation ||
             binding.projectId !== expected.projectId ||
@@ -187,38 +189,11 @@ export const layer = Layer.effect(
       const settings = yield* settingsService.getSettings.pipe(
         Effect.mapError(() => new VoiceWebhookActionError({ reason: "provider" })),
       );
-      const entry = settings.providerInstances[INSTANCE];
-      const config = entry?.config as Record<string, unknown> | undefined;
-      const instance = yield* instances.getInstance(INSTANCE);
-      if (
-        entry?.driver !== "pi" ||
-        entry.enabled === false ||
-        config?.environmentMode !== "clean" ||
-        !instance?.enabled ||
-        instance.driverKind !== "pi"
-      )
-        return yield* new VoiceWebhookActionError({ reason: "provider" });
-      const snapshot = yield* instance.snapshot.getSnapshot;
-      const models = snapshot.models.filter((m) => m.slug === MODEL);
-      const model = models[0];
-      if (models.length !== 1 || !model)
-        return yield* new VoiceWebhookActionError({ reason: "provider" });
-      const descriptors = model.capabilities?.optionDescriptors;
-      const thinking = descriptors?.find((d) => d.id === "thinking");
-      if (
-        descriptors !== undefined &&
-        (thinking?.type !== "select" || !thinking.options.some((v) => v.id === "medium"))
-      )
-        return yield* new VoiceWebhookActionError({ reason: "provider" });
-      const modelSelection = yield* decodeModelSelection({
-        instanceId: INSTANCE,
-        model: MODEL,
-        ...(thinking === undefined ? {} : { options: [{ id: "thinking", value: "medium" }] }),
-      }).pipe(Effect.mapError(() => new VoiceWebhookActionError({ reason: "provider" })));
       const project = yield* projects
         .getById(binding.projectId)
         .pipe(Effect.mapError(() => new VoiceWebhookActionError({ reason: "project" })));
       if (
+        (yield* managedFolders.isScratchProject(binding.projectId)) ||
         Option.isNone(project) ||
         project.value.scripts.length !== 0 ||
         resolveProjectScripts(settings, project.value).length !== 0 ||
@@ -226,7 +201,26 @@ export const layer = Layer.effect(
         project.value.autoPull === true
       )
         return yield* new VoiceWebhookActionError({ reason: "project" });
-      return { project: project.value, modelSelection };
+      const defaults = resolveProjectSettings(settings, binding.projectId, project.value).settings;
+      const selection = defaults.defaultModelSelection;
+      if (
+        selection == null ||
+        !resolveProjectProviderInstanceEnabled(settings, binding.projectId, selection.instanceId)
+      )
+        return yield* new VoiceWebhookActionError({ reason: "provider" });
+      const entry = settings.providerInstances[selection.instanceId];
+      const instance = yield* instances.getInstance(selection.instanceId);
+      if (
+        entry?.driver !== "codex" ||
+        entry.enabled === false ||
+        !instance?.enabled ||
+        instance.driverKind !== "codex"
+      )
+        return yield* new VoiceWebhookActionError({ reason: "provider" });
+      const modelSelection = yield* decodeModelSelection(selection).pipe(
+        Effect.mapError(() => new VoiceWebhookActionError({ reason: "provider" })),
+      );
+      return { project: project.value, modelSelection, runtimeMode: defaults.defaultRuntimeMode };
     });
     const dispatch = Effect.fn("VoiceWebhookAction.dispatch")(function* (
       prepared: Prepared,
@@ -260,7 +254,7 @@ export const layer = Layer.effect(
           }),
         catch: () => new VoiceWebhookActionError({ reason: "claim" }),
       });
-      const { modelSelection } = yield* preflight(binding);
+      const { modelSelection, runtimeMode } = yield* preflight(binding);
       yield* requireBinding(binding);
       yield* guard;
       const launchNow = DateTime.toDateUtc(yield* DateTime.now);
@@ -277,10 +271,9 @@ export const layer = Layer.effect(
           title: request.title,
           workspaceStrategy: request.workspaceStrategy,
           modelSelection,
-          runtimeMode: "full-access",
+          runtimeMode,
           interactionMode: "default",
           enforceNoSetupScripts: true,
-          cleanProviderConstraint: { instanceId: INSTANCE, driver: "pi", environmentMode: "clean" },
           initialMessage: {
             text: request.message,
             attachments: [],
@@ -292,7 +285,7 @@ export const layer = Layer.effect(
         })
         .pipe(Effect.mapError(() => new VoiceWebhookActionError({ reason: "launch" })));
       yield* Effect.tryPromise({
-        try: () => recordChildThread(binding.stateDir, launched.threadId),
+        try: () => recordLaunchedThread(binding.stateDir, launched.threadId),
         catch: () => new VoiceWebhookActionError({ reason: "launch" }),
       });
     });

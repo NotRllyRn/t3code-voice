@@ -72,7 +72,7 @@ export function validatePin(value: unknown): AcceptedPin {
 
 export async function githubJson(path: string, fetcher: typeof fetch = fetch): Promise<unknown> {
   if (
-    !/^\/(?:releases\/latest|git\/ref\/tags\/v\d+\.\d+\.\d+|git\/tags\/[a-f0-9]{40}|compare\/[a-f0-9]{40}\.\.\.[a-f0-9]{40})$/.test(
+    !/^\/(?:releases\/latest|git\/ref\/heads\/main|git\/ref\/tags\/v\d+\.\d+\.\d+|git\/tags\/[a-f0-9]{40}|compare\/[a-f0-9]{40}\.\.\.[a-f0-9]{40})$/.test(
       path,
     )
   )
@@ -144,10 +144,20 @@ export async function pollUpstream(
   }
   if (target.type !== "commit") throw new Error("Tag does not resolve to a commit");
   const sha = commit(target.sha);
+  if (release.target_commitish !== "main" && release.target_commitish !== sha)
+    throw new Error("Release does not target the upstream main release line");
   if (order === 0) {
     if (sha !== pin.commit) throw new Error("Accepted tag moved");
     return null;
   }
+  const mainRef = object(await api("/git/ref/heads/main"));
+  const mainTarget = object(mainRef.object);
+  if (mainRef.ref !== "refs/heads/main" || mainTarget.type !== "commit")
+    throw new Error("Invalid upstream main ref");
+  const mainSha = commit(mainTarget.sha);
+  const mainAncestry = object(await api(`/compare/${sha}...${mainSha}`));
+  if (mainAncestry.status !== "ahead" && mainAncestry.status !== "identical")
+    throw new Error("Stable release is outside upstream main");
   const ancestry = object(await api(`/compare/${pin.commit}...${sha}`));
   if (ancestry.status !== "ahead") throw new Error("Accepted commit is not an ancestor");
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(deliveryId))

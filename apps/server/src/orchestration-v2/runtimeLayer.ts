@@ -299,7 +299,13 @@ const layerSecretRequestsProvided = SecretRequests.layer.pipe(
 );
 const layerVoiceWebhookActionProvided = VoiceWebhookAction.layer.pipe(
   Layer.provide(VoiceWebhookAction.layerBinding),
-  Layer.provide(Layer.merge(layerThreadLaunchProvided, layerProjectService)),
+  Layer.provide(
+    Layer.mergeAll(
+      layerThreadLaunchProvided,
+      layerProjectService,
+      layerManagedProjectFoldersProvided,
+    ),
+  ),
 );
 const layerScheduledTaskProvided = ScheduledTaskService.layer.pipe(
   Layer.provide(

@@ -5,9 +5,8 @@ import * as NodePath from "node:path";
 import { test } from "vite-plus/test";
 import {
   claimCandidate,
-  overdueInterruptRequest,
   parseCandidate,
-  recordChildThread,
+  recordLaunchedThread,
 } from "./voice-upstream-coordinator.ts";
 import type { GitHubApi } from "./lib/voice-upstream-poll.ts";
 
@@ -33,6 +32,7 @@ const api: GitHubApi = async (path) => {
   const data: Record<string, unknown> = {
     "/releases/latest": {
       draft: false,
+      target_commitish: "main",
       prerelease: false,
       tag_name: candidate.tag,
       id: 42,
@@ -40,6 +40,8 @@ const api: GitHubApi = async (path) => {
       body: "malicious release notes",
     },
     "/git/ref/tags/v0.1.10": { ref: "refs/tags/v0.1.10", object: { type: "commit", sha: NEW } },
+    "/git/ref/heads/main": { ref: "refs/heads/main", object: { type: "commit", sha: NEW } },
+    [`/compare/${NEW}...${NEW}`]: { status: "identical" },
     [`/compare/${OLD}...${NEW}`]: { status: "ahead" },
   };
   if (!(path in data)) throw new Error("Unexpected API path");
@@ -59,7 +61,14 @@ async function fixture(run: (dir: string) => Promise<void>) {
     await NodeFSP.rm(dir, { recursive: true, force: true });
   }
 }
-const opts = (dir: string) => ({ stateDir: dir, pin, api, now, project });
+const opts = (dir: string) => ({
+  stateDir: dir,
+  pin,
+  api,
+  now,
+  project,
+  authorizedProjectId: project.id,
+});
 
 test("strict candidate rejects extra fields, wrong IDs, future, expired, excessive lifetime and text", () => {
   NodeAssert.deepEqual(parseCandidate(candidate, now), candidate);
@@ -80,7 +89,7 @@ test("strict candidate rejects extra fields, wrong IDs, future, expired, excessi
   NodeAssert.throws(() => parseCandidate({ ...candidate, deliveryId: "a".repeat(2000) }, now));
 });
 
-test("claims once before returning fixed worktree request; child ID recorded explicitly, crash blocks retry", async () =>
+test("claims once before returning fixed worktree request; top-level thread recorded explicitly, crash blocks retry", async () =>
   fixture(async (dir) => {
     const request = await claimCandidate(candidate, opts(dir));
     NodeAssert.equal(request.projectId, project.id);
@@ -99,26 +108,14 @@ test("claims once before returning fixed worktree request; child ID recorded exp
     NodeAssert.equal(state.active.deadline, "2026-11-16T14:00:00.000Z");
     NodeAssert.ok(request.message.includes(`absolute deadline ${state.active.deadline}`));
     await NodeAssert.rejects(claimCandidate(candidate, opts(dir)), /Active run/);
-    await NodeAssert.rejects(
-      overdueInterruptRequest(dir, new Date("2026-11-16T14:00:00.000Z")),
-      /manual reconciliation/,
-    );
     const id = "mcp:00000000-0000-4000-8000-000000000002";
-    await recordChildThread(dir, id);
+    await recordLaunchedThread(dir, id);
     NodeAssert.equal(JSON.parse(await NodeFSP.readFile(statePath, "utf8")).active.threadId, id);
-    NodeAssert.equal(
-      await overdueInterruptRequest(dir, new Date("2026-11-16T13:59:59.000Z")),
-      null,
-    );
-    NodeAssert.deepEqual(await overdueInterruptRequest(dir, new Date("2026-11-16T14:00:00.000Z")), {
-      threadId: id,
-      reason: "Voice upgrade two-hour deadline reached",
-    });
     const recorded = await NodeFSP.readFile(statePath, "utf8");
-    await recordChildThread(dir, id);
+    await recordLaunchedThread(dir, id);
     NodeAssert.equal(await NodeFSP.readFile(statePath, "utf8"), recorded);
     await NodeAssert.rejects(
-      recordChildThread(dir, "mcp:00000000-0000-4000-8000-000000000003"),
+      recordLaunchedThread(dir, "mcp:00000000-0000-4000-8000-000000000003"),
       /different thread/,
     );
     NodeAssert.equal(await NodeFSP.readFile(statePath, "utf8"), recorded);
@@ -132,11 +129,7 @@ test("preparation delays do not reset the absolute deadline already delivered in
     NodeAssert.ok(request.message.includes(`absolute deadline ${state.active.deadline}`));
     const id = "mcp:00000000-0000-4000-8000-000000000002";
     // Recording after preparation must not start a fresh two-hour window.
-    await recordChildThread(dir, id);
-    NodeAssert.deepEqual(await overdueInterruptRequest(dir, new Date("2026-11-16T14:10:00Z")), {
-      threadId: id,
-      reason: "Voice upgrade two-hour deadline reached",
-    });
+    await recordLaunchedThread(dir, id);
     NodeAssert.equal(
       JSON.parse(await NodeFSP.readFile(NodePath.join(dir, "state.json"), "utf8")).active.deadline,
       state.active.deadline,

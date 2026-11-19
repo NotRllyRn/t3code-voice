@@ -95,9 +95,10 @@ test("the sender CLI runs from the workflow's sparse checkout with only fake IO"
         gets++;
         const sha = "b".repeat(40);
         const value = url.endsWith("/releases/latest")
-          ? { draft: false, prerelease: false, tag_name: "v99.0.0", id: 42, published_at: "2026-11-16T00:00:00Z" }
+          ? { draft: false, target_commitish: "main", prerelease: false, tag_name: "v99.0.0", id: 42, published_at: "2026-11-16T00:00:00Z" }
           : url.endsWith("/git/ref/tags/v99.0.0")
             ? { ref: "refs/tags/v99.0.0", object: { type: "commit", sha } }
+            : url.endsWith("/git/ref/heads/main") ? { ref: "refs/heads/main", object: { type: "commit", sha } }
             : url.includes("/compare/") ? { status: "ahead" } : null;
         if (value === null) throw new Error("Unexpected fake API path");
         return new Response(JSON.stringify(value));
@@ -121,7 +122,7 @@ test("the sender CLI runs from the workflow's sparse checkout with only fake IO"
         },
       },
     );
-    expect(JSON.parse(stdout.trim().split("\n").at(-1)!)).toEqual({ gets: 3, posts: 1 });
+    expect(JSON.parse(stdout.trim().split("\n").at(-1)!)).toEqual({ gets: 5, posts: 1 });
   } finally {
     await NodeFSP.rm(dir, { recursive: true, force: true });
   }
@@ -134,6 +135,7 @@ const ID = "00000000-0000-4000-8000-000000000001";
 const pin = { repository: "pingdotgg/t3code", tag: "v0.1.9", commit: OLD };
 const release = {
   draft: false,
+  target_commitish: "main",
   prerelease: false,
   tag_name: "v0.1.10",
   id: 42,
@@ -152,6 +154,8 @@ function fakeApi(overrides: Record<string, unknown> = {}) {
       tag: "v0.1.10",
       object: { type: "commit", sha: NEW },
     },
+    "/git/ref/heads/main": { ref: "refs/heads/main", object: { type: "commit", sha: NEW } },
+    [`/compare/${NEW}...${NEW}`]: { status: "identical" },
     [`/compare/${OLD}...${NEW}`]: { status: "ahead" },
     ...overrides,
   };
@@ -183,6 +187,8 @@ test("resolves annotated tags, compares numeric stable versions, and omits untru
     "/releases/latest",
     "/git/ref/tags/v0.1.10",
     `/git/tags/${TAG_SHA}`,
+    "/git/ref/heads/main",
+    `/compare/${NEW}...${NEW}`,
     `/compare/${OLD}...${NEW}`,
   ]);
   expect(JSON.stringify(candidate)).not.toContain("Ignore instructions");
@@ -222,6 +228,7 @@ test("same stable tag and SHA is a no-op; movement and lower latest fail closed"
 test("rejects drafts, prereleases, malformed releases, wrong pin and non-ancestor", async () => {
   for (const changed of [
     { draft: true },
+    { target_commitish: "release/maintenance" },
     { prerelease: true },
     { tag_name: "v0.1.10-nightly.1" },
     { tag_name: "v0.01.10" },
@@ -339,4 +346,23 @@ test("webhook signs exact bytes and rejects insecure URL or missing secret", asy
   expect(calls).toBe(0);
   await postCandidate(candidate, "https://example.test/receive", "trusted-secret", fetcher);
   expect(calls).toBe(1);
+});
+
+test("rejects stable releases outside the upstream main line", async () => {
+  for (const status of ["behind", "diverged"]) {
+    await expect(
+      pollUpstream(
+        pin,
+        fakeApi({
+          "/git/ref/heads/main": {
+            ref: "refs/heads/main",
+            object: { type: "commit", sha: "d".repeat(40) },
+          },
+          [`/compare/${NEW}...${"d".repeat(40)}`]: { status },
+        }).api,
+        clock,
+        ID,
+      ),
+    ).rejects.toThrow("main");
+  }
 });

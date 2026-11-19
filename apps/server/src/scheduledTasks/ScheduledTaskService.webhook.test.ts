@@ -252,6 +252,7 @@ const withService = <A, E>(
     readonly launches: Queue.Queue<LaunchInput>;
     readonly sql: SqlClient.SqlClient;
     readonly secretsByRef: Map<string, string>;
+    readonly voiceSettings?: ServerSettings.ServerSettingsService["Service"];
   }) => Effect.Effect<A, E, never>,
   options: {
     readonly onFrame?: () => void;
@@ -270,12 +271,34 @@ const withService = <A, E>(
     readonly voice?: {
       readonly binding: Effect.Effect<VoiceWebhookAction.VoiceWebhookBinding | null>;
       readonly api: GitHubApi;
+      readonly scratch?: boolean;
     };
   } = {},
 ) =>
   Effect.gen(function* () {
     const launches = yield* Queue.unbounded<LaunchInput>();
     const secretsByRef = new Map<string, string>();
+    const voiceSettings =
+      options.voice === undefined
+        ? undefined
+        : yield* ServerSettings.ServerSettingsService.pipe(
+            Effect.provide(
+              ServerSettings.layerTest({
+                defaultModelSelection: {
+                  instanceId: ProviderInstanceId.make("configured-codex"),
+                  model: "configured-model",
+                  options: [{ id: "reasoningEffort", value: "medium" }],
+                },
+                providerInstances: {
+                  [ProviderInstanceId.make("configured-codex")]: {
+                    driver: ProviderDriverKind.make("codex"),
+                    enabled: true,
+                    config: {},
+                  },
+                },
+              }),
+            ),
+          );
     const baseDependencies = Layer.mergeAll(
       NodePlatformCrypto.layerDigest,
       NodePlatformCrypto.layerMac,
@@ -339,7 +362,7 @@ const withService = <A, E>(
       }),
       Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
         namedProjectsRoot: "/projects",
-        isScratchProject: () => Effect.succeed(false),
+        isScratchProject: () => Effect.succeed(options.voice?.scratch === true),
       }),
       Layer.mock(ThreadManagementService.ThreadManagementService)({}),
       Layer.mock(SecretRequests.SecretRequests)({
@@ -371,15 +394,7 @@ const withService = <A, E>(
                     options.voice.binding,
                   ),
                   Layer.succeed(VoiceWebhookAction.VoiceGitHubApi, options.voice.api),
-                  ServerSettings.layerTest({
-                    providerInstances: {
-                      [ProviderInstanceId.make("voice-automation")]: {
-                        driver: ProviderDriverKind.make("pi"),
-                        enabled: true,
-                        config: { environmentMode: "clean" },
-                      },
-                    },
-                  }),
+                  Layer.succeed(ServerSettings.ServerSettingsService, voiceSettings!),
                   Layer.mock(ProjectService.ProjectService)({
                     getById: (id) =>
                       Effect.succeedSome({ id, scripts: [], autoPull: false } as never),
@@ -388,10 +403,10 @@ const withService = <A, E>(
                     getInstance: () =>
                       Effect.succeed({
                         enabled: true,
-                        driverKind: "pi",
+                        driverKind: "codex",
                         snapshot: {
                           getSnapshot: Effect.succeed({
-                            models: [{ slug: "codex-broker/gpt-6.1-sol" }],
+                            models: [{ slug: "configured-model" }],
                           }),
                         },
                       } as never),
@@ -403,7 +418,13 @@ const withService = <A, E>(
     return yield* Effect.gen(function* () {
       const service = yield* ScheduledTaskService.ScheduledTaskService;
       const sql = yield* SqlClient.SqlClient;
-      return yield* body({ service, launches, sql, secretsByRef });
+      return yield* body({
+        service,
+        launches,
+        sql,
+        secretsByRef,
+        ...(voiceSettings === undefined ? {} : { voiceSettings }),
+      });
     }).pipe(
       Effect.provide(
         Layer.fresh(ScheduledTaskService.layer.pipe(Layer.provide(layerDependencies))),
@@ -431,9 +452,14 @@ const voiceCandidate = {
   deliveryId: "00000000-0000-4000-8000-000000000001",
 };
 const voiceApi: GitHubApi = async (path) => {
+  if (path === "/git/ref/heads/main")
+    return { ref: "refs/heads/main", object: { type: "commit", sha: voiceCandidate.sha } };
+  if (path === `/compare/${voiceCandidate.sha}...${voiceCandidate.sha}`)
+    return { status: "identical" };
   if (path === "/releases/latest")
     return {
       draft: false,
+      target_commitish: "main",
       prerelease: false,
       tag_name: voiceCandidate.tag,
       id: voiceCandidate.releaseId,
@@ -467,6 +493,7 @@ const withVoiceService = <A, E>(
     },
   ) => Effect.Effect<A, E>,
   api: GitHubApi = voiceApi,
+  scratch = false,
 ) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -488,7 +515,7 @@ const withVoiceService = <A, E>(
               binding = value;
             },
           }),
-        { voice: { binding: Effect.sync(() => binding), api } },
+        { voice: { binding: Effect.sync(() => binding), api, scratch } },
       );
     }),
   );
@@ -530,6 +557,7 @@ const bindVoiceTask = (input: Parameters<Parameters<typeof withVoiceService>[0]>
     const binding = yield* decodeVoiceBinding({
       enabled: true,
       action: "voice-upstream-release",
+      launchPolicy: "configured-codex-v1",
       taskId: current.id,
       generation: current.generation,
       projectId: current.projectId,
@@ -678,6 +706,14 @@ it.effect(
     withVoiceService((input) =>
       Effect.gen(function* () {
         const { task } = yield* bindVoiceTask(input);
+        yield* input.voiceSettings!.updateSettings({
+          defaultModelSelection: {
+            instanceId: ProviderInstanceId.make("configured-codex"),
+            model: "new-current-model",
+            options: [{ id: "reasoningEffort", value: "high" }],
+          },
+          defaultRuntimeMode: "approval-required",
+        });
         const signed = signedVoiceRequest(task);
         for (const request of [
           { ...signed, headers: {} },
@@ -725,12 +761,21 @@ it.effect(
         const launch = yield* Queue.take(input.launches);
         assert.equal(launch.projectId, task.projectId);
         assert.equal(launch.enforceNoSetupScripts, true);
-        assert.deepEqual(launch.cleanProviderConstraint, {
-          instanceId: "voice-automation",
-          driver: "pi",
-          environmentMode: "clean",
+        assert.equal(launch.cleanProviderConstraint, undefined);
+        assert.deepEqual(launch.modelSelection, {
+          instanceId: ProviderInstanceId.make("configured-codex"),
+          model: "new-current-model",
+          options: [{ id: "reasoningEffort", value: "high" }],
         });
-        assert.equal(launch.modelSelection?.model, "codex-broker/gpt-6.1-sol");
+        assert.deepEqual(launch.workspaceStrategy, {
+          type: "worktree",
+          baseRef: "feature/codex-voice-stable",
+          branch: `auto/upstream-${voiceCandidate.tag}-${voiceCandidate.sha.slice(0, 12)}`,
+          startFromOrigin: false,
+        });
+        assert.equal(launch.runtimeMode, "approval-required");
+        assert.equal(launch.reuseExistingThread, undefined);
+        assert.equal(launch.threadId, undefined);
         assert.isFalse(launch.initialMessage!.text.includes("untrusted decoded decoy"));
         const history = yield* input.sql<{
           body: string;
@@ -742,6 +787,39 @@ it.effect(
         yield* waitForSpan(input.service.triggerWebhook(signed), "VoiceWebhookAction.dispatch");
         assert.equal(yield* Queue.size(input.launches), 0);
       }),
+    ),
+);
+
+it.effect.each(["unset", "other-provider", "scratch"] as const)(
+  "refuses an unsafe automation target before claiming (%s)",
+  (target) =>
+    withVoiceService(
+      (input) =>
+        Effect.gen(function* () {
+          const { task } = yield* bindVoiceTask(input);
+          if (target !== "scratch")
+            yield* input.voiceSettings!.updateSettings({
+              defaultModelSelection:
+                target === "unset"
+                  ? null
+                  : { instanceId: ProviderInstanceId.make("claude"), model: "configured-model" },
+            });
+          yield* waitForSpan(
+            input.service.triggerWebhook(signedVoiceRequest(task)),
+            "VoiceWebhookAction.dispatch",
+          );
+          assert.equal(yield* Queue.size(input.launches), 0);
+          assert.isFalse(
+            yield* Effect.promise(() =>
+              NodeFSP.access(NodePath.join(input.stateDir, "state.json")).then(
+                () => true,
+                () => false,
+              ),
+            ),
+          );
+        }),
+      voiceApi,
+      target === "scratch",
     ),
 );
 
@@ -794,6 +872,8 @@ it.effect("refuses wrong or disabled private bindings at ingress", () =>
   withVoiceService((input) =>
     Effect.gen(function* () {
       const { task, binding } = yield* bindVoiceTask(input);
+      const { launchPolicy: _retiredPolicy, ...oldBinding } = binding;
+      assert.equal((yield* decodeVoiceBinding(oldBinding).pipe(Effect.result))._tag, "Failure");
       for (const mutation of [
         { taskId: "other-task" },
         { projectId: "other-project" },
