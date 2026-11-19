@@ -13,10 +13,11 @@ attached to a published release.
   and Google Play apps cannot connect. Use a matching fork mobile build instead.
 - Installed, authenticated providers on the machine running the server. A server
   bundle alone does not include provider CLIs or their credentials.
-- For the native Linux x64 candidate, separately provision **Node 26.13.1**
-  (ABI **147**) and, for Codex coding/Live, native **Codex CLI 0.166.0** with its
-  matching resources and authorized provider setup. Neither CLI nor credentials
-  are bundled. Tested on Debian 13 / glibc 2.41 only; other hosts are unverified.
+- The native Linux x64 bundle embeds **Node 26.13.1** (ABI **147**); no separate
+  Node is needed to start it. For Codex coding/Live, provision native
+  **Codex CLI 0.166.0**, its resources and authorized provider setup separately.
+  Provider CLIs and credentials are not bundled. Debian 13 / glibc 2.41 is the
+  packaging baseline; native-library compatibility on other hosts is unverified.
 
 Do not use upstream `t3.codes` installers, Homebrew/store packages, or `npx t3`
 for this fork. Voice versions are not published as the upstream npm `t3` package.
@@ -24,8 +25,8 @@ for this fork. Voice versions are not published as the upstream npm `t3` package
 ## Desktop app
 
 Download the matching Voice desktop asset from the fork release page. Current
-macOS tester builds are experimental, ad-hoc signed and manually installed,
-not Developer ID signed or notarized. Gatekeeper can block launch; do not treat
+macOS `0.1.10-voice.1` builds use a persistent private self-signed publisher
+(native version `0.1.10001`), not Apple Developer ID signing or notarization. Gatekeeper can block launch; do not treat
 an available download as proof of macOS trust or microphone compatibility.
 Read the release's trust limits before installing.
 
@@ -37,8 +38,8 @@ your Mac. Manual replacement may prompt again for microphone or Keychain access.
 ## Command line
 
 The audited native candidate is
-`t3-voice-server-0.1.10-voice.1-linux-x64-native.tar.gz`: server source `8201eb73`,
-with unchanged compiled client reused from `b276408c`. It remains an unpublished
+`t3-0.1.10-voice.1-linux-x64.tar.gz`: matching server and web client from
+`f1184f1c2e94cb21529d673751a4ce62ec6deaef`. It remains an unpublished
 test candidate, not an available release download or a universal install proof.
 Use it only when explicitly supplied for testing or attached to a published
 release. Docker coding support is **unverified/not turnkey** on the tested
@@ -48,12 +49,13 @@ sandbox boundary; do not bypass Codex's sandbox to make it work.
    account. Codex needs working kernel/user namespaces for its normal sandbox.
 2. Verify the supplied archive against its adjacent `SHA256SUMS`. Extract into
    a new empty owned release directory, never over an old release. From its root,
-   run `sha256sum -c PACKAGE-SHA256SUMS`. The archive's guide is **`README.md`**
-   (the adjacent copy is `README-native.md`); inspect its manifests and limits.
+   verify the extracted files against the supplied `PACKAGE-SHA256SUMS`.
+   The adjacent `INSTALL-BACKUP-ROLLBACK.md` and manifests describe this bundle.
 3. Follow that guide's isolated manual start: private HOME/tmp, a separate state
    directory, and no production configuration import. The entry is
-   `dist/bin.mjs serve --host 127.0.0.1 --port <server-port> --base-dir <state-dir> --no-browser`,
-   invoked with the pinned Node binary. `--base-dir` contains `userdata/`; it is
+   `./t3 serve --host 127.0.0.1 --port <server-port> --base-dir <state-dir> --no-browser`.
+   Keep `client/`, `node_modules/`, `resource-monitor/` and `lib/` beside `t3`;
+   copying only the executable breaks the distribution. `--base-dir` contains `userdata/`; it is
    not the release directory or `userdata/` itself. Keep it separate from any
    existing upstream/fork server and choose an unused port.
 4. Pair the matching Voice Mac app as a **remote client**, as below. In that
@@ -69,11 +71,10 @@ on Linux as the **same account with the same private HOME and state directory**
 as the running server. Replace these example paths:
 
 ```sh
-NODE=/absolute/path/to/node-v26.13.1/bin/node
 RELEASE=/absolute/path/to/extracted-release
 SERVER_HOME=/absolute/path/to/private-home
 STATE=/absolute/path/to/private-state
-env HOME="$SERVER_HOME" "$NODE" "$RELEASE/dist/bin.mjs" pair --base-dir "$STATE"
+env HOME="$SERVER_HOME" "$RELEASE/t3" pair --base-dir "$STATE"
 ```
 
 A loopback server needs a secure SSH tunnel from the Mac. Forward the **same**
@@ -96,7 +97,7 @@ concepts, not upstream installation or automatic-update instructions.
 Download the matching newer desktop asset and server bundle from the fork
 release page, verify the release checksums, back up data, and follow that
 release's replacement steps. Update clients and servers together; the native
-server still needs its separately pinned Node and provider CLIs.
+server embeds Node but still needs separately installed provider CLIs.
 
 For server migration, have the operator confirm the actual service unit,
 executable, state path and service account before any cutover; these are not
@@ -113,8 +114,11 @@ keep backups containing secrets private.
 
 Keep the previous release untouched. Migrate a copy of the stopped backup into
 a separate private state directory using the new release; never share a state
-directory between two running servers. Migration head is **96**; prior checks
-covered **81→96** and **88→96**, not arbitrary data or safe downgrades. Before
+directory between two running servers. Migration head is **97**. Synthetic
+**67→97**, **81→97** and **88→97** checks preserve saved conversation payloads;
+these do not prove every production data shape or safe downgrades. Compare the
+installed migration IDs/names and schema with the source at its recorded head
+before cutover; the head number alone does not prove compatibility. Before
 cutover, confirm history, provider paths and first paired connection with the
 intended service account; fresh pairing may be needed for a new isolated profile.
 For rollback, stop the new server, restore the **matching pre-upgrade state,

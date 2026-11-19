@@ -84,7 +84,7 @@ describe("runMigrations", () => {
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
-  it.effect.each([81, 88])("preserves stable and preview voice data at migration %s", (id) =>
+  it.effect.each([67, 81, 88])("preserves saved conversation data at migration %s", (id) =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations({ toMigrationInclusive: id });
