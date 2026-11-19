@@ -21,7 +21,6 @@ export {
   transcribeCloudPcm,
   getEnvironmentSpeechStatus,
   getEnvironmentSpeechStreamUrl,
-  getEnvironmentRealtimeVoiceUrl,
   getEnvironmentLiveVoiceUrl,
   supportsEnvironmentNativeLiveVoice,
   linkEnvironmentSpeechModels,

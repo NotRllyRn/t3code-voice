@@ -19,8 +19,7 @@ Use the selected provider’s HTTPS `/v1` base URL. Live uses its native `/v1/li
 endpoint, not a public Realtime WebSocket.
 
 Live reads the selected instance's trusted Codex configuration and credential
-in that environment. It does not require `T3CODE_REALTIME_*` variables or a
-separate voice key. If the configured credential uses an environment variable,
+in that environment. It does not require a separate voice key. If the configured credential uses an environment variable,
 that existing variable must be available to the environment's server process;
 a browser or Finder launch does not inherit a different shell's variables.
 Missing credentials require fixing the selected provider setup. A successful
@@ -92,6 +91,4 @@ software. The matching private macOS artifact passed signature checks, but is se
 and unnotarized: Gatekeeper rejection is expected. First install, microphone,
 playback and the complete live journey remain separate acceptance checks.
 
-Native mobile voice and the retained legacy Realtime transport are separate
-paths. Their older setup does not configure desktop Live and is not a fallback.
-Mobile browsers are disabled for this Live control. No mobile parity is claimed.
+Mobile browsers do not expose the Live control.

@@ -11,7 +11,7 @@ import * as Schema from "effect/Schema";
 import { DispatchModeLimit } from "./DispatchModeLimit.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
-import { recordVoiceMessage, sendRecordedVoiceMessage } from "./VoiceConversation.ts";
+import { recordVoiceMessage } from "./VoiceConversation.ts";
 import { voiceMessageId } from "./VoiceHistory.ts";
 import { create, layer, projectId, voice } from "./VoiceConversation.testkit.ts";
 
@@ -57,10 +57,15 @@ it.effect(
         projectId,
         threadId,
         messageId: first.messageId,
-        sessionId: voice.sessionId,
+        commandId: CommandId.make("dispatch-historical-voice"),
+        text: input.text,
+        attachments: [],
+        mode: "queue" as const,
+        createdBy: "user" as const,
+        creationSource: "web" as const,
       };
-      const run = yield* sendRecordedVoiceMessage(execute);
-      const retried = yield* sendRecordedVoiceMessage(execute);
+      const run = yield* threads.sendToThread(execute);
+      const retried = yield* threads.sendToThread(execute);
       expect(retried.run.id).toBe(run.run.id);
       projection = yield* store.getThreadRecords(threadId, [
         "messages",
@@ -88,7 +93,12 @@ it.effect(
       });
       const beforeQueue = yield* store.getThreadRecords(threadId, ["turnItems"]);
       const secondItem = beforeQueue.turnItems.find((item) => item.voice?.itemId === "input-two")!;
-      const queued = yield* sendRecordedVoiceMessage({ ...execute, messageId: second.messageId });
+      const queued = yield* threads.sendToThread({
+        ...execute,
+        commandId: CommandId.make("queue-historical-voice"),
+        messageId: second.messageId,
+        text: "Then run the checks",
+      });
       expect(queued.delivery).toBe("queued");
       expect(queued.turnItem?.id).toBe(secondItem.id);
       expect(queued.turnItem?.voice).toEqual(queuedVoice);
@@ -164,16 +174,6 @@ it.effect(
       yield* recordVoiceMessage({ ...input, voice: { ...reply, delivery: "drained" } });
       expect(
         (yield* Effect.flip(
-          sendRecordedVoiceMessage({
-            projectId,
-            threadId,
-            messageId: saved.messageId,
-            sessionId: voice.sessionId,
-          }),
-        ))._tag,
-      ).toBe("OrchestratorDispatchError");
-      expect(
-        (yield* Effect.flip(
           threads.dispatch({
             type: "message.dispatch",
             commandId: CommandId.make("forged-assistant-dispatch"),
@@ -243,7 +243,7 @@ it.effect(
 );
 
 it.effect(
-  "retains project/session/mode authorization and refuses rewriting an already-recorded input",
+  "retains project/mode authorization and refuses rewriting an already-recorded input",
   () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("thread:voice-scope");
@@ -281,16 +281,6 @@ it.effect(
               textKind: "generated_voice_reply",
               sourceMessageIds: [foreign.messageId],
             },
-          }),
-        ))._tag,
-      ).toBe("OrchestratorDispatchError");
-      expect(
-        (yield* Effect.flip(
-          sendRecordedVoiceMessage({
-            projectId,
-            threadId,
-            messageId: saved.messageId,
-            sessionId: "other-session",
           }),
         ))._tag,
       ).toBe("OrchestratorDispatchError");

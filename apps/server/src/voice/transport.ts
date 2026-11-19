@@ -4,8 +4,8 @@ import * as NodeWS from "@effect/platform-node/NodeWS";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Socket from "effect/socket/Socket";
-import { MAX_FRAME_BYTES } from "./protocol.ts";
 
+export const MAX_FRAME_BYTES = 128 * 1024;
 export const MAX_BUFFER_BYTES = 256 * 1024;
 export const MAX_BUFFER_FRAMES = 256;
 export class VoiceTransportError extends Schema.TaggedError<VoiceTransportError>()(
@@ -96,18 +96,6 @@ export const claimVoiceUpgrade = (socket: NodeStream.Duplex) => {
       wire?.terminate();
     },
   };
-};
-
-export const makeVoiceUpstream = (url: string, key: string) => {
-  const ws = new VoiceWebSocket(url, {
-    headers: { Authorization: `Bearer ${key}` },
-    maxPayload: MAX_FRAME_BYTES,
-    perMessageDeflate: false,
-  });
-  guards.set(ws, { bytes: 0, frames: 0, failed: false });
-  // A cancelled handshake emits error after Effect detaches its listeners.
-  ws.on("error", () => undefined);
-  return ws;
 };
 
 const transportError = () =>

@@ -35,7 +35,6 @@ import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.t
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as VoiceFixture from "../orchestration-v2/VoiceConversation.testkit.ts";
-import { sendRecordedVoiceMessage } from "../orchestration-v2/VoiceConversation.ts";
 import { makeLiveAgentSession } from "./liveAgentSession.ts";
 import {
   decodeNativeLiveEvent,
@@ -212,13 +211,6 @@ it.live(
         expect(
           events.filter((event) => event.type === "live.caption" && event.committed),
         ).toHaveLength(2);
-        const blocked = yield* sendRecordedVoiceMessage({
-          projectId: VoiceFixture.projectId,
-          threadId,
-          sessionId: "fictional-session",
-          messageId: speech.id,
-        }).pipe(Effect.result);
-        expect(blocked._tag).toBe("Failure"); // application-frozen text never acquires original-speech task authority
         const delegation = {
           type: "delegation",
           delegationId: "delegation-one",

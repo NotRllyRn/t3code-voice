@@ -1,13 +1,10 @@
 import {
-  CommandId,
-  type MessageId,
   type OrchestrationV2CreationSource,
   type OrchestrationV2VoiceMessage,
   type ProjectId,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import { OrchestratorDispatchError } from "./Orchestrator.ts";
 import { ThreadManagementService } from "./ThreadManagementService.ts";
 import { voiceMessageId, voiceRecordCommandId } from "./VoiceHistory.ts";
 
@@ -48,45 +45,3 @@ export const recordVoiceMessage = Effect.fn("VoiceConversation.recordVoiceMessag
   });
   return { messageId, dispatch };
 });
-
-export interface SendRecordedVoiceMessageInput {
-  readonly projectId: ProjectId;
-  readonly threadId: ThreadId;
-  readonly messageId: MessageId;
-  readonly sessionId: string;
-}
-
-/** Execution-only bridge; never accepts rewritten task text or assistant output. */
-export const sendRecordedVoiceMessage = Effect.fn("VoiceConversation.sendRecordedVoiceMessage")(
-  function* (input: SendRecordedVoiceMessageInput) {
-    const threads = yield* ThreadManagementService;
-    const { messages } = yield* threads.getProjectThreadRecords(input, ["messages"], {
-      messageIds: [input.messageId],
-    });
-    const message = messages.find((candidate) => candidate.id === input.messageId);
-    const commandId = CommandId.make(`command:voice:execute:${input.messageId}`);
-    if (
-      message?.role !== "user" ||
-      message.voice?.textKind !== "final_user_transcript" ||
-      message.voice.sessionId !== input.sessionId ||
-      message.voice.transcriptFinality === "application_frozen"
-    ) {
-      return yield* new OrchestratorDispatchError({
-        commandId,
-        commandType: "message.dispatch",
-        cause: "No recorded user input for this voice session.",
-      });
-    }
-    return yield* threads.sendToThread({
-      projectId: input.projectId,
-      threadId: input.threadId,
-      commandId,
-      messageId: message.id,
-      text: message.text,
-      attachments: [],
-      mode: "queue",
-      createdBy: message.createdBy,
-      creationSource: message.creationSource,
-    });
-  },
-);

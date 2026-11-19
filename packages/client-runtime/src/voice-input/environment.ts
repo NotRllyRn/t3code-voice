@@ -6,7 +6,6 @@ import {
   CloudSpeechError,
   LIVE_VOICE_PATH,
   LiveVoiceStartupError,
-  REALTIME_VOICE_PATH,
   SPEECH_STREAM_PATH,
 } from "@t3tools/contracts";
 import type {
@@ -168,7 +167,7 @@ export const transcribeCloudPcm = (
 
 const getEnvironmentMediaStreamUrl = (
   prepared: PreparedConnection,
-  path: typeof SPEECH_STREAM_PATH | typeof REALTIME_VOICE_PATH | typeof LIVE_VOICE_PATH,
+  path: typeof SPEECH_STREAM_PATH | typeof LIVE_VOICE_PATH,
 ) => {
   let endpoint = prepared.httpBaseUrl;
   return request({
@@ -192,9 +191,6 @@ const getEnvironmentMediaStreamUrl = (
 
 export const getEnvironmentSpeechStreamUrl = (prepared: PreparedConnection) =>
   getEnvironmentMediaStreamUrl(prepared, SPEECH_STREAM_PATH);
-
-export const getEnvironmentRealtimeVoiceUrl = (prepared: PreparedConnection) =>
-  getEnvironmentMediaStreamUrl(prepared, REALTIME_VOICE_PATH);
 
 export const supportsEnvironmentNativeLiveVoice = (
   descriptor: Pick<ExecutionEnvironmentDescriptor, "capabilities"> | null | undefined,

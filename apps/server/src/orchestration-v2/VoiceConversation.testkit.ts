@@ -19,7 +19,7 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
-import { recordVoiceMessage, sendRecordedVoiceMessage } from "./VoiceConversation.ts";
+import { recordVoiceMessage } from "./VoiceConversation.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 
 const instanceId = ProviderInstanceId.make("codex");
@@ -136,11 +136,16 @@ export const seedCancelledVoiceHistory = (threadId: ThreadId) =>
       voice,
       creationSource: "web",
     });
-    const queuedVoice = yield* sendRecordedVoiceMessage({
+    const queuedVoice = yield* threads.sendToThread({
       projectId,
       threadId,
       messageId: recorded.messageId,
-      sessionId: voice.sessionId,
+      commandId: CommandId.make("queue-historical-voice"),
+      text: "CANCELLED_EXECUTION_CONVERSATION",
+      attachments: [],
+      mode: "queue",
+      createdBy: "user",
+      creationSource: "web",
     });
     yield* threads.dispatch({
       type: "queued-run.cancel",
