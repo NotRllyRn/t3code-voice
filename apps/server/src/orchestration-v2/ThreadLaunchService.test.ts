@@ -2044,18 +2044,8 @@ it.effect.each(["failed", "interrupted"] as const)(
   },
 );
 
-it.effect("keeps the clean constraint on replay and refuses a changed instance or mode", () => {
-  let environmentMode: "inherit" | "clean" = "clean";
-  const cleanAdapter = {
-    ...adapter,
-    driver: ProviderDriverKind.make("pi"),
-    getCapabilities: () =>
-      Effect.succeed({
-        ...CodexProviderCapabilitiesV2,
-        cleanStart: { environmentMode, supportsConstraint: true as const },
-      }),
-  };
-  const harness = makeHarness({ adapters: [cleanAdapter] });
+it.effect("rejects retired clean launches and persisted launch replay", () => {
+  const harness = makeHarness();
   return Effect.gen(function* () {
     const launches = yield* ThreadLaunch.ThreadLaunchService;
     const constraint = {
@@ -2085,23 +2075,12 @@ it.effect("keeps the clean constraint on replay and refuses a changed instance o
       createdBy: input.createdBy,
       creationSource: input.creationSource,
     });
-    const first = yield* launches.launch(input);
-    assert.deepEqual(first.cleanProviderConstraint, constraint);
-    const replay = yield* launches.launch(input);
-    assert.deepEqual(replay.cleanProviderConstraint, constraint);
-    assert.deepEqual(
-      replay.projection.runs[0]?.workspacePreparation?.cleanProviderConstraint,
-      constraint,
-    );
-    const switched = yield* launches
-      .launch({ ...input, modelSelection: claudeModelSelection })
-      .pipe(Effect.result);
-    assert.equal(switched._tag, "Failure");
-    environmentMode = "inherit";
-    const changed = yield* launches
+    const replay = yield* launches.launch(input).pipe(Effect.result);
+    assert.equal(replay._tag, "Failure");
+    const explicit = yield* launches
       .launch({ ...input, cleanProviderConstraint: constraint })
       .pipe(Effect.result);
-    assert.equal(changed._tag, "Failure");
+    assert.equal(explicit._tag, "Failure");
     const unguarded = yield* launches.launch(
       launchInput({
         command: "normal:inherit",
@@ -2110,7 +2089,7 @@ it.effect("keeps the clean constraint on replay and refuses a changed instance o
         workspace: { type: "root" },
       }),
     );
-    assert.equal(unguarded.cleanProviderConstraint, undefined);
+    assert.equal(unguarded.projection.thread.lineage.parentThreadId, null);
   }).pipe(Effect.provide(harness.layer));
 });
 

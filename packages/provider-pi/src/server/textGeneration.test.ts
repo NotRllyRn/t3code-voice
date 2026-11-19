@@ -89,13 +89,7 @@ it.effect("runs Pi offline, since the process is stopped as soon as it answers",
       return pi.spawner.spawn(command);
     });
     const textGeneration = yield* makePiTextGeneration(
-      {
-        enabled: true,
-        binaryPath: "pi",
-        launchArgs: "",
-        customModels: [],
-        environmentMode: "inherit",
-      },
+      { enabled: true, binaryPath: "pi", launchArgs: "", customModels: [] },
       {},
     ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
 
@@ -119,13 +113,7 @@ it.effect("names the model and the disabled extensions when Pi cannot load it", 
   Effect.gen(function* () {
     const pi = yield* makeFakePi("", "Model not found: demo/demo-model");
     const textGeneration = yield* makePiTextGeneration(
-      {
-        enabled: true,
-        binaryPath: "pi",
-        launchArgs: "",
-        customModels: [],
-        environmentMode: "inherit",
-      },
+      { enabled: true, binaryPath: "pi", launchArgs: "", customModels: [] },
       {},
     ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, pi.spawner));
 
@@ -157,13 +145,7 @@ it.effect("selects the provider and id Pi reported when the provider contains a 
       [{ provider, id: "qwen3" }],
     );
     const textGeneration = yield* makePiTextGeneration(
-      {
-        enabled: true,
-        binaryPath: "pi",
-        launchArgs: "",
-        customModels: [],
-        environmentMode: "inherit",
-      },
+      { enabled: true, binaryPath: "pi", launchArgs: "", customModels: [] },
       {},
     ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, pi.spawner));
 
@@ -196,13 +178,7 @@ const generateCommitMessage = (turnEvents: ReadonlyArray<Record<string, unknown>
   Effect.gen(function* () {
     const pi = yield* makeFakePi(reply, undefined, turnEvents);
     const textGeneration = yield* makePiTextGeneration(
-      {
-        enabled: true,
-        binaryPath: "pi",
-        launchArgs: "",
-        customModels: [],
-        environmentMode: "inherit",
-      },
+      { enabled: true, binaryPath: "pi", launchArgs: "", customModels: [] },
       {},
     ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, pi.spawner));
     return yield* textGeneration.generateCommitMessage({
@@ -275,13 +251,7 @@ it.effect.each([
         version,
       );
       const textGeneration = yield* makePiTextGeneration(
-        {
-          enabled: true,
-          binaryPath: "pi",
-          launchArgs: "",
-          environmentMode: "inherit",
-          customModels: [],
-        },
+        { enabled: true, binaryPath: "pi", launchArgs: "", customModels: [] },
         {},
       ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, pi.spawner));
 
@@ -332,13 +302,7 @@ it.effect("generates at Pi's default level when Pi rejects the saved thinking le
       'Thinking level "max" is not supported by demo/demo-model',
     );
     const textGeneration = yield* makePiTextGeneration(
-      {
-        enabled: true,
-        binaryPath: "pi",
-        launchArgs: "",
-        environmentMode: "inherit",
-        customModels: [],
-      },
+      { enabled: true, binaryPath: "pi", launchArgs: "", customModels: [] },
       {},
     ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, pi.spawner));
 

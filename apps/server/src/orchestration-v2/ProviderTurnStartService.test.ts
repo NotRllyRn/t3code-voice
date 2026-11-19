@@ -2794,33 +2794,61 @@ effectIt.effect("terminalizes a starting run when its provider session cannot op
   }),
 );
 
+effectIt.effect.each(["current", "historical", "claim"] as const)(
+  "retires clean work before provider startup (%s)",
+  (source) =>
+    Effect.gen(function* () {
+      const harness = makeLocalCommandHarness({
+        text: "Continue",
+        openFailure: new Error("provider session rejected"),
+      });
+      const constraint = {
+        instanceId: harness.newInstanceId,
+        driver: "pi" as const,
+        environmentMode: "clean" as const,
+      };
+      const projection = harness.projection();
+      harness.setProjection({
+        ...projection,
+        runs:
+          source === "historical"
+            ? [
+                {
+                  ...projection.runs[0]!,
+                  id: RunId.make("old-clean-run"),
+                  ordinal: 0,
+                  status: "completed",
+                  workspacePreparation: { type: "root", cleanProviderConstraint: constraint },
+                },
+                ...projection.runs.map((run) => ({ ...run, ordinal: run.ordinal + 1 })),
+              ]
+            : projection.runs.map((run) => ({
+                ...run,
+                workspacePreparation: { type: "root", cleanProviderConstraint: constraint },
+              })),
+      });
+      if (source === "claim") {
+        harness.setProjection(projection);
+        harness.getRuntimeRecoveryProjection.mockImplementation(() =>
+          Effect.succeed({ ...projection, retiredCleanAutomation: true }),
+        );
+      }
+      yield* harness.startWithRetry;
+      expect(harness.open).not.toHaveBeenCalled();
+      expect(harness.startRootRun).not.toHaveBeenCalled();
+      expect(harness.projection().runs.at(-1)?.status).toBe("failed");
+    }),
+);
+
 effectIt.effect("leaves the run starting when a session-open failure will be retried", () =>
   Effect.gen(function* () {
     const harness = makeLocalCommandHarness({
       text: "Continue",
       openFailure: new Error("provider session rejected"),
     });
-    const constraint = {
-      instanceId: harness.newInstanceId,
-      driver: "pi" as const,
-      environmentMode: "clean" as const,
-    };
-    const projection = harness.projection();
-    harness.setProjection({
-      ...projection,
-      runs: projection.runs.map((run) => ({
-        ...run,
-        workspacePreparation: { type: "root", cleanProviderConstraint: constraint },
-      })),
-    });
+
     const error = yield* harness.startWithRetry.pipe(Effect.flip);
 
-    expect(harness.open).toHaveBeenCalledWith(
-      expect.objectContaining({
-        runtimePolicy: expect.objectContaining({ cleanProviderConstraint: constraint }),
-      }),
-    );
-    expect(harness.startRootRun).not.toHaveBeenCalled();
     expect(error._tag).toBe("ProviderTurnStartError");
     expect(harness.writeIfRunCurrent).not.toHaveBeenCalled();
     expect(harness.projection().runs.at(-1)?.status).toBe("starting");

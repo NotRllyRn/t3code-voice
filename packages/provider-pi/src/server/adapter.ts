@@ -49,10 +49,7 @@ import { providerMessageTextWithAttachmentPaths } from "@t3tools/provider-core/s
 import { mcpToolPresentation } from "@t3tools/provider-core/server/mcpToolPresentation";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import { parsePiCompactCommand, type PiCompactCommand } from "./commands.ts";
-import {
-  mergeProviderInstanceEnvironment,
-  type ResolvedEnvironmentSecrets,
-} from "@t3tools/provider-core/server/instanceEnvironment";
+import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
@@ -84,7 +81,6 @@ import {
 } from "./mcpInjection.ts";
 import { PI_FILE_CHANGE_TOOLS, PI_T3_SERVICE_TIER_COMMAND } from "./mcpExtensionSource.ts";
 import { PI_STANDARD_SERVICE_TIER } from "./modelCapabilities.ts";
-import { resolvePiStartup } from "./environment.ts";
 
 export const PI_PROVIDER = ProviderDriverKind.make("pi");
 const PI_DRIVER_KIND = PI_PROVIDER;
@@ -204,7 +200,6 @@ export interface PiAdapterV2Options {
   readonly instanceId: ProviderInstanceId;
   readonly settings: PiSettings;
   readonly environment: NodeJS.ProcessEnv;
-  readonly environmentSecrets?: ResolvedEnvironmentSecrets | undefined;
   readonly continuationRequests?: {
     readonly offer: (
       request: ProviderContinuationRequests.ProviderContinuationRequest,
@@ -461,13 +456,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
   const host = yield* ProviderHost.ProviderHost;
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
   const { continuationRequests } = options;
-  // The guard must describe the captured spawn environment, not later settings changes.
-  const environmentMode = options.settings.environmentMode;
-  const { environment, executable } = yield* resolvePiStartup(
-    { ...options.settings, environmentMode },
-    options.environment,
-    options.environmentSecrets,
-  );
 
   const protocolError = (detail: string, payload?: unknown) =>
     new ProviderAdapter.ProviderAdapterProtocolError({
@@ -476,33 +464,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       ...(payload === undefined ? {} : { payload }),
     });
 
-  const capabilities = {
-    ...PiProviderCapabilitiesV2,
-    cleanStart: {
-      environmentMode,
-      supportsConstraint: true as const,
-    },
-  };
-  const assertCleanStart = (
-    policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
-    selection: ModelSelection,
-  ) => {
-    const constraint = policy.cleanProviderConstraint;
-    return constraint === undefined ||
-      (constraint.instanceId === options.instanceId &&
-        selection.instanceId === constraint.instanceId &&
-        constraint.driver === PI_PROVIDER &&
-        constraint.environmentMode === "clean" &&
-        environmentMode === "clean")
-      ? Effect.void
-      : protocolError("The clean provider start constraint is not satisfied.");
-  };
-
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: options.instanceId,
     driver: PI_PROVIDER,
     getCapabilities: Effect.fn("PiAdapter.getCapabilities")(function () {
-      return Effect.succeed(capabilities);
+      return Effect.succeed(PiProviderCapabilitiesV2);
     }),
     planSelectionTransition: Effect.fn("PiAdapter.planSelectionTransition")(function () {
       return Effect.succeed(turnScopedSelectionTransition());
@@ -510,7 +476,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
     openSession: Effect.fn("PiAdapterV2.openSession")(function* (
       input: ProviderAdapter.ProviderAdapterV2OpenSessionInput,
     ) {
-      yield* assertCleanStart(input.runtimePolicy, input.modelSelection);
       const scope = yield* Effect.scope;
       const cwd = input.runtimePolicy.cwd ?? host.paths.cwd;
       const mcpSession = yield* mcpSessions.read(input.threadId);
@@ -561,15 +526,15 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           const launch = buildPiRpcLaunch({
             launchArgs: resolvedLaunchArgs.args,
             // PortScanner.AGENT_THREAD_ENV, as a literal because this package cannot reach apps/server.
-            environment: { ...environment, T3CODE_THREAD_ID: input.threadId },
+            environment: { ...options.environment, T3CODE_THREAD_ID: input.threadId },
             mcpSession,
             extensionPath,
             sessionPath,
             runtimeMode: input.runtimePolicy.runtimeMode,
           });
           const scopedLaunch = yield* agentScope.wrap({
-            command: executable.command,
-            args: [...executable.args, ...launch.args],
+            command: options.settings.binaryPath || "pi",
+            args: launch.args,
             name: "pi",
             threadId: input.threadId,
             env: launch.env,
@@ -625,7 +590,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         status: "ready",
         cwd,
         model: input.modelSelection.model,
-        capabilities,
+        capabilities: PiProviderCapabilitiesV2,
         extensionStatuses: [],
         createdAt: now,
         updatedAt: now,
@@ -2878,7 +2843,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       ) {
         const forkLaunch = buildPiRpcLaunch({
           launchArgs: resolvedLaunchArgs.args,
-          environment,
+          environment: options.environment,
           mcpSession: undefined,
           extensionPath: undefined,
           shortLived: true,
@@ -2888,8 +2853,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         return yield* Effect.scoped(
           Effect.gen(function* () {
             const forkConnection = yield* makePiRpcConnection({
-              command: executable.command,
-              args: [...executable.args, ...forkLaunch.args, "--fork", sourceFile],
+              command: options.settings.binaryPath || "pi",
+              args: [...forkLaunch.args, "--fork", sourceFile],
               cwd,
               env: forkLaunch.env,
             });
@@ -3283,7 +3248,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           }),
         startTurn: Effect.fn("PiAdapter.startTurn")(
           function* (turnInput) {
-            yield* assertCleanStart(turnInput.runtimePolicy, turnInput.modelSelection);
             if (registrationInProgress)
               return yield* protocolError("Cannot start a Pi turn during registration");
             if (rollbackBarrier !== null)
@@ -4242,7 +4206,6 @@ export const PiAdapterV2Driver: ProviderAdapterDriver<PiSettings, PiAdapterV2Dri
         instanceId: input.instanceId,
         settings: { ...input.config, enabled: input.enabled },
         environment: yield* mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
-        environmentSecrets: input.environmentSecrets,
         continuationRequests,
       });
     },

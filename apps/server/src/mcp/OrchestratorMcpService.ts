@@ -2556,15 +2556,6 @@ const make = Effect.gen(function* () {
       const { parent, limits } = yield* loadCaller(scope, []);
       const providers = yield* loadProviders;
       const orchestrationCapableInstanceIds = yield* loadOrchestrationCapableInstanceIds();
-      const cleanStarts = new Map(
-        yield* Effect.forEach([...orchestrationCapableInstanceIds], (instanceId) =>
-          providerAdapters.get(instanceId).pipe(
-            Effect.flatMap((adapter) => adapter.getCapabilities()),
-            Effect.map((capabilities) => [instanceId, capabilities.cleanStart] as const),
-            Effect.orElseSucceed(() => [instanceId, undefined] as const),
-          ),
-        ),
-      );
       const settings = yield* serverSettings.getSettings.pipe(
         Effect.mapError(() => failure("orchestration_error", "Unable to read server settings.")),
       );
@@ -2612,9 +2603,6 @@ const make = Effect.gen(function* () {
           return {
             providerInstanceId: provider.instanceId,
             driverKind: provider.driver,
-            ...(cleanStarts.get(provider.instanceId) === undefined
-              ? {}
-              : { cleanStart: cleanStarts.get(provider.instanceId) }),
             displayName: provider.displayName ?? null,
             models: listed.map((model) => {
               const options = model.capabilities?.optionDescriptors ?? [];

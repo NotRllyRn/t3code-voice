@@ -25,6 +25,7 @@ import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/process";
 import * as TestClock from "effect/testing/TestClock";
 
@@ -46,6 +47,10 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as ProjectHandlers from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
+
+const decodeLaunchInput = Schema.decodeUnknownEffect(
+  ProjectToolkit.tools.t3_thread_launch.parametersSchema,
+);
 
 const clientLaunchHarness = (input: {
   readonly runtimeModeCeiling: RuntimeMode;
@@ -233,6 +238,12 @@ it.effect(
         .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
       expect(launched[0]?.enforceNoSetupScripts).toBe(true);
       expect(result.at(-1)?.result).toMatchObject({ enforceNoSetupScripts: true });
+      const retired = yield* decodeLaunchInput({
+        projectId,
+        title: "Retired",
+        cleanProviderConstraint: { instanceId: "old-pi", driver: "pi", environmentMode: "clean" },
+      }).pipe(Effect.result);
+      expect(retired._tag).toBe("Failure");
     }),
 );
 

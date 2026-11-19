@@ -12,7 +12,6 @@ import type { PiSettings } from "../settings.ts";
 
 import { makePiRpcConnection, piRecordField, piRecordString, resolvePiModelSlug } from "./rpc.ts";
 import { buildPiRpcLaunch, resolvePiLaunchArgs } from "./mcpInjection.ts";
-import type { PiExecutable } from "./environment.ts";
 import * as TextGenerationOperations from "@t3tools/provider-core/server/textGenerationOperations";
 import { isPiThinkingLevel } from "./modelCapabilities.ts";
 import { MINIMUM_PI_VERSION, runPiVersionCommand } from "./status.ts";
@@ -33,7 +32,6 @@ const piTurnErrorDetail = (errorMessage: string | undefined) => {
 export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* (
   piSettings: PiSettings,
   environment: NodeJS.ProcessEnv = process.env,
-  executable: PiExecutable = { command: piSettings.binaryPath || "pi", args: [] },
 ) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
@@ -42,7 +40,7 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
       const { operation, cwd, prompt, modelSelection } = request;
       const thinking = getModelSelectionStringOptionValue(modelSelection, "thinking");
       if (thinking !== undefined && isPiThinkingLevel(thinking)) {
-        const output = yield* runPiVersionCommand(executable, environment, cwd).pipe(
+        const output = yield* runPiVersionCommand(piSettings, environment, cwd).pipe(
           Effect.timeoutOption(4_000),
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         );
@@ -77,8 +75,8 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
         disableTools: true,
       });
       const connection = yield* makePiRpcConnection({
-        command: executable.command,
-        args: [...executable.args, ...launch.args],
+        command: piSettings.binaryPath || "pi",
+        args: launch.args,
         cwd,
         env: launch.env,
       }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));

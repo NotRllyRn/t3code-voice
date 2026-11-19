@@ -31,7 +31,6 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { buildUnavailableProviderSnapshot } from "./unavailableProviderSnapshot.ts";
 import * as ProviderInstanceRegistryMutator from "./ProviderInstanceRegistryMutator.ts";
 import type { AnyProviderDriver, ProviderInstance } from "@t3tools/provider-core/server/driver";
-import { recordResolvedEnvironmentSecrets } from "@t3tools/provider-core/server/instanceEnvironment";
 
 export class ProviderInstanceRegistry extends Context.Service<
   ProviderInstanceRegistry,
@@ -49,7 +48,6 @@ export class ProviderInstanceRegistry extends Context.Service<
 
 interface InstanceSecrets {
   readonly environment: ResolvedProviderInstanceEnvironment;
-  readonly referencedEnvironment: ReadonlyArray<{ readonly name: string; readonly value: string }>;
   readonly config: ReadonlyArray<SettingsSecretSlot & { readonly value: string }>;
 }
 
@@ -103,21 +101,6 @@ const isStoredEnvironmentSecret = (variable: ProviderInstanceEnvironment[number]
 
 const hasStoredEnvironmentSecret = (entry: ProviderInstanceConfig) =>
   entry.environment?.some(isStoredEnvironmentSecret) === true;
-
-const environmentSecretProvenance = (
-  entry: ProviderInstanceConfig,
-  environment: ResolvedProviderInstanceEnvironment,
-) => {
-  const variables = entry.environment ?? [];
-  return environment.flatMap((variable, index) => {
-    const source = variables[index];
-    return source !== undefined &&
-      (typeof source.value !== "string" || isStoredEnvironmentSecret(source)) &&
-      variables.findLastIndex(({ name }) => name === variable.name) === index
-      ? [{ name: variable.name, value: variable.value }]
-      : [];
-  });
-};
 
 const readStoredEnvironmentSecrets = Effect.fn(
   "ProviderInstanceRegistry.readStoredEnvironmentSecrets",
@@ -197,7 +180,6 @@ const readInstanceSecrets = Effect.fn("ProviderInstanceRegistry.readInstanceSecr
   const stored = yield* readStoredEnvironmentSecrets(instanceId, entry, environment);
   const secrets: InstanceSecrets = {
     environment: stored.environment,
-    referencedEnvironment: environmentSecretProvenance(entry, stored.environment),
     config,
   };
   return {
@@ -233,7 +215,6 @@ const carryCheckedSecret = Effect.fn("ProviderInstanceRegistry.carryCheckedSecre
   return {
     secrets: {
       environment: stored.environment,
-      referencedEnvironment: environmentSecretProvenance(entry, stored.environment),
       config: current.config.map((slot) =>
         replacedSlots.some(({ field, key }) => field === slot.field && key === slot.key)
           ? { ...slot, value }
@@ -295,7 +276,15 @@ const buildEntry = Effect.fn("ProviderInstanceRegistry.buildEntry")(function* <R
     deferSecrets,
     carriedSecrets,
   } = input;
-  const blocked = input.blockedReason(entry.driver);
+  const retiredCleanPi =
+    entry.driver === "pi" &&
+    typeof entry.config === "object" &&
+    entry.config !== null &&
+    "environmentMode" in entry.config &&
+    entry.config.environmentMode === "clean";
+  const blocked = retiredCleanPi
+    ? "Clean Pi automation is retired. Configure a new ordinary provider instance explicitly."
+    : input.blockedReason(entry.driver);
   if (blocked !== undefined) {
     return {
       kind: "unavailable" as const,
@@ -365,7 +354,6 @@ const buildEntry = Effect.fn("ProviderInstanceRegistry.buildEntry")(function* <R
       : {
           secrets: {
             environment: withoutSecretReferences(entry.environment ?? []),
-            referencedEnvironment: [],
             config: [],
           },
           unreadable: [],
@@ -394,7 +382,6 @@ const buildEntry = Effect.fn("ProviderInstanceRegistry.buildEntry")(function* <R
       displayName: entry.displayName,
       accentColor: entry.accentColor,
       environment: secrets.environment,
-      environmentSecrets: recordResolvedEnvironmentSecrets(secrets.referencedEnvironment),
       enabled,
       config:
         secrets.config.length === 0

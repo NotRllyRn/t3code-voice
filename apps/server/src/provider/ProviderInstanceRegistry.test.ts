@@ -25,7 +25,6 @@ import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderL
 import { OpenCodeSettings } from "@t3tools/provider-opencode/settings";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { readResolvedEnvironmentSecrets } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -389,6 +388,34 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
       expect(unavailable?.instanceId).toBe(instanceId);
       expect(unavailable?.availability).toBe("unavailable");
       expect(unavailable?.unavailableReason).toBe(reason);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("parks retired clean Pi settings without starting a driver", () =>
+    Effect.gen(function* () {
+      let starts = 0;
+      const pi = ProviderDriverKind.make("pi");
+      const instanceId = ProviderInstanceId.make("retired-pi");
+      const fake: AnyProviderDriver = {
+        driverKind: pi,
+        metadata: { displayName: "Pi" },
+        configSchema: Schema.Unknown,
+        defaultConfig: () => ({}),
+        create: () =>
+          Effect.sync(() => {
+            starts++;
+            return { instanceId, enabled: true } as ProviderInstance;
+          }),
+      };
+      const { registry } = yield* makeProviderInstanceRegistry({
+        drivers: [fake],
+        configMap: {
+          [instanceId]: { driver: pi, enabled: true, config: { environmentMode: "clean" } },
+        },
+      });
+      expect(starts).toBe(0);
+      expect(yield* registry.getInstance(instanceId)).toBeUndefined();
+      expect((yield* registry.listUnavailable)[0]?.unavailableReason).toContain("retired");
     }).pipe(Effect.provide(layerTest)),
   );
 
@@ -936,8 +963,6 @@ describe("ProviderInstanceRegistry secret environment", () => {
     const storeFailures = new Set<string>();
     const created: Array<ResolvedProviderInstanceEnvironment> = [];
     const configs: Array<unknown> = [];
-    const resolvedSecrets: Array<ReadonlyArray<{ readonly name: string; readonly value: string }>> =
-      [];
     const driver: AnyProviderDriver = {
       driverKind,
       metadata: { displayName: "Fake" },
@@ -947,7 +972,6 @@ describe("ProviderInstanceRegistry secret environment", () => {
         Effect.sync(() => {
           created.push(input.environment);
           configs.push(input.config);
-          resolvedSecrets.push(readResolvedEnvironmentSecrets(input.environmentSecrets));
           return { instanceId: input.instanceId, enabled: input.enabled } as ProviderInstance;
         }),
     };
@@ -1017,7 +1041,6 @@ describe("ProviderInstanceRegistry secret environment", () => {
       storeFailures,
       created,
       configs,
-      resolvedSecrets,
       configMap,
       make,
       makeGated,
@@ -1052,21 +1075,13 @@ describe("ProviderInstanceRegistry secret environment", () => {
           fixture.storeFailures.clear();
           fixture.stored.set(storedSlot, "stored-recovered");
           yield* mutator.reloadSecrets(instanceId);
-          expect(fixture.resolvedSecrets.at(-1)).toEqual([
-            { name: "OPENAI_API_KEY", value: "stored-recovered" },
-          ]);
+          expect(fixture.created.at(-1)?.[0]?.value).toBe("stored-recovered");
           return;
         }
         expect(fixture.created.at(-1)?.[0]?.value).toBe("stored-current");
-        expect(fixture.resolvedSecrets.at(-1)).toEqual([
-          { name: "OPENAI_API_KEY", value: "stored-current" },
-        ]);
         fixture.stored.set(storedSlot, "stored-rotated");
         yield* mutator.reloadSecrets(instanceId);
         expect(fixture.created.at(-1)?.[0]?.value).toBe("stored-rotated");
-        expect(fixture.resolvedSecrets.at(-1)).toEqual([
-          { name: "OPENAI_API_KEY", value: "stored-rotated" },
-        ]);
         fixture.storeFailures.add(storedSlot);
         yield* mutator.reloadSecrets(instanceId);
         expect(yield* registry.getInstance(instanceId)).toBeUndefined();
@@ -1081,14 +1096,13 @@ describe("ProviderInstanceRegistry secret environment", () => {
     { name: "OPENAI_API_KEY", value: "literal", sensitive: false },
     { ...storedVariable, name: "OTHER_API_KEY" },
   ])(
-    "does not grant store provenance from a literal or sensitive flag alone ($name)",
+    "does not read a stored credential from a literal or sensitive flag alone ($name)",
     (variable) => {
       const fixture = setup({}, Schema.Unknown, {}, [variable]);
       fixture.stored.set(storedSlot, "stored-current");
       return Effect.gen(function* () {
         yield* fixture.makeGated;
         expect(fixture.storeReads).toEqual([]);
-        expect(fixture.resolvedSecrets).toEqual([[]]);
       });
     },
   );
@@ -1104,11 +1118,6 @@ describe("ProviderInstanceRegistry secret environment", () => {
       fixture.stored.set(storedSlot, "stored-current");
       return Effect.gen(function* () {
         const { registry, mutator } = yield* fixture.make;
-        const expectedSecrets = (value: string) => [
-          ...(!storedFirst ? [{ name: "OPENAI_API_KEY", value }] : []),
-          { name: "EXTERNAL_KEY", value: "external-current" },
-        ];
-        expect(fixture.resolvedSecrets.at(-1)).toEqual(expectedSecrets("stored-current"));
         fixture.stored.set(storedSlot, "stored-checked-current");
         yield* mutator.applySecret(secret, "external-current");
         expect(
@@ -1121,7 +1130,6 @@ describe("ProviderInstanceRegistry secret environment", () => {
             ? ["stored-checked-current", "literal-override"]
             : ["literal-override", "stored-checked-current"],
         );
-        expect(fixture.resolvedSecrets.at(-1)).toEqual(expectedSecrets("stored-checked-current"));
         fixture.storeFailures.add(storedSlot);
         yield* mutator.applySecret(secret, "external-checked-new");
         expect(yield* registry.getInstance(instanceId)).toBeUndefined();
@@ -1136,7 +1144,6 @@ describe("ProviderInstanceRegistry secret environment", () => {
       const { registry } = yield* fixture.make;
 
       expect(yield* registry.getInstance(instanceId)).toBeDefined();
-      expect(fixture.resolvedSecrets).toEqual([[{ name: "OPENAI_API_KEY", value: "sk-live" }]]);
       expect(fixture.created).toEqual([
         [
           { name: "OPENAI_API_KEY", value: "sk-live", sensitive: true },
@@ -1159,9 +1166,6 @@ describe("ProviderInstanceRegistry secret environment", () => {
       );
       return Effect.gen(function* () {
         const { mutator } = yield* fixture.make;
-        expect(fixture.resolvedSecrets).toEqual([
-          referenceFirst ? [] : [{ name: "OPENAI_API_KEY", value: "initial-reference" }],
-        ]);
         const reads = fixture.reads.length;
         yield* mutator.applySecret(secret, "checked-rotation");
         expect(fixture.reads).toHaveLength(reads);
@@ -1174,14 +1178,8 @@ describe("ProviderInstanceRegistry secret environment", () => {
         ).toEqual({
           OPENAI_API_KEY: expected.at(-1),
         });
-        expect(fixture.resolvedSecrets.at(-1)).toEqual(
-          referenceFirst ? [] : [{ name: "OPENAI_API_KEY", value: "checked-rotation" }],
-        );
         fixture.vault.set(secret.reference, "resolver-rotation");
         yield* mutator.reloadSecrets(instanceId);
-        expect(fixture.resolvedSecrets.at(-1)).toEqual(
-          referenceFirst ? [] : [{ name: "OPENAI_API_KEY", value: "resolver-rotation" }],
-        );
         expect(fixture.created.at(-1)?.map(({ value }) => value)).toEqual(
           referenceFirst
             ? ["resolver-rotation", "literal-override"]
@@ -1200,9 +1198,6 @@ describe("ProviderInstanceRegistry secret environment", () => {
       yield* mutator.applySecret(secret, "initial-checked-value");
       expect(fixture.reads).toHaveLength(reads);
       expect(fixture.created.at(-1)?.[0]?.value).toBe("initial-checked-value");
-      expect(fixture.resolvedSecrets).toEqual([
-        [{ name: "OPENAI_API_KEY", value: "initial-checked-value" }],
-      ]);
     });
   });
 

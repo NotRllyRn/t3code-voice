@@ -691,6 +691,20 @@ export const layer: Layer.Layer<
         });
         return;
       }
+      if (
+        recoveryResult.success.retiredCleanAutomation === true ||
+        recoveryResult.success.runs.some(
+          (saved) => saved.workspacePreparation?.cleanProviderConstraint !== undefined,
+        )
+      ) {
+        yield* settleStartFailure({
+          signal: "retired-clean-provider-automation",
+          title: "Automation thread retired",
+          error: new Error("Clean-provider automation is retired."),
+          message: "Clean-provider automation is retired. Start a new ordinary thread explicitly.",
+        });
+        return;
+      }
       const inheritedBackgroundTurnItems = selectInheritedBackgroundItems(recoveryResult.success);
       const providerSessionId = providerThread.providerSessionId;
       const runControls = makeRunControls({
@@ -721,14 +735,7 @@ export const layer: Layer.Layer<
         });
         return;
       }
-      const resolvedRuntimePolicy = {
-        ...resolvedPolicy.success,
-        ...(run.workspacePreparation?.cleanProviderConstraint === undefined
-          ? {}
-          : {
-              cleanProviderConstraint: run.workspacePreparation.cleanProviderConstraint,
-            }),
-      };
+      const resolvedRuntimePolicy = resolvedPolicy.success;
       if (!(yield* isCurrentAttemptInStatus("starting"))) return;
       const existingSessionProjection = projection.providerSessions.find(
         (candidate) => candidate.id === providerSessionId,

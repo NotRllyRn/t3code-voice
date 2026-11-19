@@ -5,7 +5,6 @@ import {
   type ServerProviderModel,
 } from "@t3tools/contracts";
 import type { PiSettings } from "../settings.ts";
-import type { PiExecutable } from "./environment.ts";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { compareSemverVersions } from "@t3tools/shared/semver";
@@ -139,7 +138,7 @@ function parseDiscoveredModels(
 }
 
 const makePiDiscoveryConnection = Effect.fnUntraced(function* (
-  executable: PiExecutable,
+  piSettings: PiSettings,
   environment: NodeJS.ProcessEnv,
   launchArgs: ReadonlyArray<string>,
   cwd?: string,
@@ -156,8 +155,8 @@ const makePiDiscoveryConnection = Effect.fnUntraced(function* (
     shortLived: true,
   });
   const connection = yield* makePiRpcConnection({
-    command: executable.command,
-    args: [...executable.args, ...launch.args],
+    command: piSettings.binaryPath || "pi",
+    args: launch.args,
     cwd,
     env: launch.env,
   });
@@ -184,13 +183,13 @@ const PI_LOGGED_RPC_OPERATIONS = new Set([
 const PI_PROJECT_TRUST_ARGUMENTS = new Set(["--approve", "-a", "--no-approve", "-na"]);
 
 const readPiInventory = Effect.fn("PiProviderStatus.readPiInventory")(function* (
-  executable: PiExecutable,
+  piSettings: PiSettings,
   environment: NodeJS.ProcessEnv,
   launchArgs: ReadonlyArray<string>,
   timeoutMs: number,
   cwd?: string,
 ) {
-  const connection = yield* makePiDiscoveryConnection(executable, environment, launchArgs, cwd);
+  const connection = yield* makePiDiscoveryConnection(piSettings, environment, launchArgs, cwd);
   const stateData = yield* connection.request({ type: "get_state" }, timeoutMs);
   const modelsData = yield* connection.request({ type: "get_available_models" }, timeoutMs);
   const commandsData = yield* connection
@@ -204,13 +203,13 @@ const readPiInventory = Effect.fn("PiProviderStatus.readPiInventory")(function* 
 const discoverPiTextGenerationModelSlugs = Effect.fn(
   "PiProviderStatus.discoverPiTextGenerationModelSlugs",
 )(function* (
-  executable: PiExecutable,
+  piSettings: PiSettings,
   environment: NodeJS.ProcessEnv,
   launchArgs: ReadonlyArray<string>,
   cwd?: string,
 ) {
   const connection = yield* makePiDiscoveryConnection(
-    executable,
+    piSettings,
     environment,
     launchArgs,
     cwd,
@@ -222,7 +221,7 @@ const discoverPiTextGenerationModelSlugs = Effect.fn(
 }, Effect.scoped);
 
 const discoverPiViaRpc = Effect.fn("PiProviderStatus.discoverPiViaRpc")(function* (
-  executable: PiExecutable,
+  piSettings: PiSettings,
   environment: NodeJS.ProcessEnv,
   launchArgs: ReadonlyArray<string>,
   cwd?: string,
@@ -231,7 +230,7 @@ const discoverPiViaRpc = Effect.fn("PiProviderStatus.discoverPiViaRpc")(function
   // This optional probe must finish before the normal discovery deadline so
   // it cannot discard an otherwise usable catalog and authentication state.
   const textGenerationModelSlugsFiber = yield* discoverPiTextGenerationModelSlugs(
-    executable,
+    piSettings,
     environment,
     launchArgs,
     cwd,
@@ -250,7 +249,7 @@ const discoverPiViaRpc = Effect.fn("PiProviderStatus.discoverPiViaRpc")(function
     Effect.forkScoped,
   );
   const { stateData, modelsData, commandsData } = yield* readPiInventory(
-    executable,
+    piSettings,
     environment,
     launchArgs,
     timeoutMs,
@@ -265,7 +264,7 @@ const discoverPiViaRpc = Effect.fn("PiProviderStatus.discoverPiViaRpc")(function
         (error.operation === "read" || error.operation === "exit") &&
         !launchArgs.some((arg) => PI_PROJECT_TRUST_ARGUMENTS.has(arg)),
       () =>
-        readPiInventory(executable, environment, [...launchArgs, "--no-approve"], timeoutMs, cwd),
+        readPiInventory(piSettings, environment, [...launchArgs, "--no-approve"], timeoutMs, cwd),
     ),
   );
   const discoveredModels = yield* Effect.fromResult(parseDiscoveredModels(modelsData, stateData));
@@ -299,18 +298,13 @@ const discoverPiViaRpc = Effect.fn("PiProviderStatus.discoverPiViaRpc")(function
 }, Effect.scoped);
 
 export const discoverPiCommandsForCwd = Effect.fn("discoverPiCommandsForCwd")(
-  function* (
-    piSettings: PiSettings,
-    environment: NodeJS.ProcessEnv,
-    cwd: string,
-    executable: PiExecutable = { command: piSettings.binaryPath || "pi", args: [] },
-  ) {
+  function* (piSettings: PiSettings, environment: NodeJS.ProcessEnv, cwd: string) {
     const launchArgs = resolvePiLaunchArgs(piSettings.launchArgs);
     if (!launchArgs.ok) {
       return yield* new PiRpcError({ operation: "launch", detail: launchArgs.message });
     }
     const connection = yield* makePiDiscoveryConnection(
-      executable,
+      piSettings,
       providerProbeEnvironment(environment),
       launchArgs.args,
       cwd,
@@ -336,12 +330,12 @@ export const discoverPiCommandsForCwd = Effect.fn("discoverPiCommandsForCwd")(
 );
 
 export const runPiVersionCommand = Effect.fn("PiProviderStatus.runPiVersionCommand")(function* (
-  executable: PiExecutable,
+  piSettings: PiSettings,
   environment: NodeJS.ProcessEnv,
   cwd?: string,
 ) {
-  const command = executable.command;
-  const spawnCommand = yield* resolveSpawnCommand(command, [...executable.args, "--version"], {
+  const command = piSettings.binaryPath || "pi";
+  const spawnCommand = yield* resolveSpawnCommand(command, ["--version"], {
     env: environment,
   });
   return yield* spawnAndCollect(
@@ -362,7 +356,7 @@ export const runPiVersionCommand = Effect.fn("PiProviderStatus.runPiVersionComma
  */
 const describeUnavailablePiModel = Effect.fn("PiProviderStatus.describeUnavailablePiModel")(
   function* (
-    executable: PiExecutable,
+    piSettings: PiSettings,
     environment: NodeJS.ProcessEnv,
     launchArgs: ReadonlyArray<string>,
     model: { readonly provider: string; readonly id: string },
@@ -372,10 +366,10 @@ const describeUnavailablePiModel = Effect.fn("PiProviderStatus.describeUnavailab
     if (launchArgs.includes("--api-key")) {
       return unavailable;
     }
-    const command = executable.command;
+    const command = piSettings.binaryPath || "pi";
     const output = yield* resolveSpawnCommand(
       command,
-      [...executable.args, "auth", "check", "--provider", model.provider, "--json", "--no-refresh"],
+      ["auth", "check", "--provider", model.provider, "--json", "--no-refresh"],
       { env: environment },
     ).pipe(
       Effect.flatMap((spawnCommand) =>
@@ -439,7 +433,6 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   piSettings: PiSettings,
   environment: NodeJS.ProcessEnv = process.env,
   cwd?: string,
-  executable: PiExecutable = { command: piSettings.binaryPath || "pi", args: [] },
 ): Effect.fn.Return<ServerProviderDraft, never, ChildProcessSpawner.ChildProcessSpawner> {
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const fallbackModels = piModelsFromSettings(piSettings.customModels);
@@ -461,7 +454,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   }
 
   const probeEnvironment = providerProbeEnvironment(environment);
-  const versionResult = yield* runPiVersionCommand(executable, probeEnvironment, cwd).pipe(
+  const versionResult = yield* runPiVersionCommand(piSettings, probeEnvironment).pipe(
     Effect.timeoutOption(
       resolveProviderProbeTimeoutMs("pi", VERSION_PROBE_TIMEOUT_MS, environment),
     ),
@@ -572,7 +565,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   }
 
   const discoveryExit = yield* discoverPiViaRpc(
-    executable,
+    piSettings,
     probeEnvironment,
     resolvedLaunchArgs.args,
     cwd,
@@ -629,7 +622,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     : discovery.unavailableActiveModel === undefined
       ? undefined
       : yield* describeUnavailablePiModel(
-          executable,
+          piSettings,
           probeEnvironment,
           resolvedLaunchArgs.args,
           discovery.unavailableActiveModel,

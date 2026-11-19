@@ -394,6 +394,7 @@ export const OrchestrationV2IdentityCapabilities = Schema.Struct({
 });
 export type OrchestrationV2IdentityCapabilities = typeof OrchestrationV2IdentityCapabilities.Type;
 
+// Retained only to decode and reject retired automation in persisted history.
 export const ProviderCleanStartConstraint = Schema.Struct({
   instanceId: ProviderInstanceId,
   driver: Schema.Literal("pi"),
@@ -401,14 +402,7 @@ export const ProviderCleanStartConstraint = Schema.Struct({
 });
 export type ProviderCleanStartConstraint = typeof ProviderCleanStartConstraint.Type;
 
-export const ProviderCleanStartCapability = Schema.Struct({
-  environmentMode: Schema.Literals(["inherit", "clean"]),
-  supportsConstraint: Schema.Literal(true),
-});
-export type ProviderCleanStartCapability = typeof ProviderCleanStartCapability.Type;
-
 export const OrchestrationV2ProviderCapabilities = Schema.Struct({
-  cleanStart: Schema.optional(ProviderCleanStartCapability),
   sessions: OrchestrationV2SessionCapabilities,
   threads: OrchestrationV2ThreadCapabilities,
   turns: OrchestrationV2TurnCapabilities,

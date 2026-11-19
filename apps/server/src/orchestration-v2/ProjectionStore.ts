@@ -328,7 +328,7 @@ export type ProjectionRuntimeRecoveryState = Pick<
   | "runtimeRequests"
   | "messages"
   | "turnItems"
->;
+> & { readonly retiredCleanAutomation?: boolean };
 
 export type ProjectionPendingUserInputs = Pick<
   OrchestrationV2ThreadProjection,
@@ -5279,9 +5279,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
     const getRuntimeRecoveryProjection: ProjectionStoreV2Shape["getRuntimeRecoveryProjection"] =
       Effect.fn("ProjectionStore.getRuntimeRecoveryProjection")(
         function* (threadId) {
-          const threadRows = yield* sql<PayloadRow>`
-            SELECT payload_json FROM orchestration_v2_projection_threads
-            WHERE thread_id = ${threadId}
+          const threadRows = yield* sql<PayloadRow & { readonly retired_clean_automation: number }>`
+            SELECT payload_json, COALESCE((
+              SELECT json_extract(payload_json, '$.cleanProviderConstraint') IS NOT NULL
+              FROM orchestration_events
+              WHERE aggregate_kind = 'thread' AND stream_id = ${threadId}
+                AND application_event_version = 2 AND event_type = 'thread.created'
+              ORDER BY sequence ASC LIMIT 1
+            ), 0) AS retired_clean_automation
+            FROM orchestration_v2_projection_threads WHERE thread_id = ${threadId}
           `;
           if (threadRows[0] === undefined) {
             return yield* new ProjectionStoreThreadNotFoundError({ threadId });
@@ -5294,6 +5300,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               WHERE run.thread_id = ${threadId}
                 AND (
                   run.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+                  OR json_extract(run.payload_json, '$.workspacePreparation.cleanProviderConstraint') IS NOT NULL
                   OR run.run_id = (
                     SELECT latest.run_id FROM orchestration_v2_projection_runs AS latest
                     WHERE latest.thread_id = ${threadId}
@@ -5598,6 +5605,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             decodeRows(decodeTurnItemPayload, threadId)(readRows("turnItems")),
           ]);
           return {
+            retiredCleanAutomation: threadRows[0].retired_clean_automation === 1,
             thread,
             runs,
             attempts,

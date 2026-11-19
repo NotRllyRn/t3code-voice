@@ -61,7 +61,6 @@ import type * as Orchestrator from "./Orchestrator.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
 import { DispatchModeLimit } from "./DispatchModeLimit.ts";
-import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 
 // The agent waits for its branch name; a rate-limited provider would hold it for minutes.
@@ -127,7 +126,6 @@ export interface ThreadLaunchResult {
   /** The launch's last write (the initial message, else the thread claim) was accepted before this call. */
   readonly resumed: boolean;
   readonly enforceNoSetupScripts?: true;
-  readonly cleanProviderConstraint?: ProviderCleanStartConstraint;
   readonly sequence?: number;
 }
 
@@ -251,7 +249,6 @@ const make = Effect.gen(function* () {
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
   const setupScripts = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
-  const providerAdapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const textGeneration = yield* TextGeneration.TextGeneration;
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
@@ -1218,7 +1215,7 @@ const make = Effect.gen(function* () {
               cleanProviderConstraint: request.workspaceStrategy.cleanProviderConstraint,
             }
           : request.workspaceStrategy;
-      let input: ThreadLaunchInput = {
+      const input: ThreadLaunchInput = {
         ...request,
         workspaceStrategy: {
           ...normalizedStrategy,
@@ -1228,35 +1225,12 @@ const make = Effect.gen(function* () {
             : { cleanProviderConstraint: request.cleanProviderConstraint }),
         },
       };
-      let constraint = input.workspaceStrategy.cleanProviderConstraint;
+      const constraint = input.workspaceStrategy.cleanProviderConstraint;
       if (constraint !== undefined) {
-        if (
-          input.reuseExistingThread === true ||
-          input.initialMessage === undefined ||
-          input.modelSelection.instanceId !== constraint.instanceId
-        ) {
-          return yield* mapError(
-            input,
-            "resolve-project",
-          )("A clean provider launch requires an explicit matching instance and initial message.");
-        }
-        const adapter = yield* providerAdapters
-          .get(constraint.instanceId)
-          .pipe(Effect.mapError(mapError(input, "resolve-project")));
-        const capabilities = yield* adapter
-          .getCapabilities()
-          .pipe(Effect.mapError(mapError(input, "resolve-project")));
-        if (
-          adapter.instanceId !== constraint.instanceId ||
-          adapter.driver !== constraint.driver ||
-          capabilities.cleanStart?.supportsConstraint !== true ||
-          capabilities.cleanStart.environmentMode !== constraint.environmentMode
-        ) {
-          return yield* mapError(
-            input,
-            "resolve-project",
-          )("The clean provider start constraint is not satisfied.");
-        }
+        return yield* mapError(
+          input,
+          "resolve-project",
+        )("Clean-provider automation is retired. Start a new ordinary thread explicitly.");
       }
       yield* assertNoScripts(input);
       yield* ProjectCloneTracker.rejectCommandsDuringClone(cloneTracker, {
@@ -1321,7 +1295,7 @@ const make = Effect.gen(function* () {
           yield* validateReusableThread(input, candidateThreadId);
         }
 
-        let workspaceStrategy: ThreadLaunchWorkspaceStrategy =
+        const workspaceStrategy: ThreadLaunchWorkspaceStrategy =
           input.workspaceStrategy.type === "root" && Option.isNone(launchReceipt)
             ? Option.match(
                 yield* managedFolders
@@ -1336,7 +1310,6 @@ const make = Effect.gen(function* () {
                   onSome: (worktreePath) => ({
                     type: "existing_worktree",
                     worktreePath,
-                    cleanProviderConstraint: input.workspaceStrategy.cleanProviderConstraint,
                     ...(input.workspaceStrategy.enforceNoSetupScripts === true
                       ? { enforceNoSetupScripts: true }
                       : {}),
@@ -1377,7 +1350,6 @@ const make = Effect.gen(function* () {
               })
             : threads.dispatch({
                 type: "thread.create",
-                cleanProviderConstraint: constraint,
                 commandId: input.commandId,
                 threadId: candidateThreadId,
                 projectId: input.projectId,
@@ -1430,34 +1402,11 @@ const make = Effect.gen(function* () {
             ? claim.value.event.payload.cleanProviderConstraint
             : undefined;
         if (claimConstraint !== undefined) {
-          if (
-            input.modelSelection.instanceId !== claimConstraint.instanceId ||
-            (constraint !== undefined &&
-              (constraint.instanceId !== claimConstraint.instanceId ||
-                constraint.driver !== claimConstraint.driver ||
-                constraint.environmentMode !== claimConstraint.environmentMode))
-          ) {
-            return yield* mapError(
-              input,
-              "resolve-project",
-              threadId,
-            )("The previous launch has a different clean provider start constraint.");
-          }
-          constraint = claimConstraint;
-          workspaceStrategy = { ...workspaceStrategy, cleanProviderConstraint: claimConstraint };
-          input = {
-            ...input,
-            workspaceStrategy: {
-              ...input.workspaceStrategy,
-              cleanProviderConstraint: claimConstraint,
-            },
-          };
-        } else if (constraint !== undefined) {
           return yield* mapError(
             input,
             "resolve-project",
             threadId,
-          )("The previous launch did not durably acknowledge the clean provider start constraint.");
+          )("Clean-provider automation is retired. Start a new ordinary thread explicitly.");
         }
         if (project.id !== input.projectId) {
           return yield* mapError(input, "resolve-project", threadId)("Project identity changed.");
@@ -1476,15 +1425,18 @@ const make = Effect.gen(function* () {
             const claimedRun = claimed.storedEvents.find(
               (stored) => stored.event.type === "run.created",
             );
-            const priorRun = claimedRun !== undefined
-              ? Option.some(claimedRun)
-              : Option.isSome(messageReceipt)
-                ? yield* threads.streamStoredEventsFrom({ threadId, eventType: "run.created" }).pipe(
-                    Stream.filter((stored) => stored.commandId === messageCommandId),
-                    Stream.runHead,
-                    Effect.mapError(mapError(input, "read-receipt", threadId)),
-                  )
-                : Option.none();
+            const priorRun =
+              claimedRun !== undefined
+                ? Option.some(claimedRun)
+                : Option.isSome(messageReceipt)
+                  ? yield* threads
+                      .streamStoredEventsFrom({ threadId, eventType: "run.created" })
+                      .pipe(
+                        Stream.filter((stored) => stored.commandId === messageCommandId),
+                        Stream.runHead,
+                        Effect.mapError(mapError(input, "read-receipt", threadId)),
+                      )
+                  : Option.none();
             if (
               Option.isNone(priorRun) ||
               priorRun.value.event.type !== "run.created" ||
@@ -1562,17 +1514,12 @@ const make = Effect.gen(function* () {
           )("The previous launch did not durably acknowledge the no-setup-scripts guard.");
         const preparationRun = preparationRecords.runs.find((run) => run.id === runId);
         const savedConstraint = preparationRun?.workspacePreparation?.cleanProviderConstraint;
-        if (
-          constraint !== undefined &&
-          (savedConstraint?.instanceId !== constraint.instanceId ||
-            savedConstraint.driver !== constraint.driver ||
-            savedConstraint.environmentMode !== constraint.environmentMode)
-        ) {
+        if (savedConstraint !== undefined) {
           return yield* mapError(
             input,
             "resolve-project",
             threadId,
-          )("The launch did not durably acknowledge the clean provider start constraint.");
+          )("Clean-provider automation is retired. Start a new ordinary thread explicitly.");
         }
         const runIsPreparing = preparationRun?.status === "preparing";
         const shouldSchedule = runId === null ? Option.isNone(launchReceipt) : runIsPreparing;
@@ -1631,7 +1578,6 @@ const make = Effect.gen(function* () {
         return {
           threadId,
           projection,
-          ...(savedConstraint === undefined ? {} : { cleanProviderConstraint: savedConstraint }),
           ...(input.workspaceStrategy.enforceNoSetupScripts === true
             ? { enforceNoSetupScripts: true as const }
             : {}),

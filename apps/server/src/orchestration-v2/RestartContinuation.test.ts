@@ -122,7 +122,6 @@ it.effect.each([
       getCapabilities: () =>
         Effect.succeed({
           ...CodexProviderCapabilitiesV2,
-          cleanStart: { supportsConstraint: true, environmentMode: "inherit" as const },
         }),
       planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" as const }),
       openSession: () => {
@@ -291,10 +290,7 @@ it.effect.each([
         assert.lengthOf(saved.runs, restart + 2 + Number(queued));
         const continuation = saved.runs.at(-1)!;
         assert.equal(continuation.restartContinuationOfRunId, saved.runs.at(-2)!.id);
-        assert.deepEqual(
-          continuation.workspacePreparation,
-          guarded ? { type: "root", cleanProviderConstraint: constraint } : undefined,
-        );
+        assert.deepEqual(continuation.workspacePreparation, undefined);
         assert.equal(continuation.status, queued ? "queued" : "starting");
         assert.equal(spawns, 0);
         if (queued) return;

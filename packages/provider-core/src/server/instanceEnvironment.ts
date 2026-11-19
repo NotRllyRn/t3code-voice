@@ -4,36 +4,6 @@ import * as Effect from "effect/Effect";
 
 import { expandHomeVariable } from "./pathExpansion.ts";
 
-export interface ResolvedEnvironmentSecrets {
-  readonly source: "secret-reference";
-}
-
-// Only the registry records successful vault reads; serialized lookalikes have no authority.
-const resolvedEnvironmentSecrets = new WeakMap<
-  ResolvedEnvironmentSecrets,
-  ReadonlyArray<{ readonly name: string; readonly value: string }>
->();
-
-export function recordResolvedEnvironmentSecrets(
-  secrets: ReadonlyArray<{ readonly name: string; readonly value: string }>,
-): ResolvedEnvironmentSecrets {
-  const provenance = Object.freeze({ source: "secret-reference" as const });
-  resolvedEnvironmentSecrets.set(
-    provenance,
-    Object.freeze(
-      secrets.map((secret) => Object.freeze({ name: secret.name, value: secret.value })),
-    ),
-  );
-  return provenance;
-}
-
-export function readResolvedEnvironmentSecrets(provenance: ResolvedEnvironmentSecrets | undefined) {
-  if (provenance === undefined) return [];
-  const secrets = resolvedEnvironmentSecrets.get(provenance);
-  if (secrets === undefined) throw new Error("Invalid resolved environment secret provenance.");
-  return secrets;
-}
-
 export const mergeProviderInstanceEnvironment = Effect.fn(function* (
   environment: ProviderInstanceEnvironment | undefined,
   baseEnv: NodeJS.ProcessEnv = process.env,

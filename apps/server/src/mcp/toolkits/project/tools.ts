@@ -2,7 +2,6 @@ import { McpAttachmentInput } from "../attachment/input.ts";
 import {
   clampedPositiveInt,
   NonNegativeInt,
-  ProviderCleanStartConstraint,
   ModelSelection,
   TrimmedNonEmptyString,
   ThreadId,
@@ -163,13 +162,13 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
       }),
     ),
     attachments: Schema.optional(Schema.Array(McpAttachmentInput).check(Schema.isMaxLength(8))),
-    cleanProviderConstraint: Schema.optional(ProviderCleanStartConstraint),
     enforceNoSetupScripts: Schema.optional(
       Schema.Boolean.annotate({
         description:
           "Require empty effective project scripts and never execute setup during this launch, including preparation retries. Check project_read.launchCapabilities before relying on this guard.",
       }),
     ),
+    cleanProviderConstraint: Schema.optional(Schema.Never),
     clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
     /** Set by a linked environment launching its agent's delegated task here; ignored otherwise. */
     delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
@@ -182,7 +181,6 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     runId: Schema.NullOr(RunId),
     status: Schema.NullOr(OrchestrationV2RunStatus),
     enforceNoSetupScripts: Schema.optional(Schema.Literal(true)),
-    cleanProviderConstraint: Schema.optional(ProviderCleanStartConstraint),
   }),
   dependencies: [
     ...shared.dependencies,

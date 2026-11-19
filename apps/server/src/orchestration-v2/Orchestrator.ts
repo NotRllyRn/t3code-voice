@@ -7374,33 +7374,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     ) {
       dispatchMode = { type: "start_immediately" };
     }
-    let continuationSourceRunId =
-      command.restartContinuationOfRunId ??
-      command.usageLimitContinuationOfRunId ??
-      command.manualContinuationOfRunId;
-    const continuationAncestors = new Set<RunId>();
-    let continuationConstraint;
-    while (
-      continuationSourceRunId !== undefined &&
-      !continuationAncestors.has(continuationSourceRunId)
-    ) {
-      continuationAncestors.add(continuationSourceRunId);
-      const source = projection.runs.find((run) => run.id === continuationSourceRunId);
-      continuationConstraint = source?.workspacePreparation?.cleanProviderConstraint;
-      if (continuationConstraint !== undefined) break;
-      continuationSourceRunId =
-        source?.restartContinuationOfRunId ?? source?.usageLimitContinuationOfRunId;
-    }
-    // Continuations inherit the launch guard, not the source's workspace setup.
-    const continuationWorkspacePreparation =
-      continuationConstraint === undefined
-        ? {}
-        : {
-            workspacePreparation: {
-              type: "root" as const,
-              cleanProviderConstraint: continuationConstraint,
-            },
-          };
     const freshContext = command.freshContext === true;
     if (
       freshContext &&
@@ -7953,7 +7926,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.usageLimitContinuationOfRunId === undefined
           ? {}
           : { usageLimitContinuationOfRunId: command.usageLimitContinuationOfRunId }),
-        ...continuationWorkspacePreparation,
         ...(continuedTaskId === undefined ? {} : { delegatedTaskId: continuedTaskId }),
         ...(freshContext ? { freshContext: true } : {}),
       };
@@ -8395,7 +8367,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(dispatchMode.type === "defer_start" && dispatchMode.workspaceStrategy !== undefined
           ? { workspacePreparation: dispatchMode.workspaceStrategy }
           : {}),
-        ...continuationWorkspacePreparation,
         ...(continuedTaskId === undefined ? {} : { delegatedTaskId: continuedTaskId }),
         ...wakeWorkStartedAt(projection, command),
         ...(freshContext ? { freshContext: true } : {}),
@@ -9209,7 +9180,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ...(command.usageLimitContinuationOfRunId === undefined
         ? {}
         : { usageLimitContinuationOfRunId: command.usageLimitContinuationOfRunId }),
-      ...continuationWorkspacePreparation,
       ...(continuedTaskId === undefined ? {} : { delegatedTaskId: continuedTaskId }),
       ...wakeWorkStartedAt(projection, command),
     };

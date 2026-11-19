@@ -29,29 +29,13 @@ export const PiSettings = makeProviderSettingsSchema(
         providerSettingsForm: { clearWhenEmpty: "omit" },
       }),
     ),
-    environmentMode: Schema.Literals(["inherit", "clean"]).pipe(
-      Schema.withDecodingDefault(Effect.succeed("inherit")),
-      Schema.annotateKey({
-        title: "Startup environment",
-        description:
-          "Clean requires dedicated directories and a trusted absolute binary path. Log in separately; no credentials are copied.",
-      }),
-    ),
-    cleanEnvironment: Schema.optionalKey(
-      Schema.Struct({
-        home: TrimmedString,
-        agentDirectory: TrimmedString,
-        tempDirectory: TrimmedString,
-        pathDirectories: Schema.Array(TrimmedString),
-      }),
-    ).pipe(Schema.annotateKey({ providerSettingsForm: { hidden: true } })),
     customModels: Schema.Array(CustomModelSetting).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
   },
   {
-    order: ["binaryPath", "launchArgs", "environmentMode"],
+    order: ["binaryPath", "launchArgs"],
   },
 );
 export type PiSettings = typeof PiSettings.Type;
