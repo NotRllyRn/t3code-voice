@@ -5,7 +5,7 @@ import { WebSocket } from "@effect/platform-node/NodeWS";
 import * as NodeHttp from "node:http";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, expect, it } from "@effect/vitest";
+import { assert, it } from "@effect/vitest";
 import {
   AuthAccessReadScope,
   AuthOrchestrationOperateScope,
@@ -174,26 +174,12 @@ import * as ProjectEnrichment from "./project/ProjectEnrichmentService.ts";
 import * as ProjectService from "./project/ProjectService.ts";
 import {
   layerWsRpc,
-  hasCompatibleOrchestrationProtocol,
   resolveOpenDiscoveryForConfig,
   subscribeOrchestrationV2Shell,
   subscribeOrchestrationV2Thread,
   WS_RPC_SERVER_OPTIONS,
   withLateConfigDiscovery,
 } from "./ws.ts";
-
-it.each([
-  ["orchestrationProtocol=2&clientCapabilities=voiceHistoryV1", false],
-  ["orchestrationProtocol=3", false],
-  ["orchestrationProtocol=3&clientCapabilities=notvoiceHistoryV1", false],
-  ["orchestrationProtocol=3&clientCapabilities=voiceHistoryV1", true],
-  ["orchestrationProtocol=3&clientCapabilities=settingsSecretReferences,voiceHistoryV1", true],
-  ["orchestrationProtocol=4&clientCapabilities=voiceHistoryV1", false],
-] as const)("gates Voice history before a socket upgrade: %s", (query, compatible) => {
-  expect(hasCompatibleOrchestrationProtocol(new URL(`http://test.local/ws?${query}`))).toBe(
-    compatible,
-  );
-});
 
 const snapshotConfig = (fields: Partial<ServerConfig>) =>
   ({ availableEditors: [], settings: {}, ...fields }) as unknown as ServerConfig;

@@ -15482,10 +15482,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     command: OrchestrationV2ServerCommand,
     sideChatIds: ReadonlyArray<ThreadId> = [],
     cancelledTask?: OrchestrationV2Subagent,
-    options?: {
-      readonly expectedUserMessageCount?: number;
-      readonly expectedModelSelection?: ModelSelection;
-    },
+    options?: Parameters<OrchestratorV2Shape["dispatch"]>[1],
   ): Effect.fn.Return<OrchestratorV2DispatchResult, OrchestratorV2Error> {
     yield* Effect.annotateCurrentSpan({
       "orchestration_v2.command_id": command.commandId,
@@ -15789,10 +15786,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   // dispatchWithReceiptEffect owns the dispatch span; this wrapper selects the thread locks.
   const dispatchWithReceipt = Effect.fnUntraced(function* (
     command: OrchestrationV2ServerCommand,
-    options?: {
-      readonly expectedUserMessageCount?: number;
-      readonly expectedModelSelection?: ModelSelection;
-    },
+    options?: Parameters<OrchestratorV2Shape["dispatch"]>[1],
   ) {
     const dispatch = threadDispatch.withLock(
       commandThreadId(command),

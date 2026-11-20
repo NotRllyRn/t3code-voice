@@ -400,10 +400,7 @@ export interface ThreadManagementServiceShape {
   ) => Effect.Effect<void, LegacyV1ThreadImporter.LegacyV1ThreadImportError>;
   readonly dispatch: (
     command: OrchestrationV2ServerCommand,
-    options?: {
-      readonly expectedUserMessageCount?: number;
-      readonly expectedModelSelection?: ModelSelection;
-    },
+    options?: Parameters<Orchestrator.OrchestratorV2Shape["dispatch"]>[1],
   ) => Effect.Effect<
     Orchestrator.OrchestratorV2DispatchResult,
     Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError

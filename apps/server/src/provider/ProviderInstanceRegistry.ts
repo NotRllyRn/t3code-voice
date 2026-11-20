@@ -324,10 +324,7 @@ const buildEntry = Effect.fn("ProviderInstanceRegistry.buildEntry")(function* <R
     : enabled
       ? yield* readInstanceSecrets(driver, entry, instanceId)
       : {
-          secrets: {
-            environment: withoutSecretReferences(entry.environment ?? []),
-            config: [],
-          },
+          secrets: { environment: withoutSecretReferences(entry.environment ?? []), config: [] },
           unreadable: [],
         };
   // Starting with a blank credential would fail later with a less useful error, or fall back to
