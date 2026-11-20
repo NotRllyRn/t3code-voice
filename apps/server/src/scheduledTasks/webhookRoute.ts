@@ -95,7 +95,6 @@ export const layer = HttpApiBuilder.group(
       const relayParent = Option.isSome(relay)
         ? HttpTraceContext.fromHeaders(request.headers)
         : Option.none<Tracer.ExternalSpan>();
-      let bodyText: string | undefined;
       const result = yield* scheduledTasks
         .triggerWebhook({
           hookId: params.hookId,
@@ -105,9 +104,7 @@ export const layer = HttpApiBuilder.group(
           query: queryIndex === -1 ? "" : request.url.slice(queryIndex + 1),
           headers,
           body: body.value,
-          get bodyText() {
-            return (bodyText ??= new TextDecoder().decode(body.value));
-          },
+          bodyText: new TextDecoder().decode(body.value),
           ...(relayDeliveryId ? { relayDeliveryId } : {}),
           ...(relayReceivedAt ? { receivedAt: relayReceivedAt } : {}),
         })

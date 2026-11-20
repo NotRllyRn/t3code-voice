@@ -279,7 +279,6 @@ export const make = Effect.gen(function* () {
       oneTimeSchedules: true,
       freshContext: true,
       scheduledTaskThreadModes: true,
-      voiceWebhookActions: true,
       npmReleaseLookup: true,
       voiceReleaseLookup: true,
       voiceTranscription: isSpeechPlatformSupported(hostPlatform, hostArchitecture, hostLibc),

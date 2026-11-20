@@ -14,9 +14,7 @@ import {
   type ProviderInteractionMode,
   type ServerSettings,
   type ThreadId,
-  VoiceWebhookAction,
 } from "@t3tools/contracts";
-import * as Schema from "effect/Schema";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 import {
   parseMaxDeliveryAge,
@@ -34,8 +32,6 @@ import {
 import type { ProviderInstanceEntry } from "../../providerInstances";
 
 import type { ResolvedSettingsScope } from "./settingsScope";
-
-const isVoiceWebhookAction = Schema.is(VoiceWebhookAction);
 
 export const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 
@@ -121,9 +117,6 @@ export interface DraftState {
   readonly interactionMode: ProviderInteractionMode;
   /** Retain the source selection's provider options when the picker leaves instanceId:model unchanged. */
   readonly baseModelSelection: ModelSelection | null;
-  readonly webhookAction: string | undefined;
-  readonly savedSchedule: ScheduledTaskSchedule | null;
-  readonly hasStoredSignatureSecret: boolean;
   readonly signatureEnabled: boolean;
   readonly signatureHeader: string;
   readonly signatureEncoding: "hex" | "base64";
@@ -152,22 +145,6 @@ export function toDateTimeLocalValue(date: Date): string {
 }
 
 export function scheduleDraftErrors(draft: DraftState) {
-  if (draft.webhookAction !== undefined && !isVoiceWebhookAction(draft.webhookAction))
-    return [
-      { title: "Unsupported action", description: "This client cannot edit this webhook action." },
-    ];
-  if (draft.webhookAction !== undefined && draft.scheduleMode !== "webhook")
-    return [
-      { title: "Webhook required", description: "Voice release actions must stay webhooks." },
-    ];
-  if (
-    draft.editingId !== null &&
-    draft.webhookAction !==
-      (draft.savedSchedule?.type === "webhook" ? draft.savedSchedule.action : undefined)
-  )
-    return [
-      { title: "Create a new task", description: "Saved tasks cannot change webhook action." },
-    ];
   if (draft.scheduleMode === "once") {
     const runAt = new Date(draft.runAt);
     if (Number.isNaN(runAt.getTime()))
@@ -182,32 +159,6 @@ export function scheduleDraftErrors(draft: DraftState) {
   if (draft.scheduleMode === "fixed" && !draft.timeOfDay)
     return [{ title: "Invalid run time", description: "Pick a time." }];
   if (draft.scheduleMode !== "webhook") return [];
-  if (draft.webhookAction !== undefined) {
-    if (
-      draft.replayKey.trim() ||
-      draft.coalesceKey.trim() ||
-      draft.coalesceWindowSeconds.trim() ||
-      (draft.savedSchedule?.type === "webhook" && draft.savedSchedule.dedupe !== undefined)
-    )
-      return [
-        {
-          title: "Unsupported webhook settings",
-          description:
-            "Voice actions cannot use custom dedupe or coalescing. Recreate paused if these settings were already saved.",
-        },
-      ];
-    if (draft.editingId === null && draft.enabled)
-      return [
-        { title: "Create paused", description: "Create voice release actions disabled first." },
-      ];
-    if (
-      !draft.signatureEnabled ||
-      !draft.signatureHeader.trim() ||
-      ((draft.editingId === null || !draft.hasStoredSignatureSecret) &&
-        !draft.signatureSecret.trim())
-    )
-      return [{ title: "Signing secret required", description: "Set an HMAC header and secret." }];
-  }
   if (parseMaxDeliveryAge(draft.maxDeliveryAgeMinutes) === undefined)
     return [
       {
@@ -253,11 +204,7 @@ export function webhookDeliveryLabel(delivery: {
   return labels[delivery.outcome] ?? delivery.outcome.replaceAll("_", " ");
 }
 
-export function scheduleFromDraft(
-  draft: DraftState,
-  voiceActionsSupported = false,
-): ScheduledTaskUpsertSchedule | null {
-  if (draft.webhookAction !== undefined && !voiceActionsSupported) return null;
+export function scheduleFromDraft(draft: DraftState): ScheduledTaskUpsertSchedule | null {
   if (scheduleDraftErrors(draft).length > 0) return null;
   if (draft.scheduleMode === "once") {
     const saved = draft.savedRunAt ? new Date(draft.savedRunAt) : null;
@@ -290,7 +237,6 @@ export function scheduleFromDraft(
     const secret = draft.signatureSecret.trim();
     return {
       type: "webhook",
-      ...(isVoiceWebhookAction(draft.webhookAction) ? { action: draft.webhookAction } : {}),
       signature: draft.signatureEnabled
         ? {
             header: draft.signatureHeader.trim(),
@@ -300,17 +246,15 @@ export function scheduleFromDraft(
           }
         : null,
       maxDeliveryAgeMinutes,
-      ...(draft.webhookAction !== undefined
-        ? {}
-        : replayKey || coalesceKey || coalesceWindowSeconds !== undefined
-          ? {
-              dedupe: {
-                ...(replayKey ? { replayKey } : {}),
-                ...(coalesceKey ? { coalesceKey } : {}),
-                ...(coalesceWindowSeconds === undefined ? {} : { coalesceWindowSeconds }),
-              },
-            }
-          : { dedupe: {} }),
+      ...(replayKey || coalesceKey || coalesceWindowSeconds !== undefined
+        ? {
+            dedupe: {
+              ...(replayKey ? { replayKey } : {}),
+              ...(coalesceKey ? { coalesceKey } : {}),
+              ...(coalesceWindowSeconds === undefined ? {} : { coalesceWindowSeconds }),
+            },
+          }
+        : { dedupe: {} }),
       // Only edited filters are sent; the server keeps the stored ones otherwise.
       ...(webhookFilterDraftsChanged(draft.savedFilters, draft.filters)
         ? { filters: parsedFilters.filters }
@@ -366,9 +310,6 @@ export function taskToDraft(task: ScheduledTask): DraftState {
     runtimeMode: task.runtimeMode,
     interactionMode: task.interactionMode,
     baseModelSelection: task.modelSelection,
-    webhookAction: schedule.type === "webhook" ? schedule.action : undefined,
-    savedSchedule: schedule,
-    hasStoredSignatureSecret: schedule.type === "webhook" && task.webhook?.hasSecret === true,
     ...(schedule.type === "webhook" && schedule.signature !== null
       ? {
           signatureEnabled: true,
@@ -376,10 +317,7 @@ export function taskToDraft(task: ScheduledTask): DraftState {
           signatureEncoding: schedule.signature.encoding,
           signaturePrefix: schedule.signature.prefix,
         }
-      : {
-          signatureEnabled: schedule.type === "webhook" && schedule.action !== undefined,
-          ...WEBHOOK_SIGNATURE_DEFAULTS,
-        }),
+      : { signatureEnabled: false, ...WEBHOOK_SIGNATURE_DEFAULTS }),
     signatureSecret: "",
     replayKey: schedule.type === "webhook" ? (schedule.dedupe?.replayKey ?? "") : "",
     coalesceKey: schedule.type === "webhook" ? (schedule.dedupe?.coalesceKey ?? "") : "",
