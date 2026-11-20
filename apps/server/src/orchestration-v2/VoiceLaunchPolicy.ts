@@ -110,6 +110,36 @@ export function makeVoiceLaunchPolicy({
       });
   });
 
+  const checkPinnedBase = Effect.fn("VoiceLaunchPolicy.checkPinnedBase")(function* (
+    input: PolicyInput,
+    operation: ThreadLaunchError["operation"],
+    threadId: ThreadId,
+  ) {
+    const strategy = input.workspaceStrategy;
+    if (strategy.type === "root" || strategy.approvedBase === undefined) return;
+    const pin = strategy.approvedBase;
+    yield* Effect.gen(function* () {
+      const [isScratch, projectOption] = yield* Effect.all(
+        [
+          isScratchProject(input.projectId),
+          getProject(input.projectId).pipe(Effect.orElseSucceed(() => Option.none())),
+        ],
+        { concurrency: "unbounded" },
+      );
+      yield* checkApprovedBase({
+        projectId: input.projectId,
+        strategy: {
+          type: "worktree",
+          baseRef: pin.commit,
+          approvedBase: pin,
+          startFromOrigin: false,
+        },
+        isScratch,
+        project: Option.getOrUndefined(projectOption),
+      });
+    }).pipe(Effect.mapError(mapError(input, operation, threadId)));
+  });
+
   const normalizeRequest = Effect.fn("VoiceLaunchPolicy.normalizeRequest")(function* (
     request: ThreadLaunchInput,
   ) {
@@ -135,5 +165,5 @@ export function makeVoiceLaunchPolicy({
     };
   });
 
-  return { assertNoScripts, checkApprovedBase, normalizeRequest };
+  return { assertNoScripts, checkApprovedBase, checkPinnedBase, normalizeRequest };
 }

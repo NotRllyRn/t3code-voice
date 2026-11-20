@@ -629,15 +629,7 @@ const make = Effect.gen(function* () {
         input.workspaceStrategy.approvedBase !== undefined
       ) {
         const pin = input.workspaceStrategy.approvedBase;
-        yield* checkWorktreeBase({
-          projectId: input.projectId,
-          workspaceStrategy: {
-            type: "worktree",
-            baseRef: pin.commit,
-            approvedBase: pin,
-            startFromOrigin: false,
-          },
-        }).pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)));
+        yield* voicePolicy.checkPinnedBase(input, "provision-worktree", threadId);
         const current = yield* git
           .resolveApprovedWorktreeBase({
             cwd: input.workspaceStrategy.worktreePath,
@@ -1054,21 +1046,7 @@ const make = Effect.gen(function* () {
       }
       // The agent must start on the branch name the thread will show.
       if (branchRename !== null) yield* Fiber.join(branchRename);
-      if (
-        input.workspaceStrategy.type !== "root" &&
-        input.workspaceStrategy.approvedBase !== undefined
-      ) {
-        const pin = input.workspaceStrategy.approvedBase;
-        yield* checkWorktreeBase({
-          projectId: input.projectId,
-          workspaceStrategy: {
-            type: "worktree",
-            baseRef: pin.commit,
-            approvedBase: pin,
-            startFromOrigin: false,
-          },
-        }).pipe(Effect.mapError(mapError(input, "release-run", threadId)));
-      }
+      yield* voicePolicy.checkPinnedBase(input, "release-run", threadId);
       yield* setupTracker.markUncancellable(threadId);
       yield* setupTracker.stageStatus(threadId, "agent", "running");
       if (runId !== null) {
