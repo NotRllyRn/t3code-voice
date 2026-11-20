@@ -1,23 +1,68 @@
-name: Voice fork build (manual, experimental)
+name: Voice fork artifacts (no deployment)
 
 on:
   workflow_dispatch:
     inputs:
       source_sha:
-        description: Full merged source SHA (stable branch ancestor)
+        description: Full merge commit SHA of the reviewed update PR
+        required: true
+        type: string
+
+      pr_number:
+        description: Merged update pull request number
+        required: true
+        type: string
+      reviewed_head:
+        description: Full PR head SHA approved before merge
         required: true
         type: string
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: voice-build-${{ inputs.source_sha }}
   cancel-in-progress: false
 
 jobs:
+  verify:
+    if: github.repository == 'NotRllyRn/t3code-voice' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    environment: voice-build
+    timeout-minutes: 3
+    outputs:
+      enabled: ${{ steps.source.outputs.enabled }}
+      base: ${{ steps.source.outputs.base }}
+    steps:
+      - name: Verify enabled build and merged PR identity
+        id: source
+        env:
+          BUILD_ENABLED: ${{ vars.VOICE_BUILD_ENABLED }}
+          BASE_BRANCH: ${{ vars.VOICE_BUILD_BASE_BRANCH }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REVIEWED_HEAD: ${{ inputs.reviewed_head }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BUILD_ENABLED" == 'true' ]] || exit 0
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ && "$REVIEWED_HEAD" =~ ^[0-9a-f]{40}$ && "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          git check-ref-format "refs/heads/$BASE_BRANCH"
+          [[ -n "$BASE_BRANCH" && "$BASE_BRANCH" != -* ]]
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$RUNNER_TEMP/voice-build-pr.json"
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const p = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/voice-build-pr.json`, "utf8"));
+            const e = process.env;
+            if (String(p.number) !== e.PR_NUMBER || p.merged !== true || p.merge_commit_sha !== e.SOURCE_SHA || p.head.sha !== e.REVIEWED_HEAD || p.base.ref !== e.BASE_BRANCH || p.base.repo.full_name !== e.GITHUB_REPOSITORY || p.head.repo.full_name !== e.GITHUB_REPOSITORY) throw Error("Merged PR identity mismatch");
+            '
+          printf 'enabled=true\nbase=%s\n' "$BASE_BRANCH" >> "$GITHUB_OUTPUT"
+
   linux:
-    if: github.repository == 'NotRllyRn/t3code-voice' && vars.VOICE_BUILD_ENABLED == 'true'
+    needs: verify
+    if: needs.verify.outputs.enabled == 'true'
     runs-on: ubuntu-24.04
     environment: voice-build
     timeout-minutes: 90
@@ -26,28 +71,30 @@ jobs:
         shell: bash
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
+          BASE_BRANCH: ${{ needs.verify.outputs.base }}
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           git init .
           git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
-          git fetch --no-tags origin "$SOURCE_SHA" '+refs/heads/feature/codex-voice-stable:refs/remotes/origin/feature/codex-voice-stable'
+          git fetch --no-tags origin "$SOURCE_SHA" "+refs/heads/$BASE_BRANCH:refs/remotes/origin/voice-build-base"
           git sparse-checkout set --no-cone '/*' '!/.repos/'
           git -c checkout.workers=0 checkout --detach "$SOURCE_SHA"
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: package.json
       - name: Verify merged source and release version
         shell: bash
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
+          BASE_BRANCH: ${{ needs.verify.outputs.base }}
         run: |
           set -euo pipefail
           [[ "$GITHUB_REPOSITORY" == 'NotRllyRn/t3code-voice' && "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
-          git fetch --no-tags origin '+refs/heads/feature/codex-voice-stable:refs/remotes/origin/feature/codex-voice-stable'
-          git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/feature/codex-voice-stable
+          git fetch --no-tags origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/voice-build-base"
+          git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/voice-build-base
           [[ -z "$(git status --porcelain --untracked-files=no)" ]]
           node --input-type=module -e '
             import { FORK_RELEASE } from "./packages/shared/src/forkIdentity.ts";
@@ -98,7 +145,8 @@ jobs:
           compression-level: 0
 
   mac:
-    if: github.repository == 'NotRllyRn/t3code-voice' && vars.VOICE_BUILD_ENABLED == 'true'
+    needs: verify
+    if: needs.verify.outputs.enabled == 'true'
     runs-on: macos-15
     environment: voice-build
     timeout-minutes: 120
@@ -107,28 +155,30 @@ jobs:
         shell: bash
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
+          BASE_BRANCH: ${{ needs.verify.outputs.base }}
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           git init .
           git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
-          git fetch --no-tags origin "$SOURCE_SHA" '+refs/heads/feature/codex-voice-stable:refs/remotes/origin/feature/codex-voice-stable'
+          git fetch --no-tags origin "$SOURCE_SHA" "+refs/heads/$BASE_BRANCH:refs/remotes/origin/voice-build-base"
           git sparse-checkout set --no-cone '/*' '!/.repos/'
           git -c checkout.workers=0 checkout --detach "$SOURCE_SHA"
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: package.json
       - name: Verify merged source and release version
         shell: bash
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
+          BASE_BRANCH: ${{ needs.verify.outputs.base }}
         run: |
           set -euo pipefail
           [[ "$GITHUB_REPOSITORY" == 'NotRllyRn/t3code-voice' && "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
-          git fetch --no-tags origin '+refs/heads/feature/codex-voice-stable:refs/remotes/origin/feature/codex-voice-stable'
-          git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/feature/codex-voice-stable
+          git fetch --no-tags origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/voice-build-base"
+          git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/voice-build-base
           [[ -z "$(git status --porcelain --untracked-files=no)" ]]
           node --input-type=module -e '
             import { FORK_RELEASE } from "./packages/shared/src/forkIdentity.ts";
