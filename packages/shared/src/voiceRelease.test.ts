@@ -40,15 +40,15 @@ describe("Voice release contract", () => {
         tag: "v0.1.10",
         sha: "7d32075e3757ded707914e2450c3e392a9665765",
       },
-      voiceRevision: 6,
+      voiceRevision: 8,
       githubPrerelease: true,
     });
   });
 
   it("increments numeric revisions and resets only for a newer upstream", () => {
-    expect(nextVoiceVersion("0.1.9")).toBe("0.1.9-voice.6");
+    expect(nextVoiceVersion("0.1.9")).toBe("0.1.9-voice.8");
     expect(nextVoiceVersion("0.1.9", "0.1.9-voice.9")).toBe("0.1.9-voice.10");
-    expect(nextVoiceVersion("0.1.10", "0.1.9-voice.10")).toBe("0.1.10-voice.6");
+    expect(nextVoiceVersion("0.1.10", "0.1.9-voice.10")).toBe("0.1.10-voice.8");
     expect(nextVoiceVersion("0.1.8", "0.1.9-voice.1")).toBeNull();
     expect(nextVoiceVersion("0.1.9", "0.1.9-preview.20261116.1")).toBeNull();
   });
