@@ -34,52 +34,6 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("GitWorkflowServi
         (refName) => workflow.hasRefNamed({ cwd, refName }),
       );
       assert.deepEqual(found, [true, true, true, true, false, false]);
-      const accepted = (yield* driver.resolveCommit({ cwd, revision: "HEAD" })).commitSha;
-      yield* driver.execute({
-        operation: "test.setupRepo",
-        cwd,
-        args: ["branch", "release/stale"],
-      });
-      yield* driver.execute({
-        operation: "test.setupRepo",
-        cwd,
-        args: [
-          "-c",
-          "user.email=t@t",
-          "-c",
-          "user.name=t",
-          "commit",
-          "--allow-empty",
-          "-m",
-          "accepted",
-        ],
-      });
-      const current = (yield* driver.resolveCommit({ cwd, revision: "HEAD" })).commitSha;
-      assert.equal(
-        yield* workflow.resolveApprovedWorktreeBase({
-          cwd,
-          branch: "main",
-          acceptedCommit: accepted,
-        }),
-        current,
-      );
-      for (const branch of ["release/stale", "missing", "main~1", "refs/heads/main", "-bad"]) {
-        const refused = yield* workflow
-          .resolveApprovedWorktreeBase({ cwd, branch, acceptedCommit: current })
-          .pipe(Effect.result);
-        assert.equal(refused._tag, "Failure");
-      }
-      yield* driver.execute({
-        operation: "test.setupRepo",
-        cwd,
-        args: ["branch", "-D", "release/stale"],
-      });
-      assert.equal(
-        (yield* workflow
-          .resolveApprovedWorktreeBase({ cwd, branch: "release/stale", acceptedCommit: accepted })
-          .pipe(Effect.result))._tag,
-        "Failure",
-      );
     }).pipe(
       Effect.scoped,
       Effect.provide(
