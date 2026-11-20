@@ -159,3 +159,26 @@ it("rejects a corrupt checksum without publishing a runtime and permits a clean 
   expect(retried.status, retried.stderr).toBe(0);
   expect(retried.stdout).toBe("synthetic-runtime <argument with spaces> <--version>\n");
 });
+
+it("recovers a dead installer lock and replaces an incomplete runtime before execution", () => {
+  using f = fixture();
+  const exited = NodeChildProcess.spawnSync("/bin/sh", ["-c", "exit 0"], { timeout: 10_000 });
+  expect(exited.status).toBe(0);
+  expect(exited.pid).toBeGreaterThan(0);
+  NodeFS.mkdirSync(f.runtime, { recursive: true });
+  NodeFS.writeFileSync(NodePath.join(f.runtime, "t3"), "#!/bin/sh\nexit 73\n", {
+    mode: 0o755,
+  });
+  const lock = NodePath.join(NodePath.dirname(f.runtime), `.${version}.install.lock`);
+  NodeFS.writeFileSync(lock, `${exited.pid}\n`);
+  const recovered = f.run();
+  expect(recovered.error).toBeUndefined();
+  expect(recovered.status, recovered.stderr).toBe(0);
+  expect(recovered.stdout).toBe("synthetic-runtime <argument with spaces> <--version>\n");
+  expect(NodeFS.readFileSync(NodePath.join(f.runtime, "t3"), "utf8")).toBe(f.executable);
+  expect(NodeFS.readFileSync(NodePath.join(f.runtime, ".install-complete"), "utf8")).toBe(
+    `${version}\n`,
+  );
+  expect(NodeFS.readdirSync(NodePath.dirname(f.runtime))).toEqual([version]);
+  expect(NodeFS.readdirSync(f.home)).toEqual([]);
+});
