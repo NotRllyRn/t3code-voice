@@ -1,22 +1,10 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Crypto has no createHmac.
 import * as NodeCrypto from "node:crypto";
-// @effect-diagnostics-next-line nodeBuiltinImport:off -- Real durable coordinator state, isolated in a temporary directory.
-import * as NodeFSP from "node:fs/promises";
-import * as NodeOS from "node:os";
-// @effect-diagnostics-next-line nodeBuiltinImport:off -- Temporary test directory.
-import * as NodePath from "node:path";
 
 import * as NodePlatformCrypto from "@effect/platform-node/NodeCrypto";
-import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import { vi } from "vite-plus/test";
 import {
   type ManagedPolicyDocument,
-  EnvironmentHttpApi,
-  EnvironmentId,
-  GitCommandError,
-  ProviderInstanceId,
-  ProviderDriverKind,
   ScheduledTaskUpsertInput,
   ScheduledTaskWebhookDeliveryId,
   SecretRequestError,
@@ -28,11 +16,6 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
-import * as Etag from "effect/http/Etag";
-import * as HttpPlatform from "effect/http/HttpPlatform";
-import * as HttpRouter from "effect/http/HttpRouter";
-import * as HttpApi from "effect/http-api/HttpApi";
-import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as Queue from "effect/Queue";
 import * as EffectScheduler from "effect/Scheduler";
 import * as Schema from "effect/Schema";
@@ -41,10 +24,6 @@ import * as TestClock from "effect/testing/TestClock";
 import * as Tracer from "effect/Tracer";
 
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
-import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
-import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
-import * as RelayDeliveryProof from "./RelayDeliveryProof.ts";
-import * as WebhookRoute from "./webhookRoute.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
@@ -53,79 +32,12 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 import { renderWebhookPrompt } from "./webhookTemplate.ts";
-import * as GitWorkflow from "../git/GitWorkflowService.ts";
-import * as VoiceWebhookAction from "./VoiceWebhookAction.ts";
-import * as ProjectService from "../project/ProjectService.ts";
-import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
-import * as ServerSettings from "../serverSettings.ts";
-import { FORK_RELEASE } from "@t3tools/shared/forkIdentity";
+
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { runMigrations } from "../persistence/Migrations.ts";
-import type { GitHubApi } from "../../../../scripts/lib/voice-upstream-poll.ts";
 
 const decodeUpsertInput = Schema.decodeUnknownEffect(ScheduledTaskUpsertInput);
-
-it.effect(
-  "upgrades migration 96 tasks without enabling actions and fences changed generations",
-  () =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 96 });
-      yield* sql`INSERT INTO scheduled_tasks ${sql.insert({
-        task_id: "scheduled-task:hook",
-        title: "Legacy hook",
-        prompt: "Review",
-        enabled: 1,
-        schedule_json: '{"type":"webhook","signature":null}',
-        project_id: "project-webhook",
-        thread_id: null,
-        workspace_strategy_json: '{"type":"root"}',
-        model_selection_json: '{"instanceId":"codex","model":"gpt-5.4"}',
-        runtime_mode: "full-access",
-        interaction_mode: "default",
-        created_by: "user",
-        creation_source: "web",
-        created_at: "1970-01-01T00:00:00.000Z",
-        updated_at: "1970-01-01T00:00:00.000Z",
-        next_run_at: null,
-        last_run_at: null,
-        last_run_status: "never",
-        last_run_error: null,
-        run_count: 0,
-        webhook_token: "legacy-token",
-      })}`;
-      const before = yield* sql`SELECT * FROM scheduled_tasks`;
-      assert.deepEqual(yield* runMigrations(), [[97, "ScheduledTaskGeneration"]]);
-      assert.deepEqual(yield* runMigrations(), []);
-      const after = yield* sql`SELECT * FROM scheduled_tasks`;
-      const { task_generation: generation, ...preserved } = after[0]!;
-      assert.deepEqual(preserved, before[0]);
-      assert.match(String(generation), /^[a-f0-9]{32}$/);
-      yield* withService(
-        ({ service, launches }) =>
-          Effect.gen(function* () {
-            const [task] = (yield* service.list()).tasks;
-            assert.equal(task!.enabled, true);
-            assert.deepEqual(task!.schedule, { type: "webhook", signature: null });
-            assert.equal(task!.generation, generation);
-            assert.equal((yield* service.triggerWebhook(requestFor(task!)))._tag, "accepted");
-            yield* Queue.take(launches);
-            const [ran] = (yield* service.list()).tasks;
-            assert.equal(ran!.generation, generation);
-            const changed = yield* service.setEnabled({ id: task!.id, enabled: false });
-            assert.notEqual(changed.task.generation, generation);
-            const action = yield* service.upsert(
-              yield* webhookTaskInput({
-                schedule: { type: "webhook", action: "voice-upstream-release" },
-              }),
-            );
-            assert.equal((yield* service.triggerWebhook(requestFor(action.task)))._tag, "disabled");
-            assert.equal(yield* Queue.size(launches), 0);
-          }),
-        { sql },
-      );
-    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
-);
+const isUpsertInput = Schema.is(ScheduledTaskUpsertInput);
 
 it.effect(
   "preserves omitted dedupe settings, releases duplicate claims, and retains coalesced claims",
@@ -189,17 +101,70 @@ it.effect(
     ),
 );
 
-const waitForSpan = <A, E, R>(work: Effect.Effect<A, E, R>, name: string, count = 1) =>
+it.effect("preserves migration 96 tasks and fences changed generations", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* runMigrations({ toMigrationInclusive: 96 });
+    yield* sql`INSERT INTO scheduled_tasks ${sql.insert({
+      task_id: "scheduled-task:hook",
+      title: "Legacy hook",
+      prompt: "Review",
+      enabled: 1,
+      schedule_json: '{"type":"webhook","signature":null}',
+      project_id: "project-webhook",
+      thread_id: null,
+      workspace_strategy_json: '{"type":"root"}',
+      model_selection_json: '{"instanceId":"codex","model":"gpt-5.4"}',
+      runtime_mode: "full-access",
+      interaction_mode: "default",
+      created_by: "user",
+      creation_source: "web",
+      created_at: "1970-01-01T00:00:00.000Z",
+      updated_at: "1970-01-01T00:00:00.000Z",
+      next_run_at: null,
+      last_run_at: null,
+      last_run_status: "never",
+      last_run_error: null,
+      run_count: 0,
+      webhook_token: "legacy-token",
+    })}`;
+    const before = yield* sql`SELECT * FROM scheduled_tasks`;
+    assert.deepEqual(yield* runMigrations(), [[97, "ScheduledTaskGeneration"]]);
+    assert.deepEqual(yield* runMigrations(), []);
+    const after = yield* sql`SELECT * FROM scheduled_tasks`;
+    const { task_generation: generation, ...preserved } = after[0]!;
+    assert.deepEqual(preserved, before[0]);
+    assert.match(String(generation), /^[a-f0-9]{32}$/);
+    yield* withService(
+      ({ service, launches }) =>
+        Effect.gen(function* () {
+          const [task] = (yield* service.list()).tasks;
+          assert.equal(task!.enabled, true);
+          assert.deepEqual(task!.schedule, { type: "webhook", signature: null });
+          assert.equal(task!.generation, generation);
+          assert.equal((yield* service.triggerWebhook(requestFor(task!)))._tag, "accepted");
+          yield* Queue.take(launches);
+          const [ran] = (yield* service.list()).tasks;
+          assert.equal(ran!.generation, generation);
+          const changed = yield* service.setEnabled({ id: task!.id, enabled: false });
+          assert.notEqual(changed.task.generation, generation);
+          assert.equal(yield* Queue.size(launches), 0);
+        }),
+      { sql },
+    );
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);
+
+const waitForSpan = <A, E, R>(work: Effect.Effect<A, E, R>, name: string) =>
   Effect.gen(function* () {
     const done = yield* Deferred.make<void>();
-    let remaining = count;
     const tracer = Tracer.make({
       span: (options) => {
         const span = new Tracer.NativeSpan(options);
         const end = span.end.bind(span);
         span.end = (...args) => {
           end(...args);
-          if (span.name === name && --remaining === 0) Deferred.doneUnsafe(done, Effect.void);
+          if (span.name === name) Deferred.doneUnsafe(done, Effect.void);
         };
         return span;
       },
@@ -254,7 +219,6 @@ const withService = <A, E>(
     readonly launches: Queue.Queue<LaunchInput>;
     readonly sql: SqlClient.SqlClient;
     readonly secretsByRef: Map<string, string>;
-    readonly voiceSettings?: ServerSettings.ServerSettingsService["Service"];
   }) => Effect.Effect<A, E, never>,
   options: {
     readonly onFrame?: () => void;
@@ -270,39 +234,12 @@ const withService = <A, E>(
     readonly sql?: SqlClient.SqlClient;
     readonly workers?: Map<string, Effect.Effect<void>>;
     readonly policy?: ManagedPolicyDocument;
-    readonly voice?: {
-      readonly binding: Effect.Effect<VoiceWebhookAction.VoiceWebhookBinding | null>;
-      readonly api: GitHubApi;
-      readonly scratch?: boolean;
-      readonly baseUnavailable?: boolean;
-    };
   } = {},
 ) =>
   Effect.gen(function* () {
     const launches = yield* Queue.unbounded<LaunchInput>();
     const secretsByRef = new Map<string, string>();
-    const voiceSettings =
-      options.voice === undefined
-        ? undefined
-        : yield* ServerSettings.ServerSettingsService.pipe(
-            Effect.provide(
-              ServerSettings.layerTest({
-                defaultModelSelection: {
-                  instanceId: ProviderInstanceId.make("configured-codex"),
-                  model: "configured-model",
-                  options: [{ id: "reasoningEffort", value: "medium" }],
-                },
-                providerInstances: {
-                  [ProviderInstanceId.make("configured-codex")]: {
-                    driver: ProviderDriverKind.make("codex"),
-                    enabled: true,
-                    config: {},
-                  },
-                },
-              }),
-            ),
-          );
-    const baseDependencies = Layer.mergeAll(
+    const layerDependencies = Layer.mergeAll(
       NodePlatformCrypto.layerDigest,
       NodePlatformCrypto.layerMac,
       options.frameGate === undefined && options.onFrame === undefined
@@ -335,21 +272,7 @@ const withService = <A, E>(
                 options.workers!.set(name, work.pipe(Effect.provideContext(context), Effect.orDie));
               }),
           }),
-      Layer.mock(GitWorkflow.GitWorkflowService)({
-        resolveApprovedWorktreeBase: () =>
-          options.voice?.baseUnavailable
-            ? Effect.fail(
-                new GitCommandError({
-                  operation: "approved-worktree-base",
-                  command: "git",
-                  cwd: "/repo",
-                  detail: "Unapproved branch.",
-                }),
-              )
-            : Effect.succeed("c".repeat(40)),
-      }),
       Layer.mock(ThreadLaunchService.ThreadLaunchService)({
-        checkWorktreeBase: () => Effect.void,
         launch: (input) =>
           Effect.suspend(() => {
             if (options.completedLaunches?.has(input.commandId))
@@ -367,19 +290,13 @@ const withService = <A, E>(
                     throw new Error("injected start failure");
                 }),
               ),
-              Effect.as({
-                threadId:
-                  options.voice === undefined
-                    ? "thread-1"
-                    : "mcp:00000000-0000-4000-8000-000000000009",
-                resumed: false,
-              } as never),
+              Effect.as({ threadId: "thread-1", resumed: false } as never),
             );
           }),
       }),
       Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
         namedProjectsRoot: "/projects",
-        isScratchProject: () => Effect.succeed(options.voice?.scratch === true),
+        isScratchProject: () => Effect.succeed(false),
       }),
       Layer.mock(ThreadManagementService.ThreadManagementService)({}),
       Layer.mock(SecretRequests.SecretRequests)({
@@ -397,51 +314,10 @@ const withService = <A, E>(
       ),
       ManagedPolicy.layerTest(options.policy),
     );
-    const layerDependencies =
-      options.voice === undefined
-        ? baseDependencies
-        : Layer.merge(
-            baseDependencies,
-            VoiceWebhookAction.layer.pipe(
-              Layer.provide(
-                Layer.mergeAll(
-                  baseDependencies,
-                  Layer.succeed(
-                    VoiceWebhookAction.VoiceWebhookBindingSource,
-                    options.voice.binding,
-                  ),
-                  Layer.succeed(VoiceWebhookAction.VoiceGitHubApi, options.voice.api),
-                  Layer.succeed(ServerSettings.ServerSettingsService, voiceSettings!),
-                  Layer.mock(ProjectService.ProjectService)({
-                    getById: (id) =>
-                      Effect.succeedSome({ id, scripts: [], autoPull: false } as never),
-                  }),
-                  Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
-                    getInstance: () =>
-                      Effect.succeed({
-                        enabled: true,
-                        driverKind: "codex",
-                        snapshot: {
-                          getSnapshot: Effect.succeed({
-                            models: [{ slug: "configured-model" }],
-                          }),
-                        },
-                      } as never),
-                  }),
-                ),
-              ),
-            ),
-          );
     return yield* Effect.gen(function* () {
       const service = yield* ScheduledTaskService.ScheduledTaskService;
       const sql = yield* SqlClient.SqlClient;
-      return yield* body({
-        service,
-        launches,
-        sql,
-        secretsByRef,
-        ...(voiceSettings === undefined ? {} : { voiceSettings }),
-      });
+      return yield* body({ service, launches, sql, secretsByRef });
     }).pipe(
       Effect.provide(
         Layer.fresh(ScheduledTaskService.layer.pipe(Layer.provide(layerDependencies))),
@@ -455,593 +331,24 @@ const withService = <A, E>(
     ),
   );
 
-const voiceCandidate = {
-  schema: 1,
-  upstream: "pingdotgg/t3code",
-  fork: "NotRllyRn/t3code-voice",
-  tag: "v99.0.0",
-  sha: "b".repeat(40),
-  releaseId: 42,
-  publishedAt: "1970-01-01T00:00:00Z",
-  issuedAt: "1970-01-01T00:00:00Z",
-  expiresAt: "1970-01-01T00:05:00Z",
-  deliveryId: "00000000-0000-4000-8000-000000000001",
-};
-const voiceApi: GitHubApi = async (path) => {
-  if (path === "/git/ref/heads/main")
-    return { ref: "refs/heads/main", object: { type: "commit", sha: voiceCandidate.sha } };
-  if (path === `/compare/${voiceCandidate.sha}...${voiceCandidate.sha}`)
-    return { status: "identical" };
-  if (path === "/releases/latest")
-    return {
-      draft: false,
-      target_commitish: "main",
-      prerelease: false,
-      tag_name: voiceCandidate.tag,
-      id: voiceCandidate.releaseId,
-      published_at: voiceCandidate.publishedAt,
-    };
-  if (path === `/git/ref/tags/${voiceCandidate.tag}`)
-    return {
-      ref: `refs/tags/${voiceCandidate.tag}`,
-      object: { type: "commit", sha: voiceCandidate.sha },
-    };
-  if (path === `/compare/${FORK_RELEASE.upstream.sha}...${voiceCandidate.sha}`)
-    return { status: "ahead" };
-  throw new Error("Unexpected fake GitHub request");
-};
-const signedVoiceRequest = (
-  task: Parameters<typeof requestFor>[0],
-  body = new TextEncoder().encode(JSON.stringify(voiceCandidate)),
-) =>
-  requestFor(task, {
-    body,
-    bodyText: "untrusted decoded decoy",
-    headers: {
-      "x-hub-signature-256": `sha256=${NodeCrypto.createHmac("sha256", "voice-test-secret").update(body).digest("hex")}`,
-    },
-  });
-const withVoiceService = <A, E>(
-  body: (
-    input: Parameters<Parameters<typeof withService>[0]>[0] & {
-      readonly bind: (binding: VoiceWebhookAction.VoiceWebhookBinding | null) => void;
-      readonly stateDir: string;
-    },
-  ) => Effect.Effect<A, E>,
-  api: GitHubApi = voiceApi,
-  scratch = false,
-  baseUnavailable = false,
-) =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const stateDir = yield* Effect.acquireRelease(
-        Effect.promise(() => NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "voice-action-"))),
-        (dir) => Effect.promise(() => NodeFSP.rm(dir, { recursive: true, force: true })),
-      );
-      yield* Effect.acquireRelease(
-        Effect.sync(() => vi.stubEnv("VOICE_AUTOMATION_ENABLED", "1")),
-        () => Effect.sync(() => vi.unstubAllEnvs()),
-      );
-      let binding: VoiceWebhookAction.VoiceWebhookBinding | null = null;
-      return yield* withService(
-        (input) =>
-          body({
-            ...input,
-            stateDir,
-            bind: (value) => {
-              binding = value;
-            },
-          }),
-        { voice: { binding: Effect.sync(() => binding), api, scratch, baseUnavailable } },
-      );
-    }),
-  );
-const forbidDecodedBody = (request: ScheduledTaskService.WebhookTriggerRequest) =>
-  Object.defineProperty(request, "bodyText", {
-    get() {
-      throw new Error("Invalid bytes were decoded before rejection");
-    },
-  });
-
-const decodeVoiceBinding = Schema.decodeUnknownEffect(VoiceWebhookAction.VoiceWebhookBinding);
-const decodeVoiceState = Schema.decodeEffect(
-  Schema.fromJsonString(
-    Schema.Struct({
-      identities: Schema.Array(Schema.String),
-      deliveries: Schema.Array(Schema.String),
-    }),
-  ),
-);
-
-const bindVoiceTask = (input: Parameters<Parameters<typeof withVoiceService>[0]>[0]) =>
-  Effect.gen(function* () {
-    const { task } = yield* input.service.upsert(
-      yield* webhookTaskInput({
-        schedule: {
-          type: "webhook",
-          action: "voice-upstream-release",
-          signature: {
-            header: "x-hub-signature-256",
-            encoding: "hex",
-            prefix: "sha256=",
-            secret: "voice-test-secret",
-          },
-        },
-      }),
-    );
-    yield* input.sql`UPDATE scheduled_tasks SET thread_id = 'manager-thread' WHERE task_id = ${task.id}`;
-    const current = (yield* input.service.list()).tasks.find((entry) => entry.id === task.id)!;
-    const binding = yield* decodeVoiceBinding({
-      enabled: true,
-      action: "voice-upstream-release",
-      launchPolicy: "configured-codex-v1",
-      baseBranch: "release/approved",
-      acceptedSource: "a".repeat(40),
-      taskId: current.id,
-      generation: current.generation,
-      projectId: current.projectId,
-      managerThreadId: current.threadId,
-      stateDir: input.stateDir,
-    });
-    input.bind(binding);
-    return { task: current, binding };
-  });
-
-it.effect("dispatches signed HTTP bytes once through the real webhook service and action", () =>
-  withVoiceService((input) =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const initial = yield* bindVoiceTask(input);
-        const settings = yield* Effect.promise(() =>
-          vi.importActual<{
-            taskToDraft: (task: unknown) => unknown;
-            scheduleFromDraft: (draft: unknown, supported: boolean) => unknown;
-          }>(
-            new URL(
-              "../../../web/src/components/settings/scheduledTasksSettings.logic.ts",
-              import.meta.url,
-            ).href,
-          ),
-        );
-        const draft = settings.taskToDraft(initial.task);
-        assert(typeof draft === "object" && draft !== null);
-        const creation = settings.scheduleFromDraft(
-          {
-            ...draft,
-            editingId: null,
-            enabled: false,
-            signatureSecret: "voice-test-secret",
-          },
-          true,
-        );
-        assert(creation);
-        const { task: created } = yield* input.service.upsert(
-          yield* webhookTaskInput({
-            enabled: false,
-            threadId: initial.task.threadId,
-            schedule: creation,
-          }),
-        );
-        const edit = settings.scheduleFromDraft(settings.taskToDraft(created), true);
-        assert(edit);
-        yield* input.service.upsert(
-          yield* webhookTaskInput({
-            enabled: false,
-            threadId: created.threadId,
-            schedule: edit,
-          }),
-        );
-        const { task } = yield* input.service.setEnabled({ id: created.id, enabled: true });
-        assert(task.generation);
-        const binding = { ...initial.binding, generation: task.generation };
-        input.bind(binding);
-        class VoiceHttpTestApi extends HttpApi.make("environment").add(
-          EnvironmentHttpApi.groups.webhooks,
-        ) {}
-        const { handler } = yield* Effect.acquireRelease(
-          Effect.sync(() =>
-            HttpRouter.toWebHandler(
-              HttpApiBuilder.layer(VoiceHttpTestApi).pipe(
-                Layer.provide(WebhookRoute.layer),
-                Layer.provide(RelayDeliveryProof.layer),
-                Layer.provide(
-                  Layer.succeed(ScheduledTaskService.ScheduledTaskService, input.service),
-                ),
-                Layer.provide(
-                  Layer.mock(ServerSecretStore.ServerSecretStore)({
-                    get: () => Effect.succeedNone,
-                  }),
-                ),
-                Layer.provide(
-                  Layer.mock(ServerEnvironment.ServerEnvironment)({
-                    getEnvironmentId: Effect.succeed(EnvironmentId.make("environment:voice-http")),
-                  }),
-                ),
-                Layer.provide(
-                  HttpPlatform.layer.pipe(
-                    Layer.provideMerge(NodeServices.layer),
-                    Layer.provideMerge(Etag.layerWeak),
-                  ),
-                ),
-                Layer.provide([NodeServices.layer, NodePlatformCrypto.layerSignature]),
-              ),
-              { disableLogger: true },
-            ),
-          ),
-          ({ dispose }) => Effect.promise(dispose),
-        );
-        const bytes = new TextEncoder().encode(JSON.stringify(voiceCandidate));
-        const headers = signedVoiceRequest(task, bytes).headers;
-        const send = Effect.fn("VoiceHttpTest.send")(function* (body = bytes) {
-          const context = yield* Effect.context<never>();
-          return yield* Effect.promise(() =>
-            handler(
-              new Request(`http://voice.test${task.webhook!.path}`, {
-                method: "POST",
-                body,
-                headers,
-              }),
-              context,
-            ),
-          );
-        });
-        const accepted = yield* waitForSpan(
-          send().pipe(
-            Effect.tap((response) => Effect.sync(() => assert.equal(response.status, 202))),
-          ),
-          "VoiceWebhookAction.dispatch",
-        );
-        assert.equal(accepted.status, 202);
-        const launch = yield* Queue.take(input.launches);
-        assert.equal(launch.projectId, task.projectId);
-        assert.equal(launch.enforceNoSetupScripts, true);
-        const tampered = yield* send(
-          new TextEncoder().encode(JSON.stringify({ ...voiceCandidate, sha: "c".repeat(40) })),
-        );
-        assert.equal(tampered.status, 401);
-        const duplicate = yield* waitForSpan(send(), "VoiceWebhookAction.dispatch");
-        assert.equal(duplicate.status, 202);
-        assert.equal(yield* Queue.size(input.launches), 0);
-        yield* input.service.setEnabled({ id: task.id, enabled: false });
-        const enabled = yield* input.service.setEnabled({ id: task.id, enabled: true });
-        assert.notEqual(enabled.task.generation, binding.generation);
-        assert.equal((yield* send()).status, 409);
-        assert.equal(yield* Queue.size(input.launches), 0);
-        const state = yield* decodeVoiceState(
-          yield* Effect.promise(() =>
-            NodeFSP.readFile(NodePath.join(input.stateDir, "state.json"), "utf8"),
-          ),
-        );
-        assert.deepEqual(state.identities, [`${voiceCandidate.tag}:${voiceCandidate.sha}`]);
-        assert.deepEqual(state.deliveries, [voiceCandidate.deliveryId]);
-      }),
-    ),
-  ),
-);
-
-it.effect(
-  "hands only verified original bytes to the app action, never history or decoded text",
-  () =>
-    withVoiceService((input) =>
-      Effect.gen(function* () {
-        const { task } = yield* bindVoiceTask(input);
-        yield* input.voiceSettings!.updateSettings({
-          defaultModelSelection: {
-            instanceId: ProviderInstanceId.make("configured-codex"),
-            model: "new-current-model",
-            options: [{ id: "reasoningEffort", value: "high" }],
-          },
-          defaultRuntimeMode: "approval-required",
-        });
-        const signed = signedVoiceRequest(task);
-        for (const request of [
-          { ...signed, headers: {} },
-          { ...signed, headers: { "x-hub-signature-256": "sha256=" + "0".repeat(64) } },
-          {
-            ...signed,
-            body: new TextEncoder().encode(
-              JSON.stringify({ ...voiceCandidate, sha: "c".repeat(40) }),
-            ),
-          },
-          forbidDecodedBody(signedVoiceRequest(task, new Uint8Array([0xff]))),
-          forbidDecodedBody(
-            signedVoiceRequest(
-              task,
-              new TextEncoder().encode(" ".repeat(1025) + JSON.stringify(voiceCandidate)),
-            ),
-          ),
-          signedVoiceRequest(
-            task,
-            new TextEncoder().encode(JSON.stringify({ ...voiceCandidate, upstream: "evil/repo" })),
-          ),
-          signedVoiceRequest(
-            task,
-            new TextEncoder().encode(JSON.stringify({ ...voiceCandidate, tag: "v99.0.0-rc" })),
-          ),
-          signedVoiceRequest(
-            task,
-            new TextEncoder().encode(
-              JSON.stringify({
-                ...voiceCandidate,
-                issuedAt: "1969-12-31T23:54:00Z",
-                publishedAt: "1969-12-31T23:54:00Z",
-                expiresAt: "1969-12-31T23:59:00Z",
-              }),
-            ),
-          ),
-        ])
-          assert.notEqual((yield* input.service.triggerWebhook(request))._tag, "accepted");
-        assert.equal(yield* Queue.size(input.launches), 0);
-        const accepted = yield* waitForSpan(
-          input.service.triggerWebhook(signed),
-          "VoiceWebhookAction.dispatch",
-        );
-        assert.equal(accepted._tag, "accepted");
-        const launch = yield* Queue.take(input.launches);
-        assert.equal(launch.projectId, task.projectId);
-        assert.equal(launch.enforceNoSetupScripts, true);
-        assert.equal(launch.cleanProviderConstraint, undefined);
-        assert.deepEqual(launch.modelSelection, {
-          instanceId: ProviderInstanceId.make("configured-codex"),
-          model: "new-current-model",
-          options: [{ id: "reasoningEffort", value: "high" }],
-        });
-        assert.deepEqual(launch.workspaceStrategy, {
-          type: "worktree",
-          baseRef: "c".repeat(40),
-          approvedBase: { branch: "release/approved", commit: "c".repeat(40) },
-          branch: `auto/upstream-${voiceCandidate.tag}-${voiceCandidate.sha.slice(0, 12)}`,
-          startFromOrigin: false,
-        });
-        assert.equal(launch.runtimeMode, "approval-required");
-        assert.equal(launch.reuseExistingThread, undefined);
-        assert.equal(launch.threadId, undefined);
-        assert.isFalse(launch.initialMessage!.text.includes("untrusted decoded decoy"));
-        const history = yield* input.sql<{
-          body: string;
-          headers_json: string;
-        }>`SELECT body, headers_json FROM scheduled_task_webhook_deliveries WHERE task_id = ${task.id}`;
-        assert.isTrue(
-          history.every((row) => row.body === "" && !row.headers_json.includes("sha256=")),
-        );
-        yield* waitForSpan(input.service.triggerWebhook(signed), "VoiceWebhookAction.dispatch");
-        assert.equal(yield* Queue.size(input.launches), 0);
-      }),
-    ),
-);
-
-it.effect.each(["unset", "other-provider", "scratch", "unapproved-base"] as const)(
-  "refuses an unsafe automation target before claiming (%s)",
-  (target) =>
-    withVoiceService(
-      (input) =>
-        Effect.gen(function* () {
-          const { task } = yield* bindVoiceTask(input);
-          if (target !== "scratch" && target !== "unapproved-base")
-            yield* input.voiceSettings!.updateSettings({
-              defaultModelSelection:
-                target === "unset"
-                  ? null
-                  : { instanceId: ProviderInstanceId.make("claude"), model: "configured-model" },
-            });
-          yield* waitForSpan(
-            input.service.triggerWebhook(signedVoiceRequest(task)),
-            "VoiceWebhookAction.dispatch",
-          );
-          assert.equal(yield* Queue.size(input.launches), 0);
-          assert.isFalse(
-            yield* Effect.promise(() =>
-              NodeFSP.access(NodePath.join(input.stateDir, "state.json")).then(
-                () => true,
-                () => false,
-              ),
-            ),
-          );
-        }),
-      voiceApi,
-      target === "scratch",
-      target === "unapproved-base",
-    ),
-);
-
-it.effect("keeps concurrent payloads separate and durably claims only one release", () =>
-  withVoiceService((input) =>
-    Effect.gen(function* () {
-      const { task } = yield* bindVoiceTask(input);
-      const wrong = signedVoiceRequest(
-        task,
-        new TextEncoder().encode(
-          JSON.stringify({
-            ...voiceCandidate,
-            sha: "c".repeat(40),
-            deliveryId: "00000000-0000-4000-8000-000000000002",
-          }),
-        ),
-      );
-      const requests = [wrong, signedVoiceRequest(task)];
-      const results = yield* waitForSpan(
-        Effect.forEach(requests, (request) => input.service.triggerWebhook(request), {
-          concurrency: "unbounded",
-        }),
-        "VoiceWebhookAction.dispatch",
-        2,
-      );
-      assert.isTrue(results.every((result) => result._tag === "accepted"));
-      const launch = yield* Queue.take(input.launches);
-      assert.isTrue(launch.initialMessage!.text.includes(voiceCandidate.sha));
-      assert.isFalse(launch.initialMessage!.text.includes("c".repeat(40)));
-      yield* waitForSpan(
-        Effect.all(
-          Array.from({ length: 8 }, () => input.service.triggerWebhook(signedVoiceRequest(task))),
-          { concurrency: "unbounded" },
-        ),
-        "VoiceWebhookAction.dispatch",
-        8,
-      );
-      assert.equal(yield* Queue.size(input.launches), 0);
-      const text = yield* Effect.promise(() =>
-        NodeFSP.readFile(NodePath.join(input.stateDir, "state.json"), "utf8"),
-      );
-      const state = yield* decodeVoiceState(text);
-      assert.deepEqual(state.identities, [`${voiceCandidate.tag}:${voiceCandidate.sha}`]);
-      assert.deepEqual(state.deliveries, [voiceCandidate.deliveryId]);
-    }),
-  ),
-);
-
-it.effect("refuses wrong or disabled private bindings at ingress", () =>
-  withVoiceService((input) =>
-    Effect.gen(function* () {
-      const { task, binding } = yield* bindVoiceTask(input);
-      for (const mutation of [
-        { baseBranch: "../bad" },
-        { baseBranch: "-bad" },
-        { acceptedSource: "main" },
-        { baseBranch: undefined },
-        { acceptedSource: undefined },
-      ]) {
-        assert.equal(
-          (yield* decodeVoiceBinding({ ...binding, ...mutation }).pipe(Effect.result))._tag,
-          "Failure",
-        );
-      }
-      const { launchPolicy: _retiredPolicy, ...oldBinding } = binding;
-      assert.equal((yield* decodeVoiceBinding(oldBinding).pipe(Effect.result))._tag, "Failure");
-      for (const mutation of [
-        { taskId: "other-task" },
-        { projectId: "other-project" },
-        { managerThreadId: "other-manager" },
-        { generation: "a".repeat(32) },
-        { enabled: false },
-      ]) {
-        input.bind({ ...binding, ...mutation } as VoiceWebhookAction.VoiceWebhookBinding);
-        assert.equal(
-          (yield* input.service.triggerWebhook(signedVoiceRequest(task)))._tag,
-          "disabled",
-        );
-      }
-      assert.equal(yield* Queue.size(input.launches), 0);
-    }),
-  ),
-);
-
-it.effect(
-  "rechecks disabled tasks, generations and private binding after async GitHub validation",
-  () =>
-    Effect.gen(function* () {
-      for (const mutation of [
-        "disabled",
-        "generation",
-        "project",
-        "manager",
-        "binding",
-        "binding-task",
-        "binding-project",
-        "binding-manager",
-        "binding-generation",
-        "binding-base",
-        "binding-source",
-        "expired",
-      ] as const) {
-        const started = Promise.withResolvers<void>();
-        const release = Promise.withResolvers<void>();
-        yield* withVoiceService(
-          (input) =>
-            Effect.gen(function* () {
-              const { task, binding } = yield* bindVoiceTask(input);
-              const worker = yield* waitForSpan(
-                input.service.triggerWebhook(signedVoiceRequest(task)),
-                "VoiceWebhookAction.dispatch",
-              ).pipe(Effect.forkChild);
-              yield* Effect.promise(() => started.promise);
-              if (mutation === "disabled")
-                yield* input.sql`UPDATE scheduled_tasks SET enabled = 0 WHERE task_id = ${task.id}`;
-              if (mutation === "generation")
-                yield* input.sql`UPDATE scheduled_tasks SET prompt = 'changed' WHERE task_id = ${task.id}`;
-              if (mutation === "project")
-                yield* input.sql`UPDATE scheduled_tasks SET project_id = 'other' WHERE task_id = ${task.id}`;
-              if (mutation === "manager")
-                yield* input.sql`UPDATE scheduled_tasks SET thread_id = 'other' WHERE task_id = ${task.id}`;
-              if (mutation === "binding") input.bind({ ...binding, enabled: false });
-              if (mutation === "binding-task")
-                input.bind({
-                  ...binding,
-                  taskId: "other",
-                } as VoiceWebhookAction.VoiceWebhookBinding);
-              if (mutation === "binding-project")
-                input.bind({
-                  ...binding,
-                  projectId: "other",
-                } as VoiceWebhookAction.VoiceWebhookBinding);
-              if (mutation === "binding-manager")
-                input.bind({
-                  ...binding,
-                  managerThreadId: "other",
-                } as VoiceWebhookAction.VoiceWebhookBinding);
-              if (mutation === "binding-generation")
-                input.bind({ ...binding, generation: "a".repeat(32) });
-              if (mutation === "binding-base")
-                input.bind({ ...binding, baseBranch: "release/other" });
-              if (mutation === "binding-source")
-                input.bind({ ...binding, acceptedSource: "b".repeat(40) });
-              if (mutation === "expired") yield* TestClock.adjust("6 minutes");
-              release.resolve();
-              yield* Fiber.join(worker);
-              assert.equal(yield* Queue.size(input.launches), 0);
-            }),
-          async (path, ...args) => {
-            if (path === "/releases/latest") {
-              started.resolve();
-              await release.promise;
-            }
-            return voiceApi(path, ...args);
-          },
-        );
-      }
-    }),
-);
-
-it.effect("independently rejects GitHub tag SHA mismatch without consuming a durable claim", () =>
-  withVoiceService(
-    (input) =>
-      Effect.gen(function* () {
-        const { task } = yield* bindVoiceTask(input);
-        yield* waitForSpan(
-          input.service.triggerWebhook(signedVoiceRequest(task)),
-          "VoiceWebhookAction.dispatch",
-        );
-        assert.equal(yield* Queue.size(input.launches), 0);
-        assert.isFalse(
-          yield* Effect.promise(() =>
-            NodeFSP.access(NodePath.join(input.stateDir, "state.json")).then(
-              () => true,
-              () => false,
-            ),
-          ),
-        );
-      }),
-    async (path, ...args) =>
-      path.startsWith("/git/ref/")
-        ? {
-            ref: `refs/tags/${voiceCandidate.tag}`,
-            object: { type: "commit", sha: "c".repeat(40) },
-          }
-        : voiceApi(path, ...args),
-  ),
-);
-
-it.effect("never falls back from an app-owned action to a webhook prompt", () =>
+it.effect("refuses retired actions on save and stored delivery without launching a prompt", () =>
   withService(({ service, sql, launches }) =>
     Effect.gen(function* () {
-      const { task } = yield* service.upsert(yield* webhookTaskInput());
-      yield* sql`UPDATE scheduled_tasks SET schedule_json = ${JSON.stringify({ type: "webhook", signature: null, action: "voice-upstream-release" })} WHERE task_id = ${task.id}`;
-      const result = yield* service.triggerWebhook(requestFor(task));
-      assert.equal(result._tag, "disabled");
-      yield* sql`UPDATE scheduled_tasks SET schedule_json = ${JSON.stringify({ type: "webhook", signature: null, action: "unknown-action" })} WHERE task_id = ${task.id}`;
-      assert.isTrue(
-        Exit.isFailure(yield* service.triggerWebhook(requestFor(task)).pipe(Effect.exit)),
+      const schedule = { type: "webhook", signature: null, action: "voice-upstream-release" };
+      assert.isFalse(
+        isUpsertInput({
+          ...(yield* webhookTaskInput()),
+          schedule,
+        }),
       );
+      const { task } = yield* service.upsert(yield* webhookTaskInput());
+      yield* sql`UPDATE scheduled_tasks SET schedule_json = ${JSON.stringify(schedule)} WHERE task_id = ${task.id}`;
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(service.list())));
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(service.runNow({ id: task.id }))));
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(service.triggerWebhook(requestFor(task)))));
       assert.equal(yield* Queue.size(launches), 0);
+      yield* service.delete({ id: task.id });
+      assert.deepEqual((yield* service.list()).tasks, []);
     }),
   ),
 );
@@ -1345,14 +652,6 @@ it.effect("drops a character split by the delivery log's body limit", () =>
 );
 
 const queuedDeliveryCases = [
-  {
-    change: "converted to an app-owned action",
-    reason: "The task's trigger changed before this delivery ran.",
-    apply: (service: ScheduledTaskService.ScheduledTaskService["Service"]) =>
-      webhookTaskInput({ schedule: { type: "webhook", action: "voice-upstream-release" } }).pipe(
-        Effect.flatMap(service.upsert),
-      ),
-  },
   {
     change: "paused",
     reason: "The task was paused before this delivery ran.",

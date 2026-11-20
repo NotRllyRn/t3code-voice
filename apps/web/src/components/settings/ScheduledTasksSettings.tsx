@@ -187,9 +187,6 @@ const EMPTY_DRAFT: DraftState = {
   runtimeMode: "full-access",
   interactionMode: "default",
   baseModelSelection: null,
-  webhookAction: undefined,
-  savedSchedule: null,
-  hasStoredSignatureSecret: false,
   signatureEnabled: false,
   ...WEBHOOK_SIGNATURE_DEFAULTS,
   signatureSecret: "",
@@ -1371,8 +1368,6 @@ function ScheduledTaskEditorForm({
     task?.schedule.type === "once";
   const offersThreadModes =
     environment?.serverConfig?.environment.capabilities.scheduledTaskThreadModes === true;
-  const offersVoiceActions =
-    environment?.serverConfig?.environment.capabilities.voiceWebhookActions === true;
   const connected =
     environment?.connection.phase === "connected" && environment.serverConfig !== null;
   const tasksQuery = useEnvironmentQuery(
@@ -1490,14 +1485,7 @@ function ScheduledTaskEditorForm({
       reportFailure("Invalid filter", parsedFilters.error);
       return;
     }
-    if (draft.webhookAction !== undefined && !offersVoiceActions) {
-      reportFailure(
-        "Update this environment",
-        "This server does not advertise voice webhook actions.",
-      );
-      return;
-    }
-    const schedule = scheduleFromDraft(draft, offersVoiceActions);
+    const schedule = scheduleFromDraft(draft);
     if (schedule === null) {
       for (const error of scheduleDraftErrors(draft)) reportFailure(error.title, error.description);
       return;
@@ -1865,17 +1853,11 @@ function ScheduledTaskEditorForm({
                     });
                 }}
               >
-                <Toggle value="fixed" disabled={draft.webhookAction !== undefined}>
-                  At a time
-                </Toggle>
+                <Toggle value="fixed">At a time</Toggle>
                 {offersOnce || draft.scheduleMode === "once" ? (
-                  <Toggle value="once" disabled={draft.webhookAction !== undefined}>
-                    Once
-                  </Toggle>
+                  <Toggle value="once">Once</Toggle>
                 ) : null}
-                <Toggle value="interval" disabled={draft.webhookAction !== undefined}>
-                  Every interval
-                </Toggle>
+                <Toggle value="interval">Every interval</Toggle>
                 <Toggle
                   value="webhook"
                   disabled={webhookDenial !== undefined && draft.scheduleMode !== "webhook"}
@@ -1898,53 +1880,11 @@ function ScheduledTaskEditorForm({
             draft.enabled ? null : draft.scheduleMode === "webhook" ? (
               <div className="space-y-4">
                 <WebhookEndpointField environmentId={environmentId} task={liveTask} />
-                <Field label="Action" htmlFor="scheduled-task-webhook-action">
-                  <Select
-                    value={draft.webhookAction ?? "prompt"}
-                    disabled={draft.editingId !== null}
-                    onValueChange={(value) => {
-                      if (draft.editingId !== null) return;
-                      if (value !== "prompt" && value !== "voice-upstream-release") return;
-                      if (value === "voice-upstream-release" && !offersVoiceActions) return;
-                      setDraft((current) => ({
-                        ...current,
-                        webhookAction: value === "voice-upstream-release" ? value : undefined,
-                        ...(value === "voice-upstream-release"
-                          ? {
-                              enabled: false,
-                              signatureEnabled: true,
-                              replayKey: "",
-                              coalesceKey: "",
-                              coalesceWindowSeconds: "",
-                              ...WEBHOOK_SIGNATURE_DEFAULTS,
-                            }
-                          : {}),
-                      }));
-                    }}
-                  >
-                    <SelectTrigger size="sm" id="scheduled-task-webhook-action">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectPopup>
-                      <SelectItem value="prompt">Run prompt</SelectItem>
-                      <SelectItem value="voice-upstream-release" disabled={!offersVoiceActions}>
-                        Verified voice release
-                      </SelectItem>
-                    </SelectPopup>
-                  </Select>
-                </Field>
-                <p className="text-xs text-muted-foreground" role="status">
-                  {draft.webhookAction !== undefined
-                    ? "Starts one guarded upgrade thread after release verification. Create paused with an HMAC secret. Editing or enabling changes the generation; update the private binding last."
-                    : "Each request runs the prompt. Use {{body.path}}, {{headers.name}}, {{query.name}}, {{body}} or {{request}} in the prompt; only what it names reaches the agent."}
+                <p className="text-xs text-muted-foreground">
+                  {
+                    "Each request runs the prompt. Use {{body.path}}, {{headers.name}}, {{query.name}}, {{body}} or {{request}} in the prompt; only what it names reaches the agent."
+                  }
                 </p>
-                {draft.webhookAction !== undefined &&
-                (!offersVoiceActions || draft.webhookAction !== "voice-upstream-release") ? (
-                  <p className="text-sm text-muted-foreground" role="alert">
-                    This client and server cannot edit this webhook action. Update before saving;
-                    this task will not be converted to a prompt.
-                  </p>
-                ) : null}
                 <Field
                   label="Skip requests older than"
                   hint="minutes, optional"
@@ -1970,66 +1910,62 @@ function ScheduledTaskEditorForm({
                   filters={draft.filters}
                   onChange={(filters) => setDraft((current) => ({ ...current, filters }))}
                 />
-                {draft.webhookAction === undefined ? (
-                  <>
-                    <Field
-                      label="Duplicate request key"
-                      hint="template, optional"
-                      htmlFor="scheduled-task-replay-key"
-                    >
-                      <Input
-                        id="scheduled-task-replay-key"
-                        placeholder="{{headers.delivery-id}}"
-                        value={draft.replayKey}
-                        onChange={(event) =>
-                          setDraft((current) => ({ ...current, replayKey: event.target.value }))
-                        }
-                      />
-                    </Field>
-                    <p className="text-xs text-muted-foreground">
-                      Requests with the same key run only once within 7 days.
-                    </p>
-                    <Field
-                      label="Coalesce key"
-                      hint="template, optional"
-                      htmlFor="scheduled-task-coalesce-key"
-                    >
-                      <Input
-                        id="scheduled-task-coalesce-key"
-                        placeholder="{{body.id}}"
-                        value={draft.coalesceKey}
-                        onChange={(event) =>
-                          setDraft((current) => ({ ...current, coalesceKey: event.target.value }))
-                        }
-                      />
-                    </Field>
-                    <Field
-                      label="Coalesce window"
-                      hint="seconds, 10–3600"
-                      htmlFor="scheduled-task-coalesce-window"
-                    >
-                      <Input
-                        id="scheduled-task-coalesce-window"
-                        type="number"
-                        nativeInput
-                        min={10}
-                        max={3600}
-                        placeholder="120"
-                        value={draft.coalesceWindowSeconds}
-                        onChange={(event) =>
-                          setDraft((current) => ({
-                            ...current,
-                            coalesceWindowSeconds: event.target.value,
-                          }))
-                        }
-                      />
-                    </Field>
-                    <p className="text-xs text-muted-foreground">
-                      Coalescing runs the latest payload once when the window from the first
-                      delivery closes. Empty keys run normally.
-                    </p>
-                  </>
-                ) : null}
+                <Field
+                  label="Duplicate request key"
+                  hint="template, optional"
+                  htmlFor="scheduled-task-replay-key"
+                >
+                  <Input
+                    id="scheduled-task-replay-key"
+                    placeholder="{{headers.delivery-id}}"
+                    value={draft.replayKey}
+                    onChange={(event) =>
+                      setDraft((current) => ({ ...current, replayKey: event.target.value }))
+                    }
+                  />
+                </Field>
+                <p className="text-xs text-muted-foreground">
+                  Requests with the same key run only once within 7 days.
+                </p>
+                <Field
+                  label="Coalesce key"
+                  hint="template, optional"
+                  htmlFor="scheduled-task-coalesce-key"
+                >
+                  <Input
+                    id="scheduled-task-coalesce-key"
+                    placeholder="{{body.id}}"
+                    value={draft.coalesceKey}
+                    onChange={(event) =>
+                      setDraft((current) => ({ ...current, coalesceKey: event.target.value }))
+                    }
+                  />
+                </Field>
+                <Field
+                  label="Coalesce window"
+                  hint="seconds, 10–3600"
+                  htmlFor="scheduled-task-coalesce-window"
+                >
+                  <Input
+                    id="scheduled-task-coalesce-window"
+                    type="number"
+                    nativeInput
+                    min={10}
+                    max={3600}
+                    placeholder="120"
+                    value={draft.coalesceWindowSeconds}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        coalesceWindowSeconds: event.target.value,
+                      }))
+                    }
+                  />
+                </Field>
+                <p className="text-xs text-muted-foreground">
+                  Coalescing runs the latest payload once when the window from the first delivery
+                  closes. Empty keys run normally.
+                </p>
                 <div className="flex items-center justify-between gap-4">
                   <div className="min-w-0 space-y-1">
                     <Label htmlFor="scheduled-task-signature">Require signature</Label>
@@ -2039,7 +1975,6 @@ function ScheduledTaskEditorForm({
                   </div>
                   <Switch
                     id="scheduled-task-signature"
-                    disabled={draft.webhookAction !== undefined}
                     checked={draft.signatureEnabled}
                     onCheckedChange={(signatureEnabled) =>
                       setDraft((current) => ({ ...current, signatureEnabled }))
@@ -2097,10 +2032,6 @@ function ScheduledTaskEditorForm({
                         id="scheduled-task-signature-secret"
                         type="password"
                         autoComplete="off"
-                        required={
-                          draft.webhookAction !== undefined &&
-                          (draft.editingId === null || !draft.hasStoredSignatureSecret)
-                        }
                         value={draft.signatureSecret}
                         placeholder={
                           liveTask?.schedule.type === "webhook" && liveTask.webhook?.hasSecret
@@ -2201,18 +2132,11 @@ function ScheduledTaskEditorForm({
             <div className="min-w-0 space-y-1">
               <Label htmlFor="scheduled-task-enabled">Enabled</Label>
               <p id="scheduled-task-enabled-description" className="text-sm text-muted-foreground">
-                {draft.webhookAction !== undefined &&
-                (task?.schedule.type !== "webhook" || task.schedule.action === undefined)
-                  ? "Create paused. Enabling changes the generation; update the private binding last."
-                  : "Disabled tasks stay saved but do not run."}
+                Disabled tasks stay saved but do not run.
               </p>
             </div>
             <Switch
               id="scheduled-task-enabled"
-              disabled={
-                draft.webhookAction !== undefined &&
-                (task?.schedule.type !== "webhook" || task.schedule.action === undefined)
-              }
               aria-describedby="scheduled-task-enabled-description"
               checked={draft.enabled}
               onCheckedChange={(enabled) => setDraft((current) => ({ ...current, enabled }))}
@@ -2229,8 +2153,6 @@ function ScheduledTaskEditorForm({
           size="sm"
           disabled={
             !canOperate ||
-            (draft.webhookAction !== undefined &&
-              (!offersVoiceActions || draft.webhookAction !== "voice-upstream-release")) ||
             saving ||
             editingTaskMissing ||
             !connected ||
