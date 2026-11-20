@@ -24,15 +24,26 @@ jobs:
     timeout-minutes: 3
     environment: voice-automation
     steps:
-      - name: Require an approved immutable sender source
+      - name: Check approved immutable sender source
+        id: source
         env:
           SOURCE_SHA: ${{ vars.VOICE_UPSTREAM_SOURCE_SHA }}
         run: |
+          if [[ -z "$SOURCE_SHA" ]]; then
+            echo '::notice::Voice watcher is not configured; no poll or delivery.'
+            echo 'configured=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [[ ! "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]; then
             echo 'Set VOICE_UPSTREAM_SOURCE_SHA to the reviewed full sender commit in the protected environment.' >&2
             exit 1
           fi
+          echo 'configured=true' >> "$GITHUB_OUTPUT"
+      - name: Report disabled delivery
+        if: github.event_name == 'workflow_dispatch' && inputs.send_webhook && vars.VOICE_UPSTREAM_WATCH_ENABLED != 'true'
+        run: echo '::notice::Voice webhook delivery is disabled; no delivery will be sent.'
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: steps.source.outputs.configured == 'true'
         with:
           ref: ${{ vars.VOICE_UPSTREAM_SOURCE_SHA }}
           persist-credentials: false
@@ -42,13 +53,14 @@ jobs:
             packages/shared/src/forkIdentity.ts
           sparse-checkout-cone-mode: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: steps.source.outputs.configured == 'true'
         with:
           node-version: "24"
       - name: Check stable upstream release without delivery
-        if: github.event_name == 'workflow_dispatch' && !inputs.send_webhook
+        if: steps.source.outputs.configured == 'true' && github.event_name == 'workflow_dispatch' && !inputs.send_webhook
         run: node scripts/voice-upstream-poll.ts
       - name: Verify stable upstream release and notify signed coordinator
-        if: vars.VOICE_UPSTREAM_WATCH_ENABLED == 'true' && (github.event_name == 'schedule' || inputs.send_webhook)
+        if: steps.source.outputs.configured == 'true' && vars.VOICE_UPSTREAM_WATCH_ENABLED == 'true' && (github.event_name == 'schedule' || inputs.send_webhook)
         env:
           VOICE_UPSTREAM_WEBHOOK_URL: ${{ secrets.VOICE_UPSTREAM_WEBHOOK_URL }}
           VOICE_UPSTREAM_WEBHOOK_SECRET: ${{ secrets.VOICE_UPSTREAM_WEBHOOK_SECRET }}

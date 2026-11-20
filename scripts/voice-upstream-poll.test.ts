@@ -84,6 +84,7 @@ test("the sender CLI runs from the workflow's sparse checkout with only fake IO"
                 event_name: event,
                 event: { repository: { default_branch: "main" } },
               },
+              steps: { source: { outputs: { configured: "true" } } },
               vars: { VOICE_UPSTREAM_WATCH_ENABLED: enabled },
               inputs: { send_webhook: send },
               format: (pattern: string, value: string) => pattern.replace("{0}", value),
@@ -96,9 +97,34 @@ test("the sender CLI runs from the workflow's sparse checkout with only fake IO"
             expect(evaluate(jobCondition) && evaluate(readCondition)).toBe(
               ref === "refs/heads/main" && event === "workflow_dispatch" && !send,
             );
+            context.steps.source.outputs.configured = "false";
+            expect(evaluate(sendCondition)).toBe(false);
+            expect(evaluate(readCondition)).toBe(false);
           }
         }
       }
+    }
+    const sourceScript =
+      /name: Check approved immutable sender source[\s\S]*?        run: \|\n([\s\S]*?)      - name: Report disabled delivery/
+        .exec(workflow)![1]!
+        .split("\n")
+        .map((line) => line.replace(/^          /, ""))
+        .join("\n");
+    const sourceOutput = NodePath.join(dir, "source-output");
+    const sourceEnv = { PATH: "/usr/bin:/bin", GITHUB_OUTPUT: sourceOutput };
+    for (const source of ["", "a".repeat(40)]) {
+      await NodeFSP.writeFile(sourceOutput, "");
+      await NodeUtil.promisify(NodeChildProcess.execFile)("/bin/bash", ["-c", sourceScript], {
+        env: { ...sourceEnv, SOURCE_SHA: source },
+      });
+      expect(await NodeFSP.readFile(sourceOutput, "utf8")).toBe(`configured=${source !== ""}\n`);
+    }
+    for (const source of ["main", "A".repeat(40), "a".repeat(39)]) {
+      await expect(
+        NodeUtil.promisify(NodeChildProcess.execFile)("/bin/bash", ["-c", sourceScript], {
+          env: { ...sourceEnv, SOURCE_SHA: source },
+        }),
+      ).rejects.toThrow();
     }
     const sparse = /sparse-checkout: \|\n((?: {12}[^\n]+\n)+)/
       .exec(workflow)?.[1]
