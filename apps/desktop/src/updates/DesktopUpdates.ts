@@ -10,12 +10,8 @@ import {
   type DesktopUpdateState,
 } from "@t3tools/contracts";
 import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
-import {
-  isVoiceUpdateCandidate,
-  parseVoiceUpdateConfig,
-  type VoiceUpdateConfig,
-} from "./voiceUpdateConfig.ts";
-import { verifyVoiceMacIdentity } from "./voiceMacIdentity.ts";
+import { isVoiceUpdateCandidate, type VoiceUpdateConfig } from "./voiceUpdateConfig.ts";
+import { loadVoiceUpdateConfig } from "./voiceUpdateLoader.ts";
 import { errorTag } from "@t3tools/shared/observability";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -1277,35 +1273,11 @@ export const make = Effect.gen(function* () {
         environment.isPackaged &&
         !environment.isDevelopment
       ) {
-        voiceUpdateConfig = yield* fileSystem
-          .readFileString(environment.path.join(environment.appPath, "package.json"))
-          .pipe(
-            Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown))),
-            Effect.map((pkg) =>
-              parseVoiceUpdateConfig(
-                typeof pkg === "object" && pkg !== null && "t3VoiceUpdate" in pkg
-                  ? pkg.t3VoiceUpdate
-                  : null,
-                environment.appVersion,
-              ),
-            ),
-            Effect.flatMap((candidate) =>
-              candidate === null
-                ? Effect.succeed(null)
-                : verifyVoiceMacIdentity(
-                    environment.path.resolve(environment.resourcesPath, "../.."),
-                    candidate.publisherSha1,
-                    environment.appVersion,
-                  ).pipe(
-                    Effect.provideService(
-                      ChildProcessSpawner.ChildProcessSpawner,
-                      childProcessSpawner,
-                    ),
-                    Effect.as(candidate),
-                  ),
-            ),
-            Effect.orElseSucceed(() => null),
-          );
+        voiceUpdateConfig = yield* loadVoiceUpdateConfig(
+          fileSystem,
+          environment,
+          childProcessSpawner,
+        );
       }
       if (manualOnly()) {
         yield* electronUpdater.setAutoDownload(false);
