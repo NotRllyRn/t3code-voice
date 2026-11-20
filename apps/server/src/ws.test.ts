@@ -993,7 +993,7 @@ it.live.each([
         Effect.sync(
           () =>
             new WebSocket(
-              `${origin}/ws?${ORCHESTRATION_PROTOCOL_QUERY_PARAM}=${ORCHESTRATION_PROTOCOL_VERSION}${framed ? `&${SOCKET_FRAME_PARTS_QUERY_PARAM}=1` : ""}`,
+              `${origin}/ws?${ORCHESTRATION_PROTOCOL_QUERY_PARAM}=${ORCHESTRATION_PROTOCOL_VERSION}&clientCapabilities=voiceHistoryV1${framed ? `&${SOCKET_FRAME_PARTS_QUERY_PARAM}=1` : ""}`,
               {
                 origin: "t3code://app",
               },
