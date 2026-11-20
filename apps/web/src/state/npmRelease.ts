@@ -1,15 +1,34 @@
-import { type ServerConfig, ServerNpmReleaseError } from "@t3tools/contracts";
+import { type EnvironmentId, type ServerConfig, ServerNpmReleaseError } from "@t3tools/contracts";
+import { parseVoiceVersion } from "@t3tools/shared/voiceRelease";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { Atom } from "effect/reactivity";
+import { AsyncResult, Atom } from "effect/reactivity";
 
 import { environmentSummaries } from "./presentation";
 import { primaryEnvironmentIdAtom } from "./primaryEnvironment";
 import { serverEnvironment } from "./server";
 
 const isServerNpmReleaseError = Schema.is(ServerNpmReleaseError);
+
+export const voiceServerReleasesAtom = Atom.make((get) => {
+  const releases = new Map<EnvironmentId, string>();
+  for (const environmentId of get(environmentSummaries.connectedEnvironmentIdsAtom)) {
+    const config = get(serverEnvironment.configValueAtom(environmentId));
+    if (
+      config?.environment.capabilities.voiceReleaseLookup !== true ||
+      parseVoiceVersion(config.environment.serverVersion) === null
+    )
+      continue;
+    const release = AsyncResult.getOrElse(
+      get(serverEnvironment.npmRelease({ environmentId, input: { spec: "voice" } })),
+      () => null,
+    );
+    if (release !== null) releases.set(environmentId, release.version);
+  }
+  return releases;
+}).pipe(Atom.withLabel("voice-server-releases"));
 
 function unsupportedLookup(config: ServerConfig | null): ServerNpmReleaseError | null {
   if (config === null) {

@@ -58,14 +58,15 @@ export function resolveVersionMismatch(
 
   const clientCore = versionCore(normalizedClientVersion);
   const serverCore = versionCore(normalizedServerVersion);
-  const compareNightlyBuilds =
-    parseSemver(normalizedClientVersion)?.prerelease[0] === "nightly" &&
-    parseSemver(normalizedServerVersion)?.prerelease[0] === "nightly";
+  const clientChannel = cliReleaseChannelOf(normalizedClientVersion);
+  const compareBuilds =
+    (clientChannel === "nightly" || clientChannel === "voice") &&
+    cliReleaseChannelOf(normalizedServerVersion) === clientChannel;
   const serverIsBehind =
     parseSemver(clientCore) && parseSemver(serverCore)
       ? compareSemverVersions(
-          compareNightlyBuilds ? normalizedServerVersion : serverCore,
-          compareNightlyBuilds ? normalizedClientVersion : clientCore,
+          compareBuilds ? normalizedServerVersion : serverCore,
+          compareBuilds ? normalizedClientVersion : clientCore,
         ) < 0
       : normalizedServerVersion !== normalizedClientVersion;
   if (!serverIsBehind) {
@@ -107,7 +108,11 @@ export function manualServerUpdateCommand(
   ) {
     const voiceVersion =
       cliReleaseChannelOf(targetVersion) === "voice" ? targetVersion : APP_VERSION;
-    return `Use the matching Voice release (${voiceVersion}) at ${FORK_DESKTOP.releasesUrl}. Follow its manual desktop or Docker server instructions; standalone automatic updates are not shipped.`;
+    if (installation?.kind === "t3-launcher") {
+      const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+      return `${quote(installation.launcher)} update --base-dir ${quote(installation.baseDir)} ${voiceVersion}`;
+    }
+    return `Install the matching Voice release (${voiceVersion}) from ${FORK_DESKTOP.releasesUrl}. Follow its manual desktop, standalone archive, or Docker server instructions.`;
   }
   const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   if (installation?.kind === "npm-global") {

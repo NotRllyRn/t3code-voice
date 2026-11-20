@@ -3,8 +3,9 @@ import {
   ServerNpmReleaseInput,
   type ServerNpmRelease,
 } from "@t3tools/contracts";
-import { npmReleaseDatabaseMigration } from "@t3tools/shared/cliRelease";
-import { parseVoiceVersion } from "@t3tools/shared/voiceRelease";
+import { cliReleaseIndexPageUrl, npmReleaseDatabaseMigration } from "@t3tools/shared/cliRelease";
+import { parseVoiceVersion, selectVoiceRelease } from "@t3tools/shared/voiceRelease";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveCommandPath } from "@t3tools/shared/shell";
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
@@ -14,6 +15,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import * as Stream from "effect/Stream";
 import { FetchHttpClient, HttpClient } from "effect/http";
 
 import packageJson from "../../package.json" with { type: "json" };
@@ -30,10 +32,30 @@ const decodeError = Schema.decodeUnknownOption(
 );
 const decodeInput = Schema.decodeUnknownEffect(ServerNpmReleaseInput);
 
-export function voiceNpmReleaseRefusal(runtimeVersion: string): string | undefined {
-  return parseVoiceVersion(runtimeVersion) === null
-    ? undefined
-    : "Voice servers use fork release archives; npm release metadata is unavailable.";
+const VoiceReleaseIndex = Schema.Array(
+  Schema.Struct({
+    tag_name: Schema.String,
+    html_url: Schema.String,
+    draft: Schema.optionalKey(Schema.Boolean),
+    prerelease: Schema.optionalKey(Schema.Boolean),
+    assets: Schema.Array(
+      Schema.Struct({
+        name: Schema.String,
+        browser_download_url: Schema.String,
+        content_type: Schema.String,
+        digest: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      }),
+    ),
+  }),
+);
+const decodeVoiceReleaseIndex = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(VoiceReleaseIndex),
+);
+
+/** Local release fixtures must never redirect discovery or credentials to another host. */
+export function voiceReleaseTestIndexUrl(value: string): string | undefined {
+  const match = /^http:\/\/(?:127\.0\.0\.1|\[::1\]):([1-9]\d{0,4})(?:\/[^\s?#\\]*)?$/.exec(value);
+  return match && Number(match[1]) <= 65535 ? value : undefined;
 }
 
 export class NpmRelease extends Context.Service<
@@ -66,6 +88,65 @@ function toRelease(spec: string, json: string) {
 export const make = Effect.fn("NpmRelease.make")(function* (runtimeVersion = packageJson.version) {
   const runner = yield* ProcessRunner.ProcessRunner;
   const http = yield* HttpClient.HttpClient;
+  const environment = yield* HostProcess.Environment;
+  const platform = yield* HostProcess.Platform;
+  const arch = yield* HostProcess.Architecture;
+  const lookupVoice = Effect.fn("NpmRelease.lookupVoice")(function* () {
+    const fixture = environment.T3CODE_VOICE_RELEASE_TEST_INDEX_URL;
+    if (fixture !== undefined && voiceReleaseTestIndexUrl(fixture) === undefined) {
+      return yield* new ServerNpmReleaseError({
+        reason: "Invalid loopback Voice release test index URL.",
+      });
+    }
+    for (let page = 1; page <= 10; page += 1) {
+      const url = new URL(fixture ?? cliReleaseIndexPageUrl(page));
+      url.searchParams.set("per_page", "100");
+      url.searchParams.set("page", String(page));
+      const releases = yield* http.get(url.toString()).pipe(
+        Effect.provideService(FetchHttpClient.RequestInit, { redirect: "error" }),
+        Effect.flatMap((response) =>
+          response.status >= 200 && response.status < 300
+            ? Effect.gen(function* () {
+                let bytes = 0;
+                const chunks = yield* response.stream.pipe(
+                  Stream.mapEffect((chunk) => {
+                    bytes += chunk.byteLength;
+                    return bytes <= 8 * 1024 * 1024
+                      ? Effect.succeed(chunk)
+                      : Effect.fail(
+                          new ServerNpmReleaseError({
+                            reason: "Voice release metadata is too large.",
+                          }),
+                        );
+                  }),
+                  Stream.runCollect,
+                );
+                const decoder = new TextDecoder();
+                return (
+                  chunks.map((chunk) => decoder.decode(chunk, { stream: true })).join("") +
+                  decoder.decode()
+                );
+              })
+            : Effect.fail(
+                new ServerNpmReleaseError({ reason: "Could not read Voice release metadata." }),
+              ),
+        ),
+        Effect.flatMap(decodeVoiceReleaseIndex),
+        Effect.timeout(Duration.seconds(15)),
+        Effect.mapError(
+          () => new ServerNpmReleaseError({ reason: "Could not read Voice release metadata." }),
+        ),
+      );
+      const selected = selectVoiceRelease(runtimeVersion, releases, {
+        kind: "cli-archive",
+        platform,
+        arch,
+      });
+      if (selected.status === "offered") return { version: selected.version };
+      if (releases.length < 100) break;
+    }
+    return null;
+  });
   const lookupPublic = Effect.fn("NpmRelease.lookupPublic")(function* (spec: string) {
     const unreachable = new ServerNpmReleaseError({
       reason: "npm is not installed and the public npm registry could not be reached.",
@@ -87,6 +168,7 @@ export const make = Effect.fn("NpmRelease.make")(function* (runtimeVersion = pac
     capacity: 32,
     timeToLive: Duration.minutes(1),
     lookup: Effect.fn("NpmRelease.lookup")(function* (spec: string) {
+      if (spec === "voice") return yield* lookupVoice();
       // Without npm there is no configured registry to honor, so use the public one.
       const npmPath = yield* resolveCommandPath("npm");
       if (npmPath === null) return yield* lookupPublic(spec);
@@ -130,9 +212,12 @@ export const make = Effect.fn("NpmRelease.make")(function* (runtimeVersion = pac
           () => new ServerNpmReleaseError({ reason: "Invalid release version or track." }),
         ),
       );
-      const voiceRefusal = voiceNpmReleaseRefusal(runtimeVersion);
-      if (voiceRefusal !== undefined) {
-        return yield* new ServerNpmReleaseError({ reason: voiceRefusal });
+      if (parseVoiceVersion(runtimeVersion) !== null || spec === "voice") {
+        if (parseVoiceVersion(runtimeVersion) === null || spec !== "voice") {
+          return yield* new ServerNpmReleaseError({
+            reason: "Voice servers check only the Voice release channel.",
+          });
+        }
       }
       return yield* Cache.get(cache, spec);
     }),

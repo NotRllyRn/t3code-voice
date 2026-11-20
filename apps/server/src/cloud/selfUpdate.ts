@@ -48,7 +48,7 @@ import {
 import { bootServiceProgramOf, bootServiceUnitPath } from "./bootService.ts";
 import { decodeServicePreflightResult } from "./servicePreflight.ts";
 import * as ServiceLauncherClient from "./serviceLauncherClient.ts";
-import { isExactServiceVersion } from "./serviceProtocol.ts";
+import { compareExactServiceVersions, isExactServiceVersion } from "./serviceProtocol.ts";
 
 // A staged runtime's cold start can take over a minute on a loaded, swapping host.
 const PREFLIGHT_TIMEOUT = Duration.minutes(3);
@@ -70,8 +70,11 @@ export function voiceServerUpdateRefusal(input: {
   if (input.channel !== undefined) {
     return "Voice servers cannot switch to upstream release channels; update to a Voice release instead.";
   }
-  return parseVoiceVersion(input.targetVersion) === null
-    ? `Voice servers can update only to Voice releases; refusing t3@${input.targetVersion}.`
+  if (parseVoiceVersion(input.targetVersion) === null) {
+    return `Voice servers can update only to Voice releases; refusing t3@${input.targetVersion}.`;
+  }
+  return compareExactServiceVersions(input.targetVersion, input.serverVersion) <= 0
+    ? `Voice updates require a newer release than ${input.serverVersion}.`
     : null;
 }
 
@@ -155,7 +158,9 @@ export function trackSwitchBlockReason(input: {
     : null;
 }
 
-export const make = Effect.fn("cloud.server_self_update.make")(function* () {
+export const make = Effect.fn("cloud.server_self_update.make")(function* (
+  runtimeVersion = packageJson.version,
+) {
   const serverConfig = yield* ServerConfig.ServerConfig;
   const desktopAppUpdate = yield* DesktopAppUpdate.DesktopAppUpdate;
   const policy = yield* ManagedPolicy.ManagedPolicy;
@@ -185,7 +190,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
 
   const crossesTrackUnsafely = (input: ServerSelfUpdateInput) =>
     trackSwitchBlockReason({
-      serverVersion: packageJson.version,
+      serverVersion: runtimeVersion,
       targetVersion: input.targetVersion,
       targetDatabaseMigration: input.targetDatabaseMigration,
       databaseMigration: () => databaseMigrationHead(serverConfig.dbPath),
@@ -197,7 +202,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
     const targetVersion = input.targetVersion.trim();
     if (capability === "boot-service") {
       const voiceRefusal = voiceServerUpdateRefusal({
-        serverVersion: packageJson.version,
+        serverVersion: runtimeVersion,
         targetVersion,
         ...(input.channel === undefined ? {} : { channel: input.channel }),
       });

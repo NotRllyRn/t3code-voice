@@ -995,7 +995,7 @@ export class ServerProviderUpdateError extends Schema.TaggedError<ServerProvider
 export const ServerNpmReleaseInput = Schema.Struct({
   spec: Schema.String.check(
     Schema.isMaxLength(64),
-    Schema.isPattern(/^(?:latest|nightly|\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/),
+    Schema.isPattern(/^(?:latest|nightly|voice|\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/),
   ),
 });
 export type ServerNpmReleaseInput = typeof ServerNpmReleaseInput.Type;

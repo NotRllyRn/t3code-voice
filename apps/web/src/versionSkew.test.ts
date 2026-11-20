@@ -42,11 +42,10 @@ describe("versionSkew", () => {
       }),
     ).toBe("'/opt/maria'\\''s bin/t3' update --base-dir '/data/t3 home' 0.0.45");
   });
-  it("keeps Voice recovery manual for every server installation", () => {
+  it("uses a proven Voice launcher or gives archive installation guidance", () => {
     const installations = [
       undefined,
       { kind: "npm-global", prefix: "/opt/node" },
-      { kind: "t3-launcher", launcher: "t3", baseDir: "/data/voice" },
       { kind: "pnpm-dlx" },
       { kind: "bunx" },
       { kind: "npx" },
@@ -57,6 +56,13 @@ describe("versionSkew", () => {
       expect(guidance).toContain("manual");
       expect(guidance).not.toMatch(/npx|npm install|pnpm dlx|bunx|install\.sh|t3 update/);
     }
+    expect(
+      manualServerUpdateCommand("0.1.10-voice.6", {
+        kind: "t3-launcher",
+        launcher: "/opt/voice/t3",
+        baseDir: "/data/voice",
+      }),
+    ).toBe("'/opt/voice/t3' update --base-dir '/data/voice' 0.1.10-voice.6");
     branding.APP_VERSION = "0.1.10-voice.1";
     expect(manualServerUpdateCommand("0.1.11")).toContain("Voice release (0.1.10-voice.1)");
   });
@@ -91,6 +97,15 @@ describe("versionSkew", () => {
       serverVersion: "0.0.33",
       hint: MISMATCH_HINT,
     });
+  });
+
+  it("compares Voice revisions without offering older or upstream builds", () => {
+    expect(resolveVersionMismatch("0.1.10-voice.5", "0.1.10-voice.6")).toMatchObject({
+      serverVersion: "0.1.10-voice.5",
+      clientVersion: "0.1.10-voice.6",
+    });
+    expect(resolveVersionMismatch("0.1.10-voice.6", "0.1.10-voice.5")).toBeNull();
+    expect(resolveVersionMismatch("0.1.10-voice.6", "0.1.10-voice.6")).toBeNull();
   });
 
   it("does not warn when the server is ahead of the client", () => {

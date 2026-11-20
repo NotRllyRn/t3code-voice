@@ -71,7 +71,8 @@ export interface SkippedMachine {
  * release before it restarts, so no registry precheck runs here. */
 export function collectServerUpdateTargets(
   machines: ReadonlyArray<UpdateEverythingMachine>,
-  targetVersion: string,
+  clientTargetVersion: string,
+  releases: ReadonlyMap<EnvironmentId, string> = new Map(),
 ): {
   readonly targets: ServerUpdateTarget[];
   readonly skipped: SkippedMachine[];
@@ -79,6 +80,7 @@ export function collectServerUpdateTargets(
   const targets: ServerUpdateTarget[] = [];
   const skipped: SkippedMachine[] = [];
   for (const machine of machines) {
+    const targetVersion = releases.get(machine.environmentId) ?? clientTargetVersion;
     const config = machine.serverConfig;
     if (machine.hostedByThisApp) continue;
     if (
@@ -219,7 +221,8 @@ function managedMachineUpdateDenial(
     (policy !== undefined &&
     policy.limits?.updates?.allowNightly === false &&
     targetVersion !== undefined &&
-    cliReleaseChannelOf(targetVersion) !== "stable"
+    cliReleaseChannelOf(targetVersion) !== "stable" &&
+    cliReleaseChannelOf(targetVersion) !== "voice"
       ? managedNightlyDeniedMessage(policy.organization)
       : undefined)
   );

@@ -46,6 +46,22 @@ function machine(
 }
 
 describe("collectServerUpdateTargets", () => {
+  it("uses each host's discovered Voice release and keeps permissions and policy checks", () => {
+    const machines = [
+      machine("newer", "0.1.10-voice.5", "boot-service"),
+      machine("current", "0.1.10-voice.6", "boot-service"),
+      machine("ahead", "0.1.10-voice.7", "boot-service"),
+      machine("no-scope", "0.1.10-voice.5", "boot-service", { canMaintain: false }),
+      machine("upstream", "0.1.10", "boot-service"),
+    ];
+    const releases = new Map(machines.map((entry) => [entry.environmentId, "0.1.10-voice.6"]));
+    const { targets, skipped } = collectServerUpdateTargets(machines, "0.1.10-voice.5", releases);
+    expect(targets.map(({ serverLabel, targetVersion }) => [serverLabel, targetVersion])).toEqual([
+      ["newer", "0.1.10-voice.6"],
+    ]);
+    expect(skipped.map(({ label }) => label)).toEqual(["no-scope"]);
+  });
+
   it("updates remote servers that can move to the target and names every skipped one", () => {
     const { targets, skipped } = collectServerUpdateTargets(
       [
@@ -140,6 +156,18 @@ describe("collectServerUpdateTargets", () => {
         "0.0.50-nightly.20261028.1",
       ).skipped.map((entry) => entry.label),
     ).toEqual(["off", "no-nightly"]);
+    expect(
+      collectServerUpdateTargets(
+        machines.map((entry) => ({
+          ...entry,
+          serverConfig: {
+            ...entry.serverConfig,
+            environment: { ...entry.serverConfig.environment, serverVersion: "0.1.10-voice.5" },
+          },
+        })),
+        "0.1.10-voice.6",
+      ).skipped.map((entry) => entry.label),
+    ).toEqual(["off"]);
   });
 });
 
