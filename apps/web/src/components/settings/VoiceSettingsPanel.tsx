@@ -1,3 +1,5 @@
+import { useLiveVoiceSessionActive } from "../../voice/VoicePanel";
+import { LiveVoiceSettingsSection } from "./LiveVoiceSettingsSection";
 import {
   cancelEnvironmentSpeechModelDownload,
   downloadEnvironmentSpeechModel,
@@ -1093,6 +1095,7 @@ function TranscriptionTest(props: {
   readonly projectId: ProjectId | null;
   readonly projectName: string | null;
 }) {
+  const liveSessionActive = useLiveVoiceSessionActive();
   const [transcript, setTranscript] = useState<string | null>(null);
   const draft = transcript ?? "";
   const [showTranscript, setShowTranscript] = useState(false);
@@ -1124,7 +1127,10 @@ function TranscriptionTest(props: {
               state={speech.state}
               progress={null}
               level={speech.level}
-              onStart={() => void speech.start()}
+              disabled={liveSessionActive}
+              onStart={() => {
+                if (!liveSessionActive) void speech.start();
+              }}
               onStop={() => void speech.stop()}
               onCancel={() => speech.cancel()}
               onSkipPostProcessing={() => speech.skipPostProcessing()}
@@ -1134,6 +1140,7 @@ function TranscriptionTest(props: {
                 <Button
                   size="sm"
                   variant="outline"
+                  disabled={liveSessionActive}
                   onClick={() => {
                     setShowTranscript(true);
                     void speech.start();
@@ -1212,6 +1219,7 @@ function TranscriptionTest(props: {
 }
 
 export function VoiceSettingsPanel() {
+  const liveSessionActive = useLiveVoiceSessionActive();
   const cleanupEnabled = useCleanupGrant() !== null;
   const settings = useClientSettings();
   const settingsScope = useOptionalSettingsScope();
@@ -1310,6 +1318,7 @@ export function VoiceSettingsPanel() {
         "speech-correction-word": cleanupEnabled ? undefined : "speech-post-processing",
       }}
     >
+      <LiveVoiceSettingsSection />
       <SettingsSection id="voice-input" title="Input">
         <SettingsRow
           {...searchableSetting("voice-microphone")}
@@ -1338,11 +1347,18 @@ export function VoiceSettingsPanel() {
             <MicrophoneOrderList order={order} devices={microphones} />
           </div>
         </SettingsRow>
-        <MicrophoneTest
-          key={selectedMicrophone}
-          microphoneId={selectedMicrophone}
-          onMicrophoneAccess={() => void refreshMicrophones()}
-        />
+        {liveSessionActive ? (
+          <SettingsRow
+            title="Microphone test"
+            description="Stop Live voice before testing another microphone."
+          />
+        ) : (
+          <MicrophoneTest
+            key={selectedMicrophone}
+            microphoneId={selectedMicrophone}
+            onMicrophoneAccess={() => void refreshMicrophones()}
+          />
+        )}
         <SettingsRow
           {...searchableSetting("dictation-shortcut-mode")}
           title="Dictation shortcut"

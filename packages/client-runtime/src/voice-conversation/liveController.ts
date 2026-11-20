@@ -102,6 +102,7 @@ interface Session {
 }
 export interface LiveVoiceDependencies {
   media: LiveMediaFactory;
+  acquire?(signal: AbortSignal): Promise<(() => void) | null>;
   socket(url: string): VoiceSocket;
   url(signal: AbortSignal): Promise<string>;
   event?(event: LiveVoiceServerEvent): void;
@@ -112,6 +113,16 @@ export class LiveVoiceController {
   state: LiveVoiceState = { ...INITIAL_LIVE_VOICE_STATE };
   private session: Session | undefined;
   private disposed = false;
+  private releaseOwner: (() => void) | undefined;
+  private readonly pendingMedia = new Set<Promise<LiveMedia>>();
+  private releaseOwnership() {
+    const release = this.releaseOwner;
+    this.releaseOwner = undefined;
+    if (!release) return;
+    // getUserMedia cannot be cancelled; retain ownership until late tracks are disposed.
+    if (this.pendingMedia.size) void Promise.allSettled(this.pendingMedia).then(release);
+    else release();
+  }
   private wantedMuted = false;
   private recoveryAttempt = 0;
   private recoveryDeadline = 0;
@@ -205,6 +216,7 @@ export class LiveVoiceController {
         return;
       }
     }
+    this.releaseOwnership();
     this.update({
       phase: session.stopReason ? "error" : "idle",
       error: session.stopReason
@@ -300,6 +312,22 @@ export class LiveVoiceController {
     );
     session.finalizers.push(() => clearTimeout(deadline));
     try {
+      if (!this.releaseOwner && this.deps.acquire) {
+        const release = await this.deps.acquire(session.abort.signal);
+        if (!this.alive(session)) {
+          release?.();
+          return;
+        }
+        if (!release) {
+          this.end("forbidden", true);
+          this.update({
+            error:
+              "Live voice is running or finishing cleanup in this or another window. Try again after it stops.",
+          });
+          return;
+        }
+        this.releaseOwner = release;
+      }
       const url = new URL(await this.deps.url(session.abort.signal));
       if (!this.alive(session)) return;
       const boundThread = this.state.threadId ?? url.searchParams.get("threadId");
@@ -480,7 +508,11 @@ export class LiveVoiceController {
       else finalize();
     };
     try {
-      const media = await this.deps.media({
+      if (this.pendingMedia.size) {
+        await Promise.allSettled(this.pendingMedia);
+        if (!this.alive(session, attempt)) return;
+      }
+      const pending = this.deps.media({
         signal: attempt.abort.signal,
         alive: () => this.alive(session, attempt),
         own,
@@ -503,6 +535,13 @@ export class LiveVoiceController {
           }
         },
       });
+      this.pendingMedia.add(pending);
+      let media: LiveMedia;
+      try {
+        media = await pending;
+      } finally {
+        this.pendingMedia.delete(pending);
+      }
       own(() => media.dispose());
       if (!this.alive(session, attempt)) return;
       attempt.media = media;
@@ -569,7 +608,10 @@ export class LiveVoiceController {
       this.update({ phase: "stopping", recoveryAttempt: undefined });
     }
     if (this.session) this.end();
-    else this.update({ ...INITIAL_LIVE_VOICE_STATE });
+    else {
+      this.releaseOwnership();
+      this.update({ ...INITIAL_LIVE_VOICE_STATE });
+    }
   }
   dispose() {
     this.disposed = true;

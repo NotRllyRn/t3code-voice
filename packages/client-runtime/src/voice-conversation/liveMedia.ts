@@ -11,6 +11,8 @@ export interface LiveMedia {
 
 export interface LiveMediaOptions {
   signal: AbortSignal;
+  devices?: { microphoneId: string; speakerId: string };
+
   alive(): boolean;
   own(dispose: () => void): void;
   peer(state: "connected" | "failed"): void;

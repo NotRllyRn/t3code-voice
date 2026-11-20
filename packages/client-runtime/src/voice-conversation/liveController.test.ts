@@ -35,7 +35,10 @@ class Socket extends EventTarget {
     this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(event) }));
   }
 }
-function harness(acquire?: (media: LiveMedia, options: LiveMediaOptions) => Promise<LiveMedia>) {
+function harness(
+  acquire?: (media: LiveMedia, options: LiveMediaOptions) => Promise<LiveMedia>,
+  ownership?: (signal: AbortSignal) => Promise<(() => void) | null>,
+) {
   let socket = new Socket();
   const urls: string[] = [];
   const attempts: Array<{
@@ -82,6 +85,7 @@ function harness(acquire?: (media: LiveMedia, options: LiveMediaOptions) => Prom
       },
       url: async () => "wss://t3.example/api/voice/live?wsTicket=fictional",
       media: mediaFactory,
+      ...(ownership ? { acquire: ownership } : {}),
       event,
     },
     publish,
@@ -230,20 +234,30 @@ test("waits through 90s refresh without old ready deadline, then makes only the 
   }
 });
 
-test("late offers and grants after Stop or replacement cannot send or enable media", async () => {
-  const grant = deferred<LiveMedia>();
-  using h = harness(async () => grant.promise);
-  await h.controller.start();
-  h.authorize();
-  const first = h.attempts[0]!;
-  h.controller.stop();
-  grant.resolve(first.media);
-  await vi.waitFor(() => expect(first.media.dispose).toHaveBeenCalledTimes(1));
-  expect(first.media.offer).not.toHaveBeenCalled();
-  expect(h.socket.sent.map((event) => event.type)).toEqual(["live.stop"]);
-  first.options.peer("connected");
-  expect(first.enabled).toBe(false);
-});
+test.each(["stop", "replacement"] as const)(
+  "late grants after %s cannot overlap or enable media",
+  async (action) => {
+    const grant = deferred<LiveMedia>();
+    using h = harness(async (media) => (h.attempts.length === 1 ? grant.promise : media));
+    await h.controller.start();
+    h.authorize();
+    const first = h.attempts[0]!;
+    if (action === "stop") h.controller.stop();
+    else h.authorize("attempt_2");
+    expect(h.mediaFactory).toHaveBeenCalledTimes(1);
+    grant.resolve(first.media);
+    await vi.waitFor(() => expect(first.media.dispose).toHaveBeenCalledTimes(1));
+    expect(first.media.offer).not.toHaveBeenCalled();
+    if (action === "stop") expect(h.socket.sent.map((event) => event.type)).toEqual(["live.stop"]);
+    else {
+      await offered(h, "attempt_2");
+      expect(h.mediaFactory).toHaveBeenCalledTimes(2);
+      expect(h.socket.sent.map((event) => event.type)).toEqual(["live.start"]);
+    }
+    first.options.peer("connected");
+    expect(first.enabled).toBe(false);
+  },
+);
 
 test("discards an in-flight first offer on refresh and a late answer from a foreign session", async () => {
   const offer = deferred<string>();
@@ -588,8 +602,11 @@ test.each(["forbidden", "environment-auth-required", "auth-required"] as const)(
 test("reconnects four times with cooldown then stops; Stop cancels cooldown", async () => {
   vi.useFakeTimers();
   const sockets: Socket[] = [];
+  const release = vi.fn();
+  const acquire = vi.fn(async () => release);
   const controller = new LiveVoiceController(
     {
+      acquire,
       url: async () => "wss://t3.example/live",
       socket: () => {
         const socket = new Socket();
@@ -613,9 +630,12 @@ test("reconnects four times with cooldown then stops; Stop cancels cooldown", as
       expect(sockets).toHaveLength(count);
       await vi.advanceTimersByTimeAsync(1);
       expect(sockets).toHaveLength(count + 1);
+      expect(acquire).toHaveBeenCalledTimes(1);
+      expect(release).not.toHaveBeenCalled();
     }
     sockets.at(-1)!.close();
     expect(controller.state.phase).toBe("error");
+    expect(release).toHaveBeenCalledTimes(1);
     await controller.start();
     sockets.at(-1)!.close();
     controller.stop();
@@ -623,6 +643,7 @@ test("reconnects four times with cooldown then stops; Stop cancels cooldown", as
     await vi.advanceTimersByTimeAsync(200000);
     expect(sockets).toHaveLength(count);
     expect(controller.state.phase).toBe("idle");
+    expect(release).toHaveBeenCalledTimes(2);
   } finally {
     controller.dispose();
     vi.useRealTimers();
@@ -708,4 +729,79 @@ test("unexpected cleanup recovers; pending task overflow stops explicitly withou
   } finally {
     vi.useRealTimers();
   }
+});
+
+test("exclusive ownership rejects a second session and stays held until cleanup", async () => {
+  let owned = false;
+  const release = vi.fn(() => {
+    owned = false;
+  });
+  const acquire = async () => {
+    if (owned) return null;
+    owned = true;
+    return release;
+  };
+  using first = harness(undefined, acquire);
+  using second = harness(undefined, acquire);
+  await first.controller.start();
+  await offered(first);
+  await second.controller.start();
+  expect(second.controller.state.phase).toBe("error");
+  expect(second.controller.state.error).toContain("another window");
+  expect(second.urls).toEqual([]);
+  expect(second.mediaFactory).not.toHaveBeenCalled();
+  first.controller.stop();
+  await second.controller.start();
+  expect(second.urls).toEqual([]);
+  expect(release).not.toHaveBeenCalled();
+  first.cleanup();
+  expect(release).toHaveBeenCalledTimes(1);
+  await second.controller.start();
+  expect(second.urls).toHaveLength(1);
+});
+
+test.each(["stop", "dispose"] as const)(
+  "%s during ownership acquisition releases a late lock without starting media",
+  async (action) => {
+    const claim = deferred<(() => void) | null>();
+    const release = vi.fn();
+    using h = harness(undefined, () => claim.promise);
+    const starting = h.controller.start();
+    const duplicate = h.controller.start();
+    h.controller[action]();
+    claim.resolve(release);
+    await Promise.all([starting, duplicate]);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(h.urls).toEqual([]);
+    expect(h.mediaFactory).not.toHaveBeenCalled();
+  },
+);
+
+test("keeps ownership until a cancelled microphone acquisition has released its late tracks", async () => {
+  const grant = deferred<LiveMedia>();
+  const released = deferred<void>();
+  let owned = false;
+  const release = vi.fn(() => {
+    owned = false;
+    released.resolve();
+  });
+  const acquire = async () => {
+    if (owned) return null;
+    owned = true;
+    return release;
+  };
+  using first = harness(() => grant.promise, acquire);
+  using second = harness(undefined, acquire);
+  await first.controller.start();
+  first.authorize();
+  first.controller.stop();
+  expect(release).not.toHaveBeenCalled();
+  await second.controller.start();
+  expect(second.urls).toEqual([]);
+  grant.resolve(first.attempts[0]!.media);
+  await released.promise;
+  expect(first.attempts[0]!.media.dispose).toHaveBeenCalledTimes(1);
+  expect(first.attempts[0]!.enabled).toBe(false);
+  await second.controller.start();
+  expect(second.urls).toHaveLength(1);
 });

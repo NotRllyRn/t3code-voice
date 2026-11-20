@@ -17,7 +17,7 @@ import {
   type LiveVoiceDraft,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import {
   readPreparedConnection,
@@ -41,6 +41,8 @@ import { Popover, PopoverPopup, PopoverTitle, PopoverTrigger } from "../componen
 import { Button } from "../components/ui/button";
 import { cn } from "../lib/utils";
 import { browserLiveMedia } from "./liveMedia";
+import { acquireLiveVoiceLock } from "./liveVoiceLock";
+import { useLiveVoiceSettings } from "./liveVoiceSettings";
 import { liveCaptionKey, liveCaptions } from "./liveCaptions";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 
@@ -61,103 +63,83 @@ function supported() {
     !mobile &&
     window.isSecureContext &&
     typeof RTCPeerConnection !== "undefined" &&
+    !!navigator.locks &&
     !!navigator.mediaDevices?.getUserMedia
   );
 }
 
-export function useComposerLiveVoice({
-  environmentId,
-  threadId,
-  draftId,
-  modelSelection,
-  draft,
-  disabled,
-}: Props) {
-  const prepared = Option.getOrNull(usePreparedConnection(environmentId));
-  const canOperate = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
-  const descriptor = useAtomValue(serverEnvironment.configValueAtom(environmentId))?.environment;
-  const nativeLiveSupported =
-    descriptor?.environmentId === environmentId && supportsEnvironmentNativeLiveVoice(descriptor);
-  const binding = JSON.stringify({ environmentId, threadId, draftId, modelSelection, draft });
-  const selection = JSON.stringify(modelSelection ?? draft?.modelSelection);
-  const [snapshot, setSnapshot] = useState<{
-    controller: LiveVoiceController | null;
-    value: LiveVoiceState;
-  }>({ controller: null, value: INITIAL_LIVE_VOICE_STATE });
-  const owner = useRef<{
-    prepared: typeof prepared;
-    binding: string;
-    selection: string;
-    environmentId: EnvironmentId;
-    promotedThread?: ThreadId;
-    controller: LiveVoiceController;
-    token: symbol;
-    target: { threadId?: ThreadId | undefined; draft?: LiveVoiceDraft | undefined };
-  } | null>(null);
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Unmount and StrictMode replay release the external control socket and microphone owner.
-  useEffect(
-    () => () => {
+type Target = Pick<Props, "environmentId" | "threadId" | "draftId" | "draft">;
+type Owner = {
+  target: Target;
+  controller: LiveVoiceController;
+  token: symbol;
+};
+type Snapshot = { owner: Owner | null; voice: LiveVoiceState };
+const LiveVoiceContext = createContext<{
+  snapshot: Snapshot;
+  start(target: Target): void;
+  dismiss(): void;
+} | null>(null);
+const isActive = (voice: LiveVoiceState) => voice.phase !== "idle" && voice.phase !== "error";
+
+export function LiveVoiceProvider({ children }: { children: ReactNode }) {
+  const owner = useRef<Owner | null>(null);
+  const [snapshot, setSnapshot] = useState<Snapshot>({
+    owner: null,
+    voice: INITIAL_LIVE_VOICE_STATE,
+  });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Only app teardown releases the external session; route and visibility changes do not.
+  useEffect(() => {
+    const stop = () => owner.current?.controller.stop();
+    window.addEventListener("pagehide", stop);
+    return () => {
+      window.removeEventListener("pagehide", stop);
       if (owner.current) {
         liveCaptions.clear(owner.current.token);
         owner.current.controller.dispose();
         owner.current = null;
       }
-    },
-    [],
-  );
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Synchronize environment/binding with the external owner; authoritative draft promotion is not a new session.
-  useEffect(() => {
-    const previous = owner.current;
-    const promotion =
-      previous &&
-      threadId &&
-      previous.promotedThread === threadId &&
-      previous.environmentId === environmentId &&
-      previous.selection === selection;
-    if (previous && previous.prepared === prepared && (previous.binding === binding || promotion)) {
-      previous.binding = binding;
-      previous.target = { threadId, draft };
-      return;
+    };
+  }, []);
+  const start = (target: Target) => {
+    if (owner.current && isActive(owner.current.controller.state)) return;
+    if (owner.current) {
+      liveCaptions.clear(owner.current.token);
+      owner.current.controller.dispose();
     }
-    if (previous) {
-      liveCaptions.clear(previous.token);
-      previous.controller.dispose();
-      owner.current = null;
-    }
-    if (!prepared) {
-      // oxlint-disable-next-line react/set-state-in-effect -- Publish loss of the external connection owner to its controls.
-      setSnapshot({ controller: null, value: INITIAL_LIVE_VOICE_STATE });
-      return;
-    }
+    const { environmentId, threadId, draftId } = target;
+    const prepared = readPreparedConnection(environmentId);
+    if (!prepared) return;
+    const settings = useLiveVoiceSettings.getState();
+    const preferences = { voice: settings.voice, notifications: settings.notifications };
+    const devices = { microphoneId: settings.microphoneId, speakerId: settings.speakerId };
     const token = Symbol("Live owner");
     let showingCaptions = false;
-    const target = { threadId, draft };
     const controller = new LiveVoiceController(
       {
-        media: browserLiveMedia,
+        acquire: acquireLiveVoiceLock,
+        media: (options) => browserLiveMedia({ ...options, devices }),
         socket: (url) => new WebSocket(url),
         url: async (signal) => {
-          if (readPreparedConnection(environmentId) !== prepared) {
-            throw new LiveVoiceStartupError({ reason: "connection-changed" });
-          }
-          const currentDescriptor = appAtomRegistry.get(
+          const connection = readPreparedConnection(environmentId);
+          if (!connection) throw new LiveVoiceStartupError({ reason: "connection-changed" });
+          const descriptor = appAtomRegistry.get(
             serverEnvironment.configValueAtom(environmentId),
           )?.environment;
           const url = new URL(
-            await runEnvironmentSpeech(getEnvironmentLiveVoiceUrl(prepared, currentDescriptor), {
+            await runEnvironmentSpeech(getEnvironmentLiveVoiceUrl(connection, descriptor), {
               signal,
             }),
           );
-          const current = owner.current?.controller === controller ? owner.current.target : target;
-          if (current.threadId) url.searchParams.set("threadId", current.threadId);
-          else url.searchParams.set("draft", JSON.stringify(current.draft));
+          if (target.threadId) url.searchParams.set("threadId", target.threadId);
+          else url.searchParams.set("draft", JSON.stringify(target.draft));
+          url.searchParams.set("preferences", JSON.stringify(preferences));
           return url.toString();
         },
         event: (event) => {
           if (event.type === "live.caption") liveCaptions.caption(token, event);
           if (event.type === "live.bound" && owner.current?.controller === controller) {
-            owner.current.promotedThread = event.threadId;
-            owner.current.target = { threadId: event.threadId };
+            target.threadId = event.threadId;
             liveCaptions.bind(token, liveCaptionKey(environmentId, event.threadId));
             if (!threadId && draftId) {
               const store = useComposerDraftStore.getState();
@@ -168,59 +150,153 @@ export function useComposerLiveVoice({
           }
         },
       },
-      (value) => {
-        if (value.phase === "connecting" && !showingCaptions) {
+      (voice) => {
+        if (owner.current?.controller !== controller) return;
+        if ((voice.phase === "connecting" || voice.phase === "reconnecting") && !showingCaptions) {
           showingCaptions = true;
-          const current = owner.current?.target ?? target;
-          liveCaptions.begin(token, liveCaptionKey(environmentId, current.threadId, draftId));
+          liveCaptions.begin(token, liveCaptionKey(environmentId, target.threadId, draftId));
         }
-        if (value.phase === "idle" || value.phase === "error") {
+        if (!isActive(voice)) {
           showingCaptions = false;
           liveCaptions.finish(token);
         }
-        setSnapshot({ controller, value });
+        setSnapshot({ owner: owner.current, voice });
       },
     );
-    owner.current = { prepared, binding, selection, environmentId, controller, token, target };
-    setSnapshot({ controller, value: INITIAL_LIVE_VOICE_STATE });
-  }, [prepared, binding, selection, environmentId, threadId, draftId, draft]);
-  const controller = snapshot.controller;
-  const voice = snapshot.value;
+    owner.current = { target, controller, token };
+    void controller.start();
+  };
+  const dismiss = () => {
+    if (!owner.current || isActive(owner.current.controller.state)) return;
+    liveCaptions.clear(owner.current.token);
+    owner.current.controller.dispose();
+    owner.current = null;
+    setSnapshot({ owner: null, voice: INITIAL_LIVE_VOICE_STATE });
+  };
+  return <LiveVoiceContext value={{ snapshot, start, dismiss }}>{children}</LiveVoiceContext>;
+}
+
+export function useLiveVoiceSessionActive() {
+  const app = useContext(LiveVoiceContext);
+  return !!app && isActive(app.snapshot.voice);
+}
+
+export function useComposerLiveVoice({ environmentId, threadId, draftId, draft, disabled }: Props) {
+  const app = useContext(LiveVoiceContext);
+  const prepared = Option.getOrNull(usePreparedConnection(environmentId));
+  const canOperate = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
+  const descriptor = useAtomValue(serverEnvironment.configValueAtom(environmentId))?.environment;
+  const nativeLiveSupported =
+    descriptor?.environmentId === environmentId && supportsEnvironmentNativeLiveVoice(descriptor);
+  const target = app?.snapshot.owner?.target;
+  const matches =
+    target?.environmentId === environmentId &&
+    (threadId
+      ? (app?.snapshot.voice.threadId ?? target.threadId) === threadId
+      : !!draftId && target.draftId === draftId);
+  const occupied = !!app && isActive(app.snapshot.voice) && !matches;
+  const voice = matches ? app!.snapshot.voice : INITIAL_LIVE_VOICE_STATE;
   const allowed =
-    !disabled && canOperate && !!prepared && !!controller && supported() && nativeLiveSupported;
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Permission/connection loss must release external media resources.
-  useEffect(() => {
-    if (!allowed) controller?.stop();
-  }, [allowed, controller]);
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Browser lifecycle events release microphone and playback.
-  useEffect(() => {
-    const stop = () => controller?.stop();
-    const visibility = () => {
-      if (document.hidden) stop();
-    };
-    window.addEventListener("pagehide", stop);
-    document.addEventListener("visibilitychange", visibility);
-    return () => {
-      window.removeEventListener("pagehide", stop);
-      document.removeEventListener("visibilitychange", visibility);
-    };
-  }, [controller]);
-  const unavailableReason = !supported()
-    ? "Live voice requires a secure desktop browser with WebRTC and microphone support"
-    : !canOperate
-      ? "Live voice requires permission to operate this environment"
-      : !prepared
-        ? "Connect to use live voice"
-        : !descriptor
-          ? "Waiting for this environment's live voice capabilities"
-          : descriptor.environmentId !== environmentId
-            ? "The environment connection changed. Reconnect and try live voice again."
-            : !nativeLiveSupported
-              ? "This server does not support native live voice. Update T3 Code on this environment and reconnect."
-              : disabled
-                ? "Live voice is unavailable for the current composer"
-                : null;
-  return { controller, voice, allowed, unavailableReason, environmentId, threadId };
+    !occupied &&
+    !disabled &&
+    canOperate &&
+    !!prepared &&
+    !!app &&
+    supported() &&
+    nativeLiveSupported;
+  const controller = {
+    start: () => {
+      if (allowed) app?.start({ environmentId, threadId, draftId, draft });
+    },
+    mute: () => {
+      if (matches) app?.snapshot.owner?.controller.mute();
+    },
+    stop: () => {
+      if (matches) app?.snapshot.owner?.controller.stop();
+    },
+  };
+  const unavailableReason = occupied
+    ? "Only one Live voice session can run. Stop the current session before starting another thread."
+    : !supported()
+      ? "Live voice requires a secure desktop browser with WebRTC, Web Locks and microphone support"
+      : !canOperate
+        ? "Live voice requires permission to operate this environment"
+        : !prepared
+          ? "Connect to use live voice"
+          : !descriptor
+            ? "Waiting for this environment's live voice capabilities"
+            : descriptor.environmentId !== environmentId
+              ? "The environment connection changed. Reconnect and try live voice again."
+              : !nativeLiveSupported
+                ? "This server does not support native live voice. Update T3 Code on this environment and reconnect."
+                : disabled
+                  ? "Live voice is unavailable for the current composer"
+                  : null;
+  return {
+    controller,
+    voice,
+    allowed,
+    unavailableReason,
+    environmentId,
+    threadId,
+    sessionActive: !!app && isActive(app.snapshot.voice),
+  };
+}
+
+export function LiveVoiceSessionControls() {
+  const app = useContext(LiveVoiceContext);
+  if (!app?.snapshot.owner || (!isActive(app.snapshot.voice) && !app.snapshot.voice.error))
+    return null;
+  const { target, controller } = app.snapshot.owner;
+  const threadId = app.snapshot.voice.threadId ?? target.threadId;
+  const live = {
+    controller: {
+      start: () => app.start({ ...target }),
+      stop: () => controller.stop(),
+      mute: () => controller.mute(),
+    },
+    sessionActive: isActive(app.snapshot.voice),
+    voice: app.snapshot.voice,
+    allowed: true,
+    unavailableReason: null,
+    environmentId: target.environmentId,
+    threadId,
+  };
+  return (
+    <div
+      role="region"
+      aria-label="Live voice session"
+      className="fixed right-4 top-12 z-50 flex items-center gap-2 rounded-lg border bg-background p-2 shadow-sm"
+    >
+      {threadId ? (
+        <Link
+          to="/$environmentId/$threadId"
+          params={{ environmentId: target.environmentId, threadId }}
+          className="px-2 text-sm underline"
+        >
+          Live voice · Open chat
+        </Link>
+      ) : (
+        <span className="px-2 text-sm">Live voice</span>
+      )}
+      {live.voice.error ? (
+        <span role="alert" className="max-w-72 text-sm">
+          {live.voice.error}
+        </span>
+      ) : null}
+      <ComposerLiveVoiceControls live={live} />
+      {!live.sessionActive ? (
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label="Dismiss voice error"
+          onClick={app.dismiss}
+        >
+          <XIcon />
+        </Button>
+      ) : null}
+    </div>
+  );
 }
 
 type LiveVoice = ReturnType<typeof useComposerLiveVoice>;

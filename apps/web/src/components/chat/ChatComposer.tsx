@@ -1901,7 +1901,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const dictationShortcutLabel = useDictationShortcut({
     keybindings,
     speech: speechInput,
-    disabled: dictationDisabled || liveVoiceActive,
+    disabled: dictationDisabled || liveVoice.sessionActive,
     terminalOpen,
     modelPickerOpen: isComposerModelPickerOpen,
     ...(backgroundThread ? { targetRef: composerFormRef } : {}),
@@ -3840,7 +3840,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     keepFullHistory={props.keepFullHistory}
                     onToggleKeepFullHistory={props.onToggleKeepFullHistory}
                   >
-                    {speechInput.available && !liveVoiceActive ? (
+                    {speechInput.available && !liveVoice.sessionActive ? (
                       <>
                         <ComposerSpeechRecordingPill
                           state={speechInput.state}

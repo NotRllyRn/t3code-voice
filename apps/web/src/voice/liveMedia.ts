@@ -59,7 +59,13 @@ export const browserLiveMedia: LiveMediaFactory = async (options) => {
   try {
     check();
     stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true },
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        ...(options.devices?.microphoneId
+          ? { deviceId: { exact: options.devices.microphoneId } }
+          : {}),
+      },
       video: false,
     });
     // A permission grant may arrive after Stop, navigation, or StrictMode teardown.
@@ -77,6 +83,42 @@ export const browserLiveMedia: LiveMediaFactory = async (options) => {
       };
       track.addEventListener("ended", ended, { once: true });
       finalizers.push(() => track.removeEventListener("ended", ended));
+    }
+    if (options.devices) {
+      const capture = stream.getAudioTracks()[0]?.getSettings();
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      check();
+      const physical = (device: MediaDeviceInfo) =>
+        device.deviceId !== "default" && device.deviceId !== "communications";
+      const microphoneId =
+        capture?.deviceId === "default" || capture?.deviceId === "communications"
+          ? devices.find(
+              (device) =>
+                device.kind === "audioinput" &&
+                physical(device) &&
+                !!capture.groupId &&
+                device.groupId === capture.groupId,
+            )?.deviceId
+          : capture?.deviceId;
+      if (microphoneId) options.devices.microphoneId = microphoneId;
+      if (!options.devices.speakerId && typeof audio.setSinkId === "function") {
+        const defaultOutput = devices.find(
+          (device) => device.kind === "audiooutput" && device.deviceId === "default",
+        );
+        options.devices.speakerId =
+          devices.find(
+            (device) =>
+              device.kind === "audiooutput" &&
+              physical(device) &&
+              !!defaultOutput?.groupId &&
+              device.groupId === defaultOutput.groupId,
+          )?.deviceId ?? "";
+      }
+      if (options.devices.speakerId) {
+        if (typeof audio.setSinkId !== "function") throw Error("Speaker selection is unavailable");
+        await audio.setSinkId(options.devices.speakerId);
+        check();
+      }
     }
     peer = new RTCPeerConnection();
     const pc = peer;

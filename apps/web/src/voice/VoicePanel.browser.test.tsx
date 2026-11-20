@@ -1,5 +1,5 @@
 import "~/index.css";
-import { StrictMode, useState, type ComponentProps } from "react";
+import { StrictMode, useState, type ComponentProps, type ReactNode } from "react";
 import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
 import { useLocation } from "@tanstack/react-router";
@@ -11,6 +11,7 @@ import {
   ProviderInstanceId,
   ProjectId,
   DEFAULT_RUNTIME_MODE,
+  DEFAULT_LIVE_VOICE_PREFERENCES,
   type LiveVoiceServerEvent,
   type ServerConfig,
 } from "@t3tools/contracts";
@@ -19,18 +20,39 @@ import { DEFAULT_INTERACTION_MODE } from "../types";
 import { serverEnvironment } from "../state/server";
 import { AppAtomRegistryProvider, appAtomRegistry } from "../rpc/atomRegistry";
 import { runEnvironmentSpeech } from "../speech/runEnvironmentSpeech";
-import { act, render } from "../../test/render";
+import { act, render, fakeTimers, type RenderOptions } from "../../test/render";
 import { ThreadRouteView } from "../components/ThreadRouteView";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { ComposerPrimaryActions } from "../components/chat/ComposerPrimaryActions";
 import * as media from "./liveMedia";
+import { useLiveVoiceSettings } from "./liveVoiceSettings";
 import type { LiveMedia, LiveMediaOptions } from "@t3tools/client-runtime/voice-conversation";
 import {
+  LiveVoiceProvider,
+  LiveVoiceSessionControls,
   ComposerLiveVoiceControls,
   ComposerLiveVoiceFeedback,
   useComposerLiveVoice,
 } from "./VoicePanel";
+
+async function renderVoice(ui: ReactNode, options?: RenderOptions) {
+  const screen = await render(
+    <StrictMode>
+      <LiveVoiceProvider>{ui}</LiveVoiceProvider>
+    </StrictMode>,
+    options,
+  );
+  return {
+    ...screen,
+    rerender: (next: ReactNode) =>
+      screen.rerender(
+        <StrictMode>
+          <LiveVoiceProvider>{next}</LiveVoiceProvider>
+        </StrictMode>,
+      ),
+  };
+}
 
 const routeState = vi.hoisted(() => ({ shellReady: false }));
 vi.mock("../components/ChatView", () => ({
@@ -89,6 +111,7 @@ vi.mock("../speech/runEnvironmentSpeech", () => ({
   runEnvironmentSpeech: vi.fn(async () => "wss://voice.example/api/voice/live"),
 }));
 vi.mock("./liveMedia", { spy: true });
+vi.mock("./liveVoiceLock", () => ({ acquireLiveVoiceLock: async () => () => {} }));
 vi.mock("@t3tools/client-runtime/voice-input", { spy: true });
 
 function VoiceComposer({
@@ -131,6 +154,9 @@ function VoiceComposer({
       className="m-4 max-w-120 rounded-2xl border border-border bg-background p-3 text-foreground"
       onSubmit={(event) => event.preventDefault()}
     >
+      <button type="button" disabled={live.sessionActive} aria-label="Dictation test control">
+        Dictate
+      </button>
       <label className="sr-only" htmlFor="draft">
         Message
       </label>
@@ -191,6 +217,12 @@ class VoiceSocket extends EventTarget {
   }
 }
 function setup(acquire?: (value: LiveMedia) => Promise<LiveMedia>) {
+  const savedSettings = useLiveVoiceSettings.getState();
+  useLiveVoiceSettings.setState({
+    ...DEFAULT_LIVE_VOICE_PREFERENCES,
+    microphoneId: "",
+    speakerId: "",
+  });
   routeState.shellReady = false;
   useComposerDraftStore.setState({
     draftThreadsByThreadKey: {},
@@ -231,7 +263,7 @@ function setup(acquire?: (value: LiveMedia) => Promise<LiveMedia>) {
       );
       await vi.waitFor(() => expect(attempts.length).toBeGreaterThan(0));
     },
-    async connect() {
+    async connect(muted = false) {
       await this.authorize();
       await act(() => {
         sockets.at(-1)!.event({
@@ -249,10 +281,11 @@ function setup(acquire?: (value: LiveMedia) => Promise<LiveMedia>) {
         });
       });
       await vi.waitFor(() =>
-        expect(attempts.at(-1)!.value.microphone).toHaveBeenLastCalledWith(true),
+        expect(attempts.at(-1)!.value.microphone).toHaveBeenLastCalledWith(!muted),
       );
     },
     [Symbol.dispose]() {
+      useLiveVoiceSettings.setState(savedSettings, true);
       sockets.forEach((socket) =>
         socket.event({ type: "live.cleanup", sessionId: "session_1", result: "acknowledged" }),
       );
@@ -280,7 +313,7 @@ it.each(["loading", "legacy", "unsupported", "wrong environment"] as const)(
     using _config = vi.spyOn(serverEnvironment, "configValueAtom").mockReturnValue(configAtom);
     vi.mocked(runEnvironmentSpeech).mockClear();
     vi.mocked(voiceInput.getEnvironmentLiveVoiceUrl).mockClear();
-    await using screen = await render(
+    await using screen = await renderVoice(
       <AppAtomRegistryProvider>
         <VoiceComposer environment={environmentId} />
       </AppAtomRegistryProvider>,
@@ -345,7 +378,7 @@ it.each([
           }
         : null,
   };
-  await using screen = await render(<VoiceComposer {...props} />);
+  await using screen = await renderVoice(<VoiceComposer {...props} />);
   if (mode === "text") await userEvent.type(screen.getByRole("textbox"), "Keep my draft");
   expect(screen.getByRole("button", { name: "Start live voice" }).query()).toBeNull();
   const label =
@@ -367,7 +400,7 @@ it.each([
   }
 });
 
-it.each(["stop", "thread", "model", "environment", "disabled", "pagehide", "visibility"] as const)(
+it.each(["stop", "pagehide"] as const)(
   "StrictMode disposes late media on %s without a second owner",
   async (change) => {
     const grant = deferred<LiveMedia>();
@@ -377,25 +410,13 @@ it.each(["stop", "thread", "model", "environment", "disabled", "pagehide", "visi
         <VoiceComposer {...props} />
       </StrictMode>
     );
-    await using screen = await render(panel());
+    await using screen = await renderVoice(panel());
     await userEvent.click(screen.getByRole("button", { name: "Start live voice" }));
     expect(h.audio).not.toHaveBeenCalled();
     await h.authorize();
     if (change === "stop")
       await userEvent.click(screen.getByRole("button", { name: "Stop live voice" }));
     else if (change === "pagehide") await act(() => window.dispatchEvent(new Event("pagehide")));
-    else if (change === "visibility") {
-      using _hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
-      await act(() => document.dispatchEvent(new Event("visibilitychange")));
-    } else
-      await screen.rerender(
-        panel({
-          owner: change === "thread" ? "thread_2" : "thread_1",
-          model: change === "model" ? "other" : "custom-model",
-          environment: change === "environment" ? "env_other" : "env_voice",
-          disabled: change === "disabled",
-        }),
-      );
     grant.resolve(h.attempts[0]!.value);
     await vi.waitFor(() => expect(h.attempts[0]!.value.dispose).toHaveBeenCalledTimes(1));
     expect(h.attempts[0]!.options.signal.aborted).toBe(true);
@@ -428,7 +449,9 @@ it.each(["link", "sidebar", "redirect"] as const)(
       { threadId: ThreadId.make("local_draft_thread") },
     );
     store.setPrompt(draftId, "Keep unsent text");
-    await using screen = await render(<RoutedVoiceComposer />, { router: "/draft/draft_voice" });
+    await using screen = await renderVoice(<RoutedVoiceComposer />, {
+      router: "/draft/draft_voice",
+    });
     const navigateThread = (threadId: string) =>
       act(() =>
         screen.router!.navigate({
@@ -459,11 +482,6 @@ it.each(["link", "sidebar", "redirect"] as const)(
     expect(h.attempts[0]!.value.dispose).not.toHaveBeenCalled();
     expect(h.audio).toHaveBeenCalledTimes(1);
     expect(h.sockets[0]!.close).not.toHaveBeenCalled();
-    if (navigation === "link")
-      await page.screenshot({
-        element: screen.container,
-        path: "../../../../.t3/t3voice-live-client-fix-promotion-r1.png",
-      });
     const ref = {
       environmentId: EnvironmentId.make("env_voice"),
       threadId: ThreadId.make("created_thread"),
@@ -475,15 +493,15 @@ it.each(["link", "sidebar", "redirect"] as const)(
     expect(h.attempts[0]!.value.dispose).not.toHaveBeenCalled();
     expect(store.getComposerDraft(ref)?.prompt).toBe("Keep unsent text");
     await navigateThread("unrelated_thread");
-    expect(h.attempts[0]!.value.stopAudio).toHaveBeenCalledTimes(1);
-    expect(h.attempts[0]!.value.dispose).not.toHaveBeenCalled();
+    expect(h.attempts[0]!.value.stopAudio).not.toHaveBeenCalled();
+    await expect.element(screen.getByRole("button", { name: "Start live voice" })).toBeDisabled();
+    await navigateThread("created_thread");
+    await expect.element(screen.getByRole("button", { name: "Stop live voice" })).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Stop live voice" }));
     await act(() =>
       h.sockets[0]!.event({ type: "live.cleanup", sessionId: "session_1", result: "acknowledged" }),
     );
     expect(h.attempts[0]!.value.dispose).toHaveBeenCalledTimes(1);
-    await expect.element(screen.getByRole("button", { name: "Start live voice" })).toBeVisible();
-    await navigateThread("created_thread");
-    await expect.element(screen.getByRole("button", { name: "Start live voice" })).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: "Start live voice" }));
     await vi.waitFor(() => expect(h.sockets).toHaveLength(2));
     expect(new URL(String(h.socketFactory.mock.calls[1]![0])).searchParams.get("threadId")).toBe(
@@ -510,7 +528,7 @@ it.each(["ready", "muted", "blocked"] as const)(
       value.playback = vi.fn(() => playback.promise);
       return value;
     });
-    await using screen = await render(<VoiceComposer />);
+    await using screen = await renderVoice(<VoiceComposer />);
     await userEvent.click(screen.getByRole("button", { name: "Start live voice" }));
     await h.authorize();
     await act(() => {
@@ -575,12 +593,7 @@ it.each(["ready", "muted", "blocked"] as const)(
 
 it("keeps Send, mic mute, original coding Stop; accessible refresh and playback error, retry without transcript in composer", async () => {
   using h = setup();
-  await using screen = await render(<VoiceComposer />);
-  const capture = (state: string) =>
-    page.screenshot({
-      element: screen.container,
-      path: `../../../../.t3/t3voice-live-client-${state}.png`,
-    });
+  await using screen = await renderVoice(<VoiceComposer />);
   await userEvent.click(screen.getByRole("button", { name: "Start live voice" }));
   await expect
     .element(screen.getByRole("button", { name: "Connecting live voice" }))
@@ -605,7 +618,6 @@ it("keeps Send, mic mute, original coding Stop; accessible refresh and playback 
       }),
     )
     .not.toBeInTheDocument();
-  await capture("connecting");
   await h.connect();
   await act(() => {
     h.sockets[0]!.event({
@@ -629,7 +641,6 @@ it("keeps Send, mic mute, original coding Stop; accessible refresh and playback 
   });
   expect(screen.container.textContent).not.toContain("Private live preview");
   expect(screen.container.textContent).not.toContain("Concurrent output preview");
-  await capture("active");
   await userEvent.click(screen.getByRole("button", { name: "Mute live microphone" }));
   await expect
     .element(screen.getByRole("button", { name: "Unmute live microphone" }))
@@ -645,7 +656,6 @@ it("keeps Send, mic mute, original coding Stop; accessible refresh and playback 
     .toBeEnabled();
   await expect.element(screen.getByRole("button", { name: "Stop live voice" })).toBeVisible();
   expect(h.attempts[0]!.value.dispose).not.toHaveBeenCalled();
-  await capture("muted-typed-running");
   await screen.rerender(<VoiceComposer isRunning canInterrupt />);
   await userEvent.clear(screen.getByRole("textbox"));
   await expect.element(screen.getByRole("button", { name: "Stop generation" })).toBeVisible();
@@ -658,7 +668,6 @@ it("keeps Send, mic mute, original coding Stop; accessible refresh and playback 
   expect(h.attempts[0]!.value.dispose).not.toHaveBeenCalled();
   await expect.element(screen.getByRole("button", { name: "Stopping live voice" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "Start live voice" }).query()).toBeNull();
-  await capture("stopping");
   await act(() =>
     h.sockets[0]!.event({ type: "live.cleanup", sessionId: "session_1", result: "acknowledged" }),
   );
@@ -687,7 +696,6 @@ it("keeps Send, mic mute, original coding Stop; accessible refresh and playback 
   await expect
     .element(screen.getByRole("button", { name: "Waiting for provider refresh" }))
     .toHaveAttribute("aria-busy", "true");
-  await capture("refresh");
   await act(() =>
     h.sockets[1]!.event({
       type: "live.status",
@@ -702,7 +710,6 @@ it("keeps Send, mic mute, original coding Stop; accessible refresh and playback 
   await expect.element(screen.getByRole("textbox")).toHaveValue("Keep my draft");
   await userEvent.click(screen.getByRole("button", { name: "Live voice error" }));
   await expect.element(page.getByRole("button", { name: "Try voice again" })).toBeEnabled();
-  await capture("playback-error");
   await userEvent.click(page.getByRole("button", { name: "Try voice again" }));
   await vi.waitFor(() => expect(h.sockets).toHaveLength(3));
   await userEvent.click(screen.getByRole("button", { name: "Stop live voice" }));
@@ -711,7 +718,7 @@ it("keeps Send, mic mute, original coding Stop; accessible refresh and playback 
 
 it("shows reconnecting without a final error and Stop cancels recovery", async () => {
   using h = setup();
-  await using screen = await render(<VoiceComposer />);
+  await using screen = await renderVoice(<VoiceComposer />);
   await userEvent.click(screen.getByRole("button", { name: "Start live voice" }));
   await vi.waitFor(() => expect(h.sockets).toHaveLength(1));
   await act(() => h.sockets[0]!.dispatchEvent(new Event("close")));
@@ -721,10 +728,58 @@ it("shows reconnecting without a final error and Stop cancels recovery", async (
   await expect
     .element(screen.getByRole("button", { name: "Live voice error" }))
     .not.toBeInTheDocument();
-  await page.screenshot({
-    element: screen.container,
-    path: "../../../../.t3/t3voice-live-reconnecting.png",
-  });
   await userEvent.click(screen.getByRole("button", { name: "Stop live voice" }));
   await expect.element(screen.getByRole("button", { name: "Start live voice" })).toBeVisible();
+});
+
+it("keeps the original muted session across navigation and backgrounding", async () => {
+  using h = setup();
+  await using screen = await renderVoice(<VoiceComposer />);
+  using _timers = fakeTimers();
+  await userEvent.click(screen.getByRole("button", { name: "Start live voice" }));
+  await h.connect();
+  await userEvent.click(screen.getByRole("button", { name: "Mute live microphone" }));
+  await screen.rerender(<VoiceComposer owner="thread_2" environment="env_other" />);
+  await expect
+    .element(screen.getByRole("button", { name: "Dictation test control" }))
+    .toBeDisabled();
+  expect(h.attempts[0]!.value.stopAudio).not.toHaveBeenCalled();
+  await expect.element(screen.getByRole("button", { name: "Start live voice" })).toBeDisabled();
+  using _hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+  await act(() => document.dispatchEvent(new Event("visibilitychange")));
+  expect(h.attempts[0]!.value.stopAudio).not.toHaveBeenCalled();
+  await screen.rerender(<VoiceComposer />);
+  await expect
+    .element(screen.getByRole("button", { name: "Unmute live microphone" }))
+    .toBeVisible();
+  expect(h.audio).toHaveBeenCalledTimes(1);
+  expect(h.attempts[0]!.value.microphone).toHaveBeenLastCalledWith(false);
+  useLiveVoiceSettings.setState({
+    voice: "cove",
+    notifications: "progress",
+    microphoneId: "other-microphone",
+    speakerId: "other-speaker",
+  });
+  await act(() => h.sockets[0]!.dispatchEvent(new Event("close")));
+  await act(() => vi.advanceTimersByTimeAsync(2000));
+  await h.connect(true);
+  expect(h.sockets).toHaveLength(2);
+  const recoveredUrl = new URL(String(h.socketFactory.mock.calls[1]![0]));
+  expect(recoveredUrl.searchParams.get("threadId")).toBe("thread_1");
+  expect(JSON.parse(recoveredUrl.searchParams.get("preferences")!)).toEqual(
+    DEFAULT_LIVE_VOICE_PREFERENCES,
+  );
+  expect(h.attempts[1]!.options.devices).toEqual({ microphoneId: "", speakerId: "" });
+  expect(h.attempts[1]!.value.microphone).not.toHaveBeenCalledWith(true);
+  await screen.rerender(<LiveVoiceSessionControls />);
+  await expect.element(screen.getByRole("region", { name: "Live voice session" })).toBeVisible();
+  await expect
+    .element(screen.getByRole("link", { name: "Live voice · Open chat" }))
+    .toHaveAttribute("href", "/env_voice/thread_1");
+  await userEvent.click(screen.getByRole("button", { name: "Stop live voice" }));
+  expect(h.attempts[1]!.value.stopAudio).toHaveBeenCalledTimes(1);
+  await act(() =>
+    h.sockets[1]!.event({ type: "live.cleanup", sessionId: "session_1", result: "acknowledged" }),
+  );
+  expect(screen.getByRole("region", { name: "Live voice session" }).query()).toBeNull();
 });

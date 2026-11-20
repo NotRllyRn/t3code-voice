@@ -280,3 +280,40 @@ it("ends the actual capture track immediately and keeps the peer open until disp
     await context.close();
   }
 });
+
+it("pins microphone and speaker for recovery and keeps tracks off while selecting output", async () => {
+  using h = setup();
+  const settings = { deviceId: "microphone-original", groupId: "input-group" };
+  Object.assign(h.track, { getSettings: () => settings });
+  const output = (deviceId: string) =>
+    ({
+      kind: "audiooutput",
+      deviceId,
+      groupId: "output-group",
+      label: "Speaker",
+      toJSON: () => ({}),
+    }) as MediaDeviceInfo;
+  using _devices = vi
+    .spyOn(navigator.mediaDevices, "enumerateDevices")
+    .mockResolvedValue([output("default"), output("speaker-original")]);
+  using sink = vi.spyOn(HTMLMediaElement.prototype, "setSinkId").mockImplementation(async () => {
+    expect(h.track.enabled).toBe(false);
+  });
+  const devices = { microphoneId: "", speakerId: "" };
+  const first = await browserLiveMedia({ ...h.options, devices });
+  expect(devices).toEqual({ microphoneId: "microphone-original", speakerId: "speaker-original" });
+  expect(sink).toHaveBeenLastCalledWith("speaker-original");
+  first.dispose();
+  const next = await browserLiveMedia({ ...h.options, devices });
+  expect(h.microphone).toHaveBeenLastCalledWith({
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      deviceId: { exact: "microphone-original" },
+    },
+    video: false,
+  });
+  expect(sink).toHaveBeenLastCalledWith("speaker-original");
+  expect(h.track.enabled).toBe(false);
+  next.dispose();
+});
