@@ -6,7 +6,11 @@ Only the exact installed `0.1.9-preview.20261116.1` preview is an allowed legacy
 
 ## Build-only evidence, not publication
 
-After human merge to `feature/codex-voice-stable`, `voice-build.yml` can build an explicit full source SHA that is an ancestor of that branch. All four existing release package manifests must already match the configured Voice version; the build does not rewrite source. The workflow defaults off behind `VOICE_BUILD_ENABLED` and the `voice-build` environment. Configure required human reviewers **before** enabling that variable; naming an environment alone creates no approval protection.
+After a reviewed merge to the configured Voice integration branch, `voice-build.yml` accepts the exact merge SHA, PR number and reviewed head SHA. It verifies the merged PR identity and source ancestry in `VOICE_BUILD_BASE_BRANCH`; missing configuration fails closed. Register this workflow on the default branch and restrict the `voice-build` environment to that exact branch before enabling it. Set `VOICE_BUILD_ENABLED` and `VOICE_BUILD_BASE_BRANCH` in that environment only. All four release package manifests must match the configured Voice version; the build never rewrites source. Environment reviewers make each build supervised; unattended builds require protected workflow/base branches with enforced checks, current-head approvals and no automation bypass. Do not add failing required checks merely to enable automation: establish working checks first.
+
+`Voice automation tests` runs on GitHub-hosted Ubuntu with a frozen filtered dependency install. It covers stable-release validation, coordinator claims, signed webhook/replay behavior and build preflight. Require this check only after verifying a clean hosted run succeeds; it does not replace application compatibility tests for an upstream update.
+
+Hosted Mac artifacts use ad-hoc signing and are not equivalent to persistently signed Maya releases or an upgradeable Mac feed. No signing key is copied to GitHub. A proper signed release still uses the existing Maya release process.
 
 The lane builds Linux x64 server archives and macOS ARM64 DMG/ZIP artifacts afresh, with a smoke check for each. It retains workflow artifacts for 14 days, named with version, full source SHA and target. Each target carries `voice-release.json`, `SHA256SUMS`, and upstream notes followed by `## Voice Fork`. The descriptor records the source/upstream pins, registered database migration head, orchestration protocol version, final-byte SHA-256/size, target and experimental trust state. Per-target descriptors are build evidence, not a combined public release manifest or update feed. Publication would need a separately reviewed aggregation step that rejects mismatched versions/source pins, plus explicit approval. No release, tag, npm publication, deployment or installation runs here.
 
@@ -34,7 +38,7 @@ A successful claim allows one active update and at most one launch in 24 hours. 
 
 The thread receives ordinary top-level MCP capabilities from its configured provider, not the coordinator’s narrower client grants. The following merge/deploy restrictions are prompt instructions, not capability enforcement.
 
-The update thread must test changes and inspect its diff, PR title and body before opening/linking a reviewable PR. It may not merge, publish packages, release, deploy, install, or change live services. Offline checks do not prove provider execution or GitHub access; activation requires those operator prerequisites.
+The update thread tests changes and inspects its diff, title and body before opening/linking a PR. It may merge the exact reviewed head only after enforced required checks and current-head approvals pass, with no unresolved findings or conflicts. Changed head/base evidence requires retesting and fresh review. Missing protection, failed checks, unresolved conflicts or the task deadline stop work for manual reconciliation. The thread then dispatches the artifact-only workflow for the confirmed merge SHA. It never publishes releases/packages, deploys, installs or restarts services. GitHub branch protection enforces merge safety; prompt instructions alone are not an authorization boundary. Offline checks do not prove provider execution or GitHub access; activation requires those operator prerequisites.
 
 ### Retired Pi automation
 

@@ -108,8 +108,20 @@ test("claims once before returning fixed worktree request; top-level thread reco
     NodeAssert.match(request.message, /register its URL with link_pull_request/);
     NodeAssert.match(
       request.message,
-      /Never merge, release, publish packages, deploy, install, or change live services/,
+      /Never release, publish packages, deploy, install, restart, or change live services/,
     );
+    for (const instruction of [
+      "gh pr merge --match-head-commit <reviewed-head-SHA>",
+      "nonempty set of required checks all passing",
+      "stale-approval dismissal",
+      "re-read both immediately before merging",
+      "stopping for manual reconciliation",
+      "not a polling loop",
+      "pr_number=<PR-number>, reviewed_head=<reviewed-head-SHA>",
+      "ad-hoc experimental builds",
+      "manual deployment handoff",
+    ])
+      NodeAssert.ok(request.message.includes(instruction));
     NodeAssert.ok(!request.message.includes("feature/codex-voice-stable"));
     NodeAssert.ok(
       request.message.includes(`based on ${request.workspaceStrategy.approvedBase.branch}`),

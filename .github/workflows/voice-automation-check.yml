@@ -1,0 +1,39 @@
+name: Voice automation check
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: voice-automation-check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Voice automation tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact event source
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git init .
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git fetch --depth=1 --no-tags origin "$SOURCE_SHA"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -c checkout.workers=0 checkout --detach "$SOURCE_SHA"
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+      - uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --frozen-lockfile --filter=t3... --filter=@t3tools/scripts...
+          save-pnpm-store: false
+      - name: Test stable-release validation, signed delivery and build gates
+        run: vp test run --config scripts/voice-automation.vite.config.ts
