@@ -1,10 +1,13 @@
 import { EnvironmentId, type ServerInstallation } from "@t3tools/contracts";
-import { expect, it } from "vite-plus/test";
+import { expect, it, vi } from "vite-plus/test";
 import {
   collectServerUpdateTargets,
   type UpdateEverythingMachine,
 } from "../../components/sidebar/updateEverything.logic";
 import { manualServerUpdateCommand, resolveVersionMismatch } from "../../versionSkew";
+
+// Local build fixture preserves the upstream wrong-core guidance case.
+vi.mock("../../branding", () => ({ APP_VERSION: "0.1.10-voice.1" }));
 
 function machine(
   id: string,
@@ -185,4 +188,8 @@ it("uses the proven launcher with shell-quoted paths for a Voice update", () => 
       baseDir: "/data/example home",
     }),
   ).toBe("'/opt/example'\\''s bin/t3' update --base-dir '/data/example home' 0.1.10-voice.6");
+});
+
+it("uses the client Voice release for manual guidance when the requested core is upstream", () => {
+  expect(manualServerUpdateCommand("0.1.11")).toContain("Voice release (0.1.10-voice.1)");
 });
