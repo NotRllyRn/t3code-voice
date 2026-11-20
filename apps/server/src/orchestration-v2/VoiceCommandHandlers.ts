@@ -18,10 +18,19 @@ type VoiceRecordCommand = Extract<
   OrchestrationV2ServerCommand,
   { readonly type: "voice.message.record" }
 >;
+type VoiceDispatchCommand = Extract<
+  OrchestrationV2ServerCommand,
+  { readonly type: "message.dispatch" }
+>;
+type VoiceCommand = VoiceRecordCommand | VoiceDispatchCommand;
+type VoiceUserTurnItem = Extract<OrchestrationV2TurnItem, { readonly type: "user_message" }>;
 type PendingEvents = Ref.Ref<Array<OrchestrationV2DomainEvent>>;
 
 interface VoiceCommandDependencies<ProjectionError, DispatchError> {
-  readonly projectionStore: Pick<ProjectionStoreV2Shape, "getThreadRecords">;
+  readonly projectionStore: Pick<
+    ProjectionStoreV2Shape,
+    "getThreadRecords" | "getNextTurnItemOrdinal"
+  >;
   readonly getProjectionWithPendingEvents: (
     threadId: ThreadId,
     events: PendingEvents,
@@ -31,7 +40,7 @@ interface VoiceCommandDependencies<ProjectionError, DispatchError> {
   ) => Effect.Effect<number, ProjectionError>;
   readonly emit: (
     events: PendingEvents,
-    command: VoiceRecordCommand,
+    command: VoiceCommand,
   ) => <Event extends OrchestrationV2DomainEvent>(
     event: Omit<Event, "id">,
   ) => Effect.Effect<Event, DispatchError>;
@@ -40,11 +49,25 @@ interface VoiceCommandDependencies<ProjectionError, DispatchError> {
     readonly cause: unknown;
   }) => ProjectionError;
   readonly dispatchError: (input: {
-    readonly commandId: VoiceRecordCommand["commandId"];
-    readonly commandType: VoiceRecordCommand["type"];
+    readonly commandId: VoiceCommand["commandId"];
+    readonly commandType: VoiceCommand["type"];
     readonly cause: string;
   }) => DispatchError;
 }
+
+export const voiceMessageFields = (message: OrchestrationV2ConversationMessage | undefined) =>
+  message?.voice === undefined ? {} : { voice: message.voice, createdAt: message.createdAt };
+
+export const voiceTurnItemFields = (item: VoiceUserTurnItem | undefined) =>
+  item === undefined
+    ? {}
+    : {
+        id: item.id,
+        ordinal: item.ordinal,
+        voice: item.voice,
+        startedAt: item.startedAt,
+        completedAt: item.completedAt,
+      };
 
 export const makeVoiceCommandHandlers = <ProjectionError, DispatchError>({
   projectionStore,
@@ -93,6 +116,70 @@ export const makeVoiceCommandHandlers = <ProjectionError, DispatchError>({
       if (event.threadId === projection.thread.id) result = applyToProjection(result, event);
     }
     return result;
+  });
+
+  const prepareVoiceDispatch = Effect.fn("Orchestrator.prepareVoiceDispatch")(function* (
+    command: VoiceDispatchCommand,
+    projection: OrchestrationV2ThreadProjection,
+    events: PendingEvents,
+  ) {
+    projection = yield* withVoiceRecords(projection, [command.messageId], events);
+    const recordedVoice = projection.messages.find((message) => message.id === command.messageId);
+    const recordedVoiceItem = projection.turnItems.find(
+      (item): item is VoiceUserTurnItem =>
+        item.type === "user_message" &&
+        item.messageId === command.messageId &&
+        item.voice !== undefined,
+    );
+    if (recordedVoice?.voice !== undefined) {
+      if (
+        recordedVoice.role !== "user" ||
+        recordedVoice.text !== command.text ||
+        recordedVoice.createdBy !== command.createdBy ||
+        recordedVoice.creationSource !== command.creationSource ||
+        recordedVoiceItem === undefined ||
+        command.attachments.length > 0 ||
+        (command.dispatchMode.type !== "queue_after_active" &&
+          command.dispatchMode.type !== "start_immediately")
+      ) {
+        return yield* Effect.fail(
+          dispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause:
+              "Only the recorded voice user input can be dispatched, without rewriting or steering.",
+          }),
+        );
+      }
+      if (recordedVoice.runId !== null) {
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: command.threadId,
+          occurredAt: yield* DateTime.now,
+          payload: projection.thread,
+        });
+        return { type: "replayed" as const };
+      }
+    }
+    // Freeze the committed conversation high-water mark, not a proposed/pre-normalized position.
+    const lastStoredOrdinal =
+      (yield* projectionStore
+        .getNextTurnItemOrdinal(command.threadId)
+        .pipe(Effect.mapError((cause) => projectionError({ threadId: command.threadId, cause })))) -
+      1;
+    // Later voice replies stay visible now but enter provider history before the next eligible turn.
+    const historyOrdinal = recordedVoiceItem ? recordedVoiceItem.ordinal - 1 : lastStoredOrdinal;
+    const voiceHistoryCutoffOrdinal = historyOrdinal > 0 ? historyOrdinal : undefined;
+    return {
+      type: "prepared" as const,
+      projection,
+      recordedVoice,
+      recordedVoiceItem,
+      voiceHistoryCutoffOrdinal,
+    };
   });
 
   const recordVoiceMessage = Effect.fn("Orchestrator.recordVoiceMessage")(function* (
@@ -238,5 +325,5 @@ export const makeVoiceCommandHandlers = <ProjectionError, DispatchError>({
     });
   });
 
-  return { withVoiceRecords, recordVoiceMessage };
+  return { prepareVoiceDispatch, recordVoiceMessage };
 };

@@ -154,7 +154,11 @@ import { withCommandMetrics } from "../observability/Metrics.ts";
 import type { OrchestrationEffectRequestV2, PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
-import { makeVoiceCommandHandlers } from "./VoiceCommandHandlers.ts";
+import {
+  makeVoiceCommandHandlers,
+  voiceMessageFields,
+  voiceTurnItemFields,
+} from "./VoiceCommandHandlers.ts";
 import {
   DispatchModeLimit,
   exceededDispatchModeLimit,
@@ -6749,7 +6753,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     ]);
   });
 
-  const { withVoiceRecords, recordVoiceMessage } = makeVoiceCommandHandlers({
+  const { prepareVoiceDispatch, recordVoiceMessage } = makeVoiceCommandHandlers({
     projectionStore,
     getProjectionWithPendingEvents,
     nextTurnItemOrdinal,
@@ -6853,57 +6857,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     ) {
       projection = yield* getProjectionWithPendingEvents(command.threadId, events);
     }
-    projection = yield* withVoiceRecords(projection, [command.messageId], events);
-    const recordedVoice = projection.messages.find((message) => message.id === command.messageId);
-    const recordedVoiceItem = projection.turnItems.find(
-      (item): item is Extract<OrchestrationV2TurnItem, { readonly type: "user_message" }> =>
-        item.type === "user_message" &&
-        item.messageId === command.messageId &&
-        item.voice !== undefined,
-    );
-    if (recordedVoice?.voice !== undefined) {
-      if (
-        recordedVoice.role !== "user" ||
-        recordedVoice.text !== command.text ||
-        recordedVoice.createdBy !== command.createdBy ||
-        recordedVoice.creationSource !== command.creationSource ||
-        recordedVoiceItem === undefined ||
-        command.attachments.length > 0 ||
-        (command.dispatchMode.type !== "queue_after_active" &&
-          command.dispatchMode.type !== "start_immediately")
-      ) {
-        return yield* new OrchestratorDispatchError({
-          commandId: command.commandId,
-          commandType: command.type,
-          cause:
-            "Only the recorded voice user input can be dispatched, without rewriting or steering.",
-        });
-      }
-      if (recordedVoice.runId !== null) {
-        yield* emit(
-          events,
-          command,
-        )({
-          type: "thread.metadata-updated",
-          threadId: command.threadId,
-          occurredAt: yield* DateTime.now,
-          payload: projection.thread,
-        });
-        return;
-      }
-    }
-    // Freeze the committed conversation high-water mark, not a proposed/pre-normalized position.
-    const lastStoredOrdinal =
-      (yield* projectionStore
-        .getNextTurnItemOrdinal(command.threadId)
-        .pipe(
-          Effect.mapError(
-            (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
-          ),
-        )) - 1;
-    // Later voice replies stay visible now but enter provider history before the next eligible turn.
-    const historyOrdinal = recordedVoiceItem ? recordedVoiceItem.ordinal - 1 : lastStoredOrdinal;
-    const voiceHistoryCutoffOrdinal = historyOrdinal > 0 ? historyOrdinal : undefined;
+    const preparedVoice = yield* prepareVoiceDispatch(command, projection, events);
+    if (preparedVoice.type === "replayed") return;
+    const { recordedVoice, recordedVoiceItem, voiceHistoryCutoffOrdinal } = preparedVoice;
+    projection = preparedVoice.projection;
     if (command.manualContinuationOfRunId !== undefined) {
       const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
       const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
@@ -7820,12 +7777,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         updatedAt: now,
         ...(delegatedCompletion === undefined ? {} : { delegatedCompletion }),
         ...(notification === undefined ? {} : { notification }),
-        ...(recordedVoice?.voice === undefined
-          ? {}
-          : {
-              voice: recordedVoice.voice,
-              createdAt: recordedVoice.createdAt,
-            }),
+        ...voiceMessageFields(recordedVoice),
       };
       const emitEvent = emit(events, command);
       if (recordedVoiceItem !== undefined) {
@@ -8262,12 +8214,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         updatedAt: now,
         ...(delegatedCompletion === undefined ? {} : { delegatedCompletion }),
         ...(notification === undefined ? {} : { notification }),
-        ...(recordedVoice?.voice === undefined
-          ? {}
-          : {
-              voice: recordedVoice.voice,
-              createdAt: recordedVoice.createdAt,
-            }),
+        ...voiceMessageFields(recordedVoice),
       };
       const turnItem: OrchestrationV2TurnItem = {
         createdBy: command.createdBy,
@@ -8300,15 +8247,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         attachments: command.attachments,
         ...(freshContext ? { freshContext: true } : {}),
         ...(run.contextHandoffId === null ? modelSwitchSince(projection, modelSelection) : {}),
-        ...(recordedVoiceItem === undefined
-          ? {}
-          : {
-              id: recordedVoiceItem.id,
-              ordinal: recordedVoiceItem.ordinal,
-              voice: recordedVoiceItem.voice,
-              startedAt: recordedVoiceItem.startedAt,
-              completedAt: recordedVoiceItem.completedAt,
-            }),
+        ...voiceTurnItemFields(recordedVoiceItem),
       };
       const preparationTurnItem: OrchestrationV2TurnItem | null =
         dispatchMode.type === "defer_start"
@@ -9071,12 +9010,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       updatedAt: now,
       ...(delegatedCompletion === undefined ? {} : { delegatedCompletion }),
       ...(notification === undefined ? {} : { notification }),
-      ...(recordedVoice?.voice === undefined
-        ? {}
-        : {
-            voice: recordedVoice.voice,
-            createdAt: recordedVoice.createdAt,
-          }),
+      ...voiceMessageFields(recordedVoice),
     };
     const turnItem: OrchestrationV2TurnItem = {
       createdBy: command.createdBy,
@@ -9118,15 +9052,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             sideChatFork ? undefined : sourceRun?.modelSelection,
           )
         : {}),
-      ...(recordedVoiceItem === undefined
-        ? {}
-        : {
-            id: recordedVoiceItem.id,
-            ordinal: recordedVoiceItem.ordinal,
-            voice: recordedVoiceItem.voice,
-            startedAt: recordedVoiceItem.startedAt,
-            completedAt: recordedVoiceItem.completedAt,
-          }),
+      ...voiceTurnItemFields(recordedVoiceItem),
     };
     // A side chat's "Context from" divider already marks its copied context.
     const activeHandoff =
