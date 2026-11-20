@@ -75,8 +75,12 @@ export async function githubJson(path: string, fetcher: typeof fetch = fetch): P
     )
   )
     throw new Error("Unexpected GitHub API path");
-  // Compare responses include file patches even when only ancestry is needed.
-  const maxBytes = path.startsWith("/compare/") ? 16 * 1024 * 1024 : MAX_BYTES;
+  // GitHub includes release notes/assets and comparison patches in these responses.
+  const maxBytes = path.startsWith("/compare/")
+    ? 16 * 1024 * 1024
+    : path === "/releases/latest"
+      ? 1024 * 1024
+      : MAX_BYTES;
   const response = await fetcher(`${API}${path}`, {
     headers: {
       Accept: "application/vnd.github+json",
