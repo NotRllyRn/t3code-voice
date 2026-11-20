@@ -33,11 +33,7 @@ import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 import { renderWebhookPrompt } from "./webhookTemplate.ts";
 
-import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
-import { runMigrations } from "../persistence/Migrations.ts";
-
 const decodeUpsertInput = Schema.decodeUnknownEffect(ScheduledTaskUpsertInput);
-const isUpsertInput = Schema.is(ScheduledTaskUpsertInput);
 
 it.effect(
   "preserves omitted dedupe settings, releases duplicate claims, and retains coalesced claims",
@@ -99,60 +95,6 @@ it.effect(
         );
       }),
     ),
-);
-
-it.effect("preserves migration 96 tasks and fences changed generations", () =>
-  Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
-    yield* runMigrations({ toMigrationInclusive: 96 });
-    yield* sql`INSERT INTO scheduled_tasks ${sql.insert({
-      task_id: "scheduled-task:hook",
-      title: "Legacy hook",
-      prompt: "Review",
-      enabled: 1,
-      schedule_json: '{"type":"webhook","signature":null}',
-      project_id: "project-webhook",
-      thread_id: null,
-      workspace_strategy_json: '{"type":"root"}',
-      model_selection_json: '{"instanceId":"codex","model":"gpt-5.4"}',
-      runtime_mode: "full-access",
-      interaction_mode: "default",
-      created_by: "user",
-      creation_source: "web",
-      created_at: "1970-01-01T00:00:00.000Z",
-      updated_at: "1970-01-01T00:00:00.000Z",
-      next_run_at: null,
-      last_run_at: null,
-      last_run_status: "never",
-      last_run_error: null,
-      run_count: 0,
-      webhook_token: "legacy-token",
-    })}`;
-    const before = yield* sql`SELECT * FROM scheduled_tasks`;
-    assert.deepEqual(yield* runMigrations(), [[97, "ScheduledTaskGeneration"]]);
-    assert.deepEqual(yield* runMigrations(), []);
-    const after = yield* sql`SELECT * FROM scheduled_tasks`;
-    const { task_generation: generation, ...preserved } = after[0]!;
-    assert.deepEqual(preserved, before[0]);
-    assert.match(String(generation), /^[a-f0-9]{32}$/);
-    yield* withService(
-      ({ service, launches }) =>
-        Effect.gen(function* () {
-          const [task] = (yield* service.list()).tasks;
-          assert.equal(task!.enabled, true);
-          assert.deepEqual(task!.schedule, { type: "webhook", signature: null });
-          assert.equal(task!.generation, generation);
-          assert.equal((yield* service.triggerWebhook(requestFor(task!)))._tag, "accepted");
-          yield* Queue.take(launches);
-          const [ran] = (yield* service.list()).tasks;
-          assert.equal(ran!.generation, generation);
-          const changed = yield* service.setEnabled({ id: task!.id, enabled: false });
-          assert.notEqual(changed.task.generation, generation);
-          assert.equal(yield* Queue.size(launches), 0);
-        }),
-      { sql },
-    );
-  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
 
 const waitForSpan = <A, E, R>(work: Effect.Effect<A, E, R>, name: string) =>
@@ -330,28 +272,6 @@ const withService = <A, E>(
         : Layer.succeed(SqlClient.SqlClient, options.sql),
     ),
   );
-
-it.effect("refuses retired actions on save and stored delivery without launching a prompt", () =>
-  withService(({ service, sql, launches }) =>
-    Effect.gen(function* () {
-      const schedule = { type: "webhook", signature: null, action: "voice-upstream-release" };
-      assert.isFalse(
-        isUpsertInput({
-          ...(yield* webhookTaskInput()),
-          schedule,
-        }),
-      );
-      const { task } = yield* service.upsert(yield* webhookTaskInput());
-      yield* sql`UPDATE scheduled_tasks SET schedule_json = ${JSON.stringify(schedule)} WHERE task_id = ${task.id}`;
-      assert.isTrue(Exit.isFailure(yield* Effect.exit(service.list())));
-      assert.isTrue(Exit.isFailure(yield* Effect.exit(service.runNow({ id: task.id }))));
-      assert.isTrue(Exit.isFailure(yield* Effect.exit(service.triggerWebhook(requestFor(task)))));
-      assert.equal(yield* Queue.size(launches), 0);
-      yield* service.delete({ id: task.id });
-      assert.deepEqual((yield* service.list()).tasks, []);
-    }),
-  ),
-);
 
 it.effect("dispatches exactly the rendered prompt and logs the delivery", () =>
   withService(({ service, launches }) =>

@@ -3,16 +3,18 @@ import * as NodeCrypto from "node:crypto";
 
 import * as NodePlatformCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { expect, it } from "@effect/vitest";
+import { assert, expect, it } from "@effect/vitest";
 import { ScheduledTaskId, ScheduledTaskUpsertInput } from "@t3tools/contracts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as Tracer from "effect/Tracer";
 
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
@@ -25,6 +27,7 @@ import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 
 const decodeUpsert = Schema.decodeEffect(ScheduledTaskUpsertInput);
+const isUpsertInput = Schema.is(ScheduledTaskUpsertInput);
 
 const secret = "synthetic-regression-secret";
 const bodyText = '{ "message": "café 🗂", "revision": 10 }\n';
@@ -34,17 +37,20 @@ const signature = (body: Uint8Array) =>
 
 // Real generic webhook service and SQLite; provider dispatch and unrelated
 // scheduler/project services stay synthetic.
-const withService = <A, E>(
+const withService = <A, E, InitializeError = never>(
   databasePath: string,
   use: (input: {
     service: ScheduledTaskService.ScheduledTaskService["Service"];
     launches: Queue.Queue<ThreadLaunchService.ThreadLaunchInput>;
     completed: Deferred.Deferred<void>;
+    sql: SqlClient.SqlClient;
   }) => Effect.Effect<A, E>,
+  initialize?: Effect.Effect<unknown, InitializeError, SqlClient.SqlClient>,
 ) =>
   Effect.scoped(
     Effect.gen(function* () {
-      yield* runMigrations();
+      const sql = yield* SqlClient.SqlClient;
+      yield* initialize ?? runMigrations();
       const launches = yield* Queue.unbounded<ThreadLaunchService.ThreadLaunchInput>();
       const completed = yield* Deferred.make<void>();
       const dependencies = Layer.mergeAll(
@@ -82,7 +88,7 @@ const withService = <A, E>(
       });
       return yield* Effect.gen(function* () {
         const service = yield* ScheduledTaskService.ScheduledTaskService;
-        return yield* use({ service, launches, completed });
+        return yield* use({ service, launches, completed, sql });
       }).pipe(
         Effect.withTracer(tracer),
         Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(dependencies))),
@@ -185,4 +191,117 @@ it.effect(
         }),
       );
     }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+const webhookTaskInput = (overrides: Record<string, unknown> = {}) =>
+  decodeUpsert({
+    id: "scheduled-task:hook",
+    title: "Review PRs",
+    prompt: "Review this PR: {{body.pull_request.url}}",
+    enabled: true,
+    schedule: { type: "webhook" },
+    projectId: "project-webhook",
+    workspaceStrategy: { type: "root" },
+    modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    ...overrides,
+  });
+
+const pullRequestBody = new TextEncoder().encode(
+  JSON.stringify({ pull_request: { url: "https://github.com/org/repo/pull/45" } }),
+);
+
+const requestFor = (
+  task: { readonly id: string; readonly webhook?: { readonly path: string } | undefined },
+  overrides: Partial<ScheduledTaskService.WebhookTriggerRequest> = {},
+): ScheduledTaskService.WebhookTriggerRequest => ({
+  hookId: task.id,
+  token: task.webhook?.path.split("/").at(-1) ?? "",
+  method: "POST",
+  path: `/api/hooks/${task.id}`,
+  query: "",
+  headers: { "content-type": "application/json" },
+  body: pullRequestBody,
+  bodyText: new TextDecoder().decode(pullRequestBody),
+  ...overrides,
+});
+
+it.effect("preserves migration 96 tasks and fences changed generations", () =>
+  withService(
+    ":memory:",
+    ({ service, launches, completed, sql }) =>
+      Effect.gen(function* () {
+        const [row] = yield* sql`SELECT task_generation FROM scheduled_tasks`;
+        const generation = row!.task_generation;
+        const [task] = (yield* service.list()).tasks;
+        assert.equal(task!.enabled, true);
+        assert.deepEqual(task!.schedule, { type: "webhook", signature: null });
+        assert.equal(task!.generation, generation);
+        assert.equal((yield* service.triggerWebhook(requestFor(task!)))._tag, "accepted");
+        yield* Queue.take(launches);
+        yield* Deferred.await(completed);
+        const [ran] = (yield* service.list()).tasks;
+        assert.equal(ran!.generation, generation);
+        const changed = yield* service.setEnabled({ id: task!.id, enabled: false });
+        assert.notEqual(changed.task.generation, generation);
+        assert.equal(yield* Queue.size(launches), 0);
+      }),
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 96 });
+      yield* sql`INSERT INTO scheduled_tasks ${sql.insert({
+        task_id: "scheduled-task:hook",
+        title: "Legacy hook",
+        prompt: "Review",
+        enabled: 1,
+        schedule_json: '{"type":"webhook","signature":null}',
+        project_id: "project-webhook",
+        thread_id: null,
+        workspace_strategy_json: '{"type":"root"}',
+        model_selection_json: '{"instanceId":"codex","model":"gpt-5.4"}',
+        runtime_mode: "full-access",
+        interaction_mode: "default",
+        created_by: "user",
+        creation_source: "web",
+        created_at: "1970-01-01T00:00:00.000Z",
+        updated_at: "1970-01-01T00:00:00.000Z",
+        next_run_at: null,
+        last_run_at: null,
+        last_run_status: "never",
+        last_run_error: null,
+        run_count: 0,
+        webhook_token: "legacy-token",
+      })}`;
+      const before = yield* sql`SELECT * FROM scheduled_tasks`;
+      assert.deepEqual(yield* runMigrations(), [[97, "ScheduledTaskGeneration"]]);
+      assert.deepEqual(yield* runMigrations(), []);
+      const after = yield* sql`SELECT * FROM scheduled_tasks`;
+      const { task_generation: generation, ...preserved } = after[0]!;
+      assert.deepEqual(preserved, before[0]);
+      assert.match(String(generation), /^[a-f0-9]{32}$/);
+    }),
+  ),
+);
+
+it.effect("refuses retired actions on save and stored delivery without launching a prompt", () =>
+  withService(":memory:", ({ service, sql, launches }) =>
+    Effect.gen(function* () {
+      const schedule = { type: "webhook", signature: null, action: "voice-upstream-release" };
+      assert.isFalse(
+        isUpsertInput({
+          ...(yield* webhookTaskInput()),
+          schedule,
+        }),
+      );
+      const { task } = yield* service.upsert(yield* webhookTaskInput());
+      yield* sql`UPDATE scheduled_tasks SET schedule_json = ${JSON.stringify(schedule)} WHERE task_id = ${task.id}`;
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(service.list())));
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(service.runNow({ id: task.id }))));
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(service.triggerWebhook(requestFor(task)))));
+      assert.equal(yield* Queue.size(launches), 0);
+      yield* service.delete({ id: task.id });
+      assert.deepEqual((yield* service.list()).tasks, []);
+    }),
+  ),
 );

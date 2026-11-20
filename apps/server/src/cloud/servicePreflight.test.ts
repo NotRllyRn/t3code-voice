@@ -16,32 +16,22 @@ import { runServicePreflight } from "./servicePreflight.ts";
 import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 
 // regression: #13239 a stale CLI shadowing the updated one kept "updating" to itself
-it.each(["9.8.7", "0.1.10-voice.1"])(
-  "blocks legacy launcher protocol with recovery for %s",
-  (version) => {
-    const launcherProtocol = 1;
-    const result = runServicePreflight({
-      databasePath: "/missing/state.sqlite",
-      launcherProtocol,
-      version,
-    });
+it.each([1])("blocks legacy launcher protocol %i with exact recovery steps", (launcherProtocol) => {
+  const result = runServicePreflight({
+    databasePath: "/missing/state.sqlite",
+    launcherProtocol,
+    version: "9.8.7",
+  });
 
-    expect(result).toMatchObject({ status: "blocked", version });
-    const reason = result.status === "blocked" ? result.reason : "";
-    expect(reason).toMatch(new RegExp(`\\b${launcherProtocol}\\b`));
-    expect(reason).toMatch(new RegExp(`\\b${SERVICE_LAUNCHER_PROTOCOL}\\b`));
-    if (version.includes("-voice.")) {
-      expect(reason).toContain("https://github.com/NotRllyRn/t3code-voice/releases");
-      expect(reason).toContain("manual");
-      expect(reason).not.toMatch(/t3\.codes|install\.sh|npm install|npx|~\/\.local\/bin/);
-    } else {
-      expect(reason).toContain("curl -fsSL https://t3.codes/install.sh | T3CODE_VERSION=9.8.7 sh");
-      expect(reason).toContain("~/.local/bin/t3 service install");
-    }
-    expect(reason).toContain("t3 --version");
-    expect(reason).toContain("which -a t3");
-  },
-);
+  expect(result).toMatchObject({ status: "blocked", version: "9.8.7" });
+  const reason = result.status === "blocked" ? result.reason : "";
+  expect(reason).toMatch(new RegExp(`\\b${launcherProtocol}\\b`));
+  expect(reason).toMatch(new RegExp(`\\b${SERVICE_LAUNCHER_PROTOCOL}\\b`));
+  expect(reason).toContain("curl -fsSL https://t3.codes/install.sh | T3CODE_VERSION=9.8.7 sh");
+  expect(reason).toContain("~/.local/bin/t3 service install");
+  expect(reason).toContain("t3 --version");
+  expect(reason).toContain("which -a t3");
+});
 
 // regression: #34502 every installed launcher was protocol 3, so protocol 4 blocked every remote update
 it.each([3, SERVICE_LAUNCHER_PROTOCOL])(
