@@ -18,6 +18,7 @@ import type { BackendStartupFailure } from "../backend/DesktopBackendManager.ts"
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopObservability from "./DesktopObservability.ts";
 import * as DesktopState from "./DesktopState.ts";
+import { forkStartupRecoveryOffer } from "./forkStartupRecovery.ts";
 
 const RELEASES_URL = FORK_DESKTOP.releasesUrl;
 const LAST_STARTED_VERSION_FILE = "desktop-last-started-version";
@@ -45,9 +46,6 @@ export function resolveStartupRecoveryOffer(
   lastStartedVersion: string | null,
   managedPolicy = false,
 ): StartupRecoveryOffer {
-  if (FORK_DESKTOP.manualUpdatesOnly && !update.enabled) {
-    return managedPolicy ? { _tag: "ManagedPolicy" } : { _tag: "Releases" };
-  }
   if (update.status === "downloading" && update.availableVersion !== null) {
     return {
       _tag: "Downloading",
@@ -185,13 +183,13 @@ export const listen: Effect.Effect<
   const updateStateRef = yield* Ref.make(latest);
 
   const offer = Effect.all([Ref.get(updateStateRef), Ref.get(failureRef)]).pipe(
-    Effect.map(([state, failure]) =>
-      resolveStartupRecoveryOffer(
-        state,
-        lastStartedVersion,
-        Option.exists(failure, ({ managedPolicy }) => managedPolicy),
-      ),
-    ),
+    Effect.map(([state, failure]) => {
+      const managedPolicy = Option.exists(failure, ({ managedPolicy }) => managedPolicy);
+      return (
+        forkStartupRecoveryOffer(state, managedPolicy) ??
+        resolveStartupRecoveryOffer(state, lastStartedVersion, managedPolicy)
+      );
+    }),
   );
 
   const render = Effect.gen(function* () {
