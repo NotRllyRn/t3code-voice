@@ -6,6 +6,7 @@ import {
   ProjectId,
   RunId,
   ThreadId,
+  TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { ModelSelection } from "./modelSelection.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
@@ -217,3 +218,20 @@ export const decodeLiveVoiceClientEvent = (frame: string): LiveVoiceClientEvent 
   decodeFrame(frame, decodeClient);
 export const decodeLiveVoiceServerEvent = (frame: string): LiveVoiceServerEvent =>
   decodeFrame(frame, decodeServer);
+
+export const OrchestrationV2VoiceMessage = Schema.Struct({
+  sessionId: TrimmedNonEmptyString,
+  itemId: TrimmedNonEmptyString,
+  sequence: NonNegativeInt,
+  responseId: Schema.optional(TrimmedNonEmptyString),
+  contentIndex: Schema.optional(NonNegativeInt),
+  predecessorItemId: Schema.optional(TrimmedNonEmptyString),
+  textKind: Schema.Literals(["final_user_transcript", "generated_voice_reply"]),
+  // Live history windows are application-frozen, not provider-final transcript promises.
+  transcriptFinality: Schema.optional(Schema.Literals(["application_frozen", "provider_final"])),
+  delivery: Schema.Literals(["pending", "drained", "interrupted", "unknown"]),
+  playedAudioMs: Schema.optional(NonNegativeInt),
+  sourceRunId: Schema.optional(RunId),
+  sourceMessageIds: Schema.optional(Schema.Array(MessageId)),
+});
+export type OrchestrationV2VoiceMessage = typeof OrchestrationV2VoiceMessage.Type;

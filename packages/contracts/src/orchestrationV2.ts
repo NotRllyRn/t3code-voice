@@ -1,3 +1,7 @@
+import { OrchestrationV2VoiceMessage } from "./liveVoice.ts";
+import { ProviderCleanStartConstraint, RetiredApprovedBase } from "./retiredCleanStart.ts";
+export { OrchestrationV2VoiceMessage } from "./liveVoice.ts";
+export { ProviderCleanStartConstraint } from "./retiredCleanStart.ts";
 import { OrchestrationMessageContext } from "./composerContext.ts";
 import { withRecordIdTable } from "./orchestrationV2IdTable.ts";
 import * as DateTime from "effect/DateTime";
@@ -394,14 +398,6 @@ export const OrchestrationV2IdentityCapabilities = Schema.Struct({
 });
 export type OrchestrationV2IdentityCapabilities = typeof OrchestrationV2IdentityCapabilities.Type;
 
-// Retained only to decode and reject retired automation in persisted history.
-export const ProviderCleanStartConstraint = Schema.Struct({
-  instanceId: ProviderInstanceId,
-  driver: Schema.Literal("pi"),
-  environmentMode: Schema.Literal("clean"),
-});
-export type ProviderCleanStartConstraint = typeof ProviderCleanStartConstraint.Type;
-
 export const OrchestrationV2ProviderCapabilities = Schema.Struct({
   sessions: OrchestrationV2SessionCapabilities,
   threads: OrchestrationV2ThreadCapabilities,
@@ -716,12 +712,7 @@ export const OrchestrationV2ThreadLaunchWorkspaceStrategy = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("existing_worktree"),
-    approvedBase: Schema.optional(
-      Schema.Struct({
-        branch: TrimmedNonEmptyString,
-        commit: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/)),
-      }),
-    ),
+    approvedBase: Schema.optional(RetiredApprovedBase),
     cleanProviderConstraint: Schema.optional(ProviderCleanStartConstraint),
     worktreePath: TrimmedNonEmptyString,
     branch: Schema.optional(TrimmedNonEmptyString),
@@ -731,12 +722,7 @@ export const OrchestrationV2ThreadLaunchWorkspaceStrategy = Schema.Union([
     type: Schema.Literal("worktree"),
     cleanProviderConstraint: Schema.optional(ProviderCleanStartConstraint),
     baseRef: TrimmedNonEmptyString,
-    approvedBase: Schema.optional(
-      Schema.Struct({
-        branch: TrimmedNonEmptyString,
-        commit: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/)),
-      }),
-    ),
+    approvedBase: Schema.optional(RetiredApprovedBase),
     branch: Schema.optional(TrimmedNonEmptyString),
     startFromOrigin: Schema.optional(Schema.Boolean),
     enforceNoSetupScripts: Schema.optional(Schema.Boolean),
@@ -1410,23 +1396,6 @@ export type OrchestrationV2Notification = typeof OrchestrationV2Notification.Typ
 /** Why T3 Code compacted a thread on its own, on the `/compact` it sent. */
 export const OrchestrationV2IdleCompaction = Schema.Literals(["beforeCacheExpires", "onReturn"]);
 export type OrchestrationV2IdleCompaction = typeof OrchestrationV2IdleCompaction.Type;
-
-export const OrchestrationV2VoiceMessage = Schema.Struct({
-  sessionId: TrimmedNonEmptyString,
-  itemId: TrimmedNonEmptyString,
-  sequence: NonNegativeInt,
-  responseId: Schema.optional(TrimmedNonEmptyString),
-  contentIndex: Schema.optional(NonNegativeInt),
-  predecessorItemId: Schema.optional(TrimmedNonEmptyString),
-  textKind: Schema.Literals(["final_user_transcript", "generated_voice_reply"]),
-  // Live history windows are application-frozen, not provider-final transcript promises.
-  transcriptFinality: Schema.optional(Schema.Literals(["application_frozen", "provider_final"])),
-  delivery: Schema.Literals(["pending", "drained", "interrupted", "unknown"]),
-  playedAudioMs: Schema.optional(NonNegativeInt),
-  sourceRunId: Schema.optional(RunId),
-  sourceMessageIds: Schema.optional(Schema.Array(MessageId)),
-});
-export type OrchestrationV2VoiceMessage = typeof OrchestrationV2VoiceMessage.Type;
 
 export const OrchestrationV2ConversationMessage = Schema.Struct({
   voice: Schema.optional(OrchestrationV2VoiceMessage),
@@ -3635,7 +3604,7 @@ export const OrchestrationV2Command = Schema.Union([
 export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
 
 // Excluded from dispatchCommand so only the server can send these.
-const OrchestrationV2InternalCommand = Schema.Union([
+export const OrchestrationV2InternalCommand = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("voice.message.record"),
     commandId: CommandId,
