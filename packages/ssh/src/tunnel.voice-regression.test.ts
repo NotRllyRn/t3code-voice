@@ -5,7 +5,6 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
 import { expect, it } from "vite-plus/test";
 
 import { buildRemoteT3RunnerScript } from "./tunnel.ts";
@@ -105,7 +104,7 @@ cat "$FIXTURE_RELEASE/$file" > "$output"`,
             HOME: home,
             PATH: bin,
             TMPDIR: root,
-            [FORK_DESKTOP.homeEnvironmentVariable]: forkHome,
+            T3CODE_VOICE_HOME: forkHome,
             FIXTURE_RELEASE: release,
             FIXTURE_DOWNLOADS: downloads,
             FIXTURE_EXECUTIONS: executions,
