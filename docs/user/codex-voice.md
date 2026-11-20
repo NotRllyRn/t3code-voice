@@ -119,7 +119,7 @@ it played or was heard. Only recorded captions enter later coding-agent context.
 The fork is based on upstream **v0.1.10**, commit `7d32075e`. Its desktop identity
 and data directory are separate (`T3 Code Voice`, `t3code-voice`, `.t3code-voice`);
 older builds require manual replacement; persistent-publisher builds can use
-the configured fork update feed once published. See [Voice installation and updates](./install.md).
+the published fork update feed. See [Voice installation and updates](./install-voice.md).
 
 Use matching Voice clients and servers: orchestration protocol **3** with
 `voiceHistoryV1` is required. Stock upstream desktop/web clients and App Store or
