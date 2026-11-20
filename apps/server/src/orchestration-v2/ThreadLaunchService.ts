@@ -60,6 +60,7 @@ import type * as Orchestrator from "./Orchestrator.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
 import { makeVoiceLaunchPolicy } from "./VoiceLaunchPolicy.ts";
+import * as VoiceLaunchReplay from "./VoiceLaunchReplay.ts";
 import { DispatchModeLimit } from "./DispatchModeLimit.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 
@@ -1393,30 +1394,17 @@ const make = Effect.gen(function* () {
         const threadId =
           claimed.storedEvents.find((stored) => stored.event.type.startsWith("thread."))?.event
             .threadId ?? candidateThreadId;
-        // A claim can survive a crash before its first run; replay must retain its constraint.
-        const createdClaim = claimed.storedEvents.find(
-          (stored) => stored.event.type === "thread.created",
-        );
-        const claim =
-          createdClaim !== undefined
-            ? Option.some(createdClaim)
-            : input.reuseExistingThread !== true &&
-                (claimed.replayed === true || Option.isSome(launchReceipt))
-              ? yield* threads
-                  .streamStoredEventsFrom({ threadId, eventType: "thread.created" })
-                  .pipe(Stream.runHead, Effect.mapError(mapError(input, "read-receipt", threadId)))
-              : Option.none();
-        const claimConstraint =
-          Option.isSome(claim) && claim.value.event.type === "thread.created"
-            ? claim.value.event.payload.cleanProviderConstraint
-            : undefined;
-        if (claimConstraint !== undefined) {
-          return yield* mapError(
-            input,
-            "resolve-project",
-            threadId,
-          )("Clean-provider automation is retired. Start a new ordinary thread explicitly.");
-        }
+        const readReplayError = mapError(input, "read-receipt", threadId);
+        const refuseReplay = mapError(input, "resolve-project", threadId);
+        yield* VoiceLaunchReplay.assertOrdinaryClaim({
+          claimed,
+          reuseExistingThread: input.reuseExistingThread === true,
+          hasLaunchReceipt: Option.isSome(launchReceipt),
+          threadId,
+          streamStoredEventsFrom: threads.streamStoredEventsFrom,
+          readError: readReplayError,
+          refuse: refuseReplay,
+        });
         if (project.id !== input.projectId) {
           return yield* mapError(input, "resolve-project", threadId)("Project identity changed.");
         }
@@ -1427,37 +1415,17 @@ const make = Effect.gen(function* () {
           const messageCommandId = CommandId.make(`${input.commandId}:initial-message`);
           const messageReceipt = yield* readReceipt(input, messageCommandId);
           messageWasAlreadyAccepted = Option.isSome(messageReceipt);
-          if (
-            input.workspaceStrategy.enforceNoSetupScripts === true &&
-            (Option.isSome(launchReceipt) || claimed.replayed === true || messageWasAlreadyAccepted)
-          ) {
-            const claimedRun = claimed.storedEvents.find(
-              (stored) => stored.event.type === "run.created",
-            );
-            const priorRun =
-              claimedRun !== undefined
-                ? Option.some(claimedRun)
-                : Option.isSome(messageReceipt)
-                  ? yield* threads
-                      .streamStoredEventsFrom({ threadId, eventType: "run.created" })
-                      .pipe(
-                        Stream.filter((stored) => stored.commandId === messageCommandId),
-                        Stream.runHead,
-                        Effect.mapError(mapError(input, "read-receipt", threadId)),
-                      )
-                  : Option.none();
-            if (
-              Option.isNone(priorRun) ||
-              priorRun.value.event.type !== "run.created" ||
-              priorRun.value.event.payload.workspacePreparation?.enforceNoSetupScripts !== true
-            ) {
-              return yield* mapError(
-                input,
-                "resolve-project",
-                threadId,
-              )("The previous launch did not durably acknowledge the no-setup-scripts guard.");
-            }
-          }
+          yield* VoiceLaunchReplay.assertPriorGuard({
+            enforceNoSetupScripts: input.workspaceStrategy.enforceNoSetupScripts === true,
+            hasLaunchReceipt: Option.isSome(launchReceipt),
+            claimed,
+            hasMessageReceipt: messageWasAlreadyAccepted,
+            messageCommandId,
+            threadId,
+            streamStoredEventsFrom: threads.streamStoredEventsFrom,
+            readError: readReplayError,
+            refuse: refuseReplay,
+          });
 
           // A new thread's claim carries its first message. A reused thread, or a replayed
           // claim that carried none, takes it in a command of its own.
@@ -1507,29 +1475,20 @@ const make = Effect.gen(function* () {
         const preparationRecords = yield* threads
           .getThreadRecords(threadId, ["runs"], { runIds: runId === null ? [] : [runId] })
           .pipe(Effect.mapError(mapError(input, "create-thread", threadId)));
-        if (
+        yield* VoiceLaunchReplay.assertPreparationGuard(
           input.workspaceStrategy.enforceNoSetupScripts === true &&
-          (Option.isSome(launchReceipt) ||
-            claimed.replayed === true ||
-            messageWasAlreadyAccepted) &&
-          !preparationRecords.runs.some(
-            (run) => run.id === runId && run.workspacePreparation?.enforceNoSetupScripts === true,
-          )
-        )
-          return yield* mapError(
-            input,
-            "resolve-project",
-            threadId,
-          )("The previous launch did not durably acknowledge the no-setup-scripts guard.");
+            (Option.isSome(launchReceipt) ||
+              claimed.replayed === true ||
+              messageWasAlreadyAccepted),
+          preparationRecords.runs,
+          runId,
+          refuseReplay,
+        );
         const preparationRun = preparationRecords.runs.find((run) => run.id === runId);
-        const savedConstraint = preparationRun?.workspacePreparation?.cleanProviderConstraint;
-        if (savedConstraint !== undefined) {
-          return yield* mapError(
-            input,
-            "resolve-project",
-            threadId,
-          )("Clean-provider automation is retired. Start a new ordinary thread explicitly.");
-        }
+        yield* VoiceLaunchReplay.assertOrdinaryConstraint(
+          preparationRun?.workspacePreparation?.cleanProviderConstraint,
+          refuseReplay,
+        );
         const runIsPreparing = preparationRun?.status === "preparing";
         const shouldSchedule = runId === null ? Option.isNone(launchReceipt) : runIsPreparing;
         const boundWorktreePath = preparationRecords.thread.worktreePath;
