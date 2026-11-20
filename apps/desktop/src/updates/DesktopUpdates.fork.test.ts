@@ -42,6 +42,42 @@ it.effect.each(Object.entries(VOICE_UPDATE_FEEDS))(
   },
 );
 
+it.effect.each([4, 5])("delivers Voice.6 from the pinned feed to Voice.%s", (revision) => {
+  const harness = makeHarness({
+    appVersion: `0.1.10-voice.${revision}`,
+    nativeBundleShortVersion: `0.1.1000${revision}`,
+    nativeIdentityAccepted: true,
+    packageJson: JSON.stringify({
+      t3VoiceUpdate: {
+        track: "voice-stable",
+        feedUrl: VOICE_UPDATE_FEED,
+        publisherSha1: "a".repeat(40),
+      },
+    }),
+  });
+  return Effect.gen(function* () {
+    const updates = yield* DesktopUpdates.DesktopUpdates;
+    yield* updates.configure;
+    for (const version of [`0.1.10-voice.${revision}`, "0.1.10-voice.3", "0.1.11"]) {
+      harness.emit("update-available", { version });
+      yield* flushCallbacks;
+      assert.notEqual((yield* updates.getState).status, "available");
+    }
+    harness.emit("update-available", { version: "0.1.10-voice.6" });
+    yield* flushCallbacks;
+    assert.equal((yield* updates.getState).status, "available");
+    yield* updates.download;
+    assert.equal(harness.downloadCount(), 1);
+    harness.emit("update-downloaded", { version: "0.1.10-voice.6" });
+    yield* flushCallbacks;
+    const state = yield* updates.getState;
+    assert.equal(state.status, "downloaded");
+    assert.equal(state.downloadedVersion, "0.1.10-voice.6");
+    assert.deepEqual(harness.feedUrls(), [{ provider: "generic", url: VOICE_UPDATE_FEED }]);
+    assert.isFalse(harness.allowDowngrade());
+  }).pipe(Effect.provide(harness.layer), Effect.scoped);
+});
+
 it.effect.each([
   { nativeIdentityAccepted: false },
   { nativePreventDowngrades: false },
