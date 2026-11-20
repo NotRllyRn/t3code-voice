@@ -6,13 +6,26 @@ import * as TestClock from "effect/testing/TestClock";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopUpdates from "./DesktopUpdates.ts";
 import { flushCallbacks, makeHarness } from "./updatesTestHarness.ts";
+import { voiceNativeIdentityTestLayer } from "./voiceNativeIdentityTestLayer.ts";
 
 it.effect.each(Object.entries(VOICE_UPDATE_FEEDS))(
   "enables only the baked %s feed after native installed-identity validation",
   ([track, feedUrl]) => {
+    let updateChannel = "";
+    let allowPrerelease = false;
     const harness = makeHarness({
       appVersion: "0.1.10-voice.1",
-      nativeIdentityAccepted: true,
+      spawnerLayer: voiceNativeIdentityTestLayer({ nativeIdentityAccepted: true }),
+      updaterOverrides: {
+        setChannel: (value) =>
+          Effect.sync(() => {
+            updateChannel = value;
+          }),
+        setAllowPrerelease: (value) =>
+          Effect.sync(() => {
+            allowPrerelease = value;
+          }),
+      },
       packageJson: JSON.stringify({
         t3VoiceUpdate: {
           track,
@@ -32,8 +45,8 @@ it.effect.each(Object.entries(VOICE_UPDATE_FEEDS))(
       yield* updates.configure;
       assert.isTrue((yield* updates.getState).enabled);
       assert.deepEqual(harness.feedUrls(), [{ provider: "generic", url: feedUrl }]);
-      assert.equal(harness.updateChannel(), "latest");
-      assert.isTrue(harness.allowPrerelease());
+      assert.equal(updateChannel, "latest");
+      assert.isTrue(allowPrerelease);
       assert.isFalse(harness.allowDowngrade());
       yield* updates.check("manual");
       assert.isAbove(harness.checkCount(), 0);
@@ -45,8 +58,10 @@ it.effect.each(Object.entries(VOICE_UPDATE_FEEDS))(
 it.effect.each([4, 5])("delivers Voice.6 from the pinned feed to Voice.%s", (revision) => {
   const harness = makeHarness({
     appVersion: `0.1.10-voice.${revision}`,
-    nativeBundleShortVersion: `0.1.1000${revision}`,
-    nativeIdentityAccepted: true,
+    spawnerLayer: voiceNativeIdentityTestLayer({
+      nativeBundleShortVersion: `0.1.1000${revision}`,
+      nativeIdentityAccepted: true,
+    }),
     packageJson: JSON.stringify({
       t3VoiceUpdate: {
         track: "voice-stable",
@@ -92,13 +107,15 @@ it.effect.each([
 ])("keeps missing/incompatible/ad-hoc identities manual: %j", (invalid) => {
   const harness = makeHarness({
     appVersion: "0.1.10-voice.1",
-    nativeIdentityAccepted: !("nativeIdentityAccepted" in invalid),
-    ...("nativePreventDowngrades" in invalid
-      ? { nativePreventDowngrades: invalid.nativePreventDowngrades }
-      : {}),
-    ...("nativeBundleShortVersion" in invalid
-      ? { nativeBundleShortVersion: invalid.nativeBundleShortVersion }
-      : {}),
+    spawnerLayer: voiceNativeIdentityTestLayer({
+      nativeIdentityAccepted: !("nativeIdentityAccepted" in invalid),
+      ...("nativePreventDowngrades" in invalid
+        ? { nativePreventDowngrades: invalid.nativePreventDowngrades }
+        : {}),
+      ...("nativeBundleShortVersion" in invalid
+        ? { nativeBundleShortVersion: invalid.nativeBundleShortVersion }
+        : {}),
+    }),
     isPackaged: "isPackaged" in invalid ? invalid.isPackaged : undefined,
     platform: "platform" in invalid ? invalid.platform : undefined,
     packageJson: JSON.stringify({
