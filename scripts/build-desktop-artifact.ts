@@ -43,6 +43,8 @@ import {
   type WebAssetBrand,
 } from "./lib/brand-assets.ts";
 import { getDefaultBuildArch } from "./lib/build-target-arch.ts";
+import { DesktopBuildCommitError, resolveDesktopBuildCommit } from "./lib/voice-build-commit.ts";
+export { DesktopBuildCommitError, resolveDesktopBuildCommit } from "./lib/voice-build-commit.ts";
 import {
   findInlinedExternalPackages,
   selectCliRuntimeExternalDependencies,
@@ -869,66 +871,6 @@ const spawnAndCollectOutput = Effect.fn("spawnAndCollectOutput")(function* (
   );
 
   return { stdout, stderr, exitCode } as const;
-});
-
-export class DesktopBuildCommitError extends Schema.TaggedError<DesktopBuildCommitError>()(
-  "DesktopBuildCommitError",
-  { reason: Schema.String },
-) {
-  override get message() {
-    return this.reason;
-  }
-}
-
-export const resolveDesktopBuildCommit = Effect.fn("resolveDesktopBuildCommit")(function* (
-  repoRoot: string,
-) {
-  const configured = yield* Config.String("T3CODE_VOICE_BUILD_COMMIT").pipe(Config.option);
-  const explicit = Option.getOrUndefined(configured)?.trim().toLowerCase();
-  if (explicit !== undefined && !/^[0-9a-f]{40}$/u.test(explicit)) {
-    return yield* new DesktopBuildCommitError({
-      reason: "T3CODE_VOICE_BUILD_COMMIT must be a full 40-character source commit SHA.",
-    });
-  }
-  const git = (args: ReadonlyArray<string>) =>
-    spawnAndCollectOutput(ChildProcess.make("git", args, { cwd: repoRoot })).pipe(
-      Effect.orElseSucceed(() => ({ stdout: "", stderr: "", exitCode: 1 })),
-    );
-  const root = yield* git(["rev-parse", "--show-toplevel"]);
-  const path = yield* Path.Path;
-  if (root.exitCode === 0 && path.resolve(root.stdout.trim()) === path.resolve(repoRoot)) {
-    const result = yield* git(["rev-parse", "HEAD"]);
-    const hash = result.stdout.trim().toLowerCase();
-    const status = yield* git([
-      "status",
-      "--porcelain",
-      "--untracked-files=normal",
-      "--",
-      ".",
-      ":(exclude).desktop-build.lock",
-    ]);
-    if (
-      result.exitCode !== 0 ||
-      !/^[0-9a-f]{40}$/u.test(hash) ||
-      status.exitCode !== 0 ||
-      status.stdout.trim()
-    ) {
-      return yield* new DesktopBuildCommitError({
-        reason: "Build T3 Code Voice from a clean committed source snapshot.",
-      });
-    }
-    if (explicit !== undefined && explicit !== hash) {
-      return yield* new DesktopBuildCommitError({
-        reason: "T3CODE_VOICE_BUILD_COMMIT does not match the source checkout HEAD.",
-      });
-    }
-    return hash;
-  }
-  if (explicit !== undefined) return explicit;
-  return yield* new DesktopBuildCommitError({
-    reason:
-      "Source commit unavailable. Use a clean Git checkout or set T3CODE_VOICE_BUILD_COMMIT for a separately verified gitless snapshot.",
-  });
 });
 
 const resolvePythonForNodeGyp = Effect.fn("resolvePythonForNodeGyp")(function* () {

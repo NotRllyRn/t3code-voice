@@ -28,6 +28,9 @@ import {
   STAGE_INSTALL_ARGS,
 } from "./build-desktop-artifact.ts";
 import { assertLinuxArm64PageCompatibility } from "./lib/linux-arm64-sea.ts";
+import { linuxLibatomicHeader } from "./lib/voice-build-libatomic.ts";
+import { copyVerifiedRuntimeExternals } from "./lib/voice-build-runtime-externals.ts";
+export { linuxLibatomicHeader } from "./lib/voice-build-libatomic.ts";
 import { selectCliRuntimeExternalDependencies } from "./lib/cli-external-packages.ts";
 import { signWithJsign } from "./lib/windows-jsign.ts";
 import { windowsSystemTar } from "./lib/windows-tar.ts";
@@ -195,13 +198,17 @@ const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (inpu
   }
 
   if (Option.isSome(input.runtimeExternalsDir)) {
-    for (const name of Object.keys(dependencies)) {
-      yield* requireInput(
-        path.join(input.runtimeExternalsDir.value, name, "package.json"),
-        "Supply a verified runtime node_modules directory with all target dependencies.",
-      );
+    const missing = yield* copyVerifiedRuntimeExternals(
+      input.runtimeExternalsDir.value,
+      input.stageDir,
+      Object.keys(dependencies),
+    );
+    if (missing !== undefined) {
+      return yield* new CliArchiveInputMissingError({
+        inputPath: missing,
+        hint: "Supply a verified runtime node_modules directory with all target dependencies.",
+      });
     }
-    yield* fs.copy(input.runtimeExternalsDir.value, path.join(input.stageDir, "node_modules"));
   } else {
     const install = yield* resolveSpawnCommand("vp", [...STAGE_INSTALL_ARGS]);
     yield* runCommand(
@@ -271,30 +278,6 @@ const stageWebClient = Effect.fn("stageWebClient")(function* (source: string, ta
     yield* fs.remove(path.join(target, entry), { force: true });
   }
 });
-
-export function linuxLibatomicHeader(
-  osRelease: string,
-  input: {
-    readonly pkg: string;
-    readonly version: string;
-    readonly sourcePackage: string;
-    readonly sourceVersion: string;
-  },
-) {
-  const match = /^ID=(?:"(debian|ubuntu)"|(debian|ubuntu))$/m.exec(osRelease);
-  const distro = match?.[1] ?? match?.[2];
-  if (!distro) return undefined;
-  const sourcePackage = encodeURIComponent(input.sourcePackage);
-  const sourceVersion = encodeURIComponent(input.sourceVersion);
-  const source =
-    distro === "debian"
-      ? `https://sources.debian.org/src/${sourcePackage}/${sourceVersion}/`
-      : `https://launchpad.net/ubuntu/+source/${sourcePackage}/${sourceVersion}`;
-  return [
-    `libatomic.so.1 is copied from the ${distro === "debian" ? "Debian" : "Ubuntu"} package ${input.pkg} ${input.version}.`,
-    `Source: ${source}`,
-  ].join("\n");
-}
 
 /** Node links libatomic.so.1, which minimal Linux images can lack. */
 const bundleLinuxLibatomic = Effect.fn("bundleLinuxLibatomic")(function* (input: {
