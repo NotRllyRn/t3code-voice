@@ -6,3 +6,7 @@ export {
 } from "./liveController.ts";
 export type { LiveMedia, LiveMediaOptions, LiveMediaFactory } from "./liveMedia.ts";
 export type { VoiceSocket } from "./media.ts";
+export {
+  getEnvironmentLiveVoiceUrl,
+  supportsEnvironmentNativeLiveVoice,
+} from "./environmentUrl.ts";

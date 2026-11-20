@@ -26,7 +26,7 @@ import * as TestClock from "effect/testing/TestClock";
 import type { HttpClient } from "effect/http";
 import { AsyncResult } from "effect/reactivity";
 
-import { getEnvironmentLiveVoiceUrl } from "../voice-input/environment.ts";
+import { getEnvironmentLiveVoiceUrl } from "../voice-conversation/environmentUrl.ts";
 import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
 import {
   ConnectionTransientError,

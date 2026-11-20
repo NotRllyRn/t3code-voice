@@ -1,4 +1,5 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useSyncExternalStore, type ReactNode } from "react";
+import type { TimelineEntry } from "../session-logic";
 import { liveCaptionKey, liveCaptions } from "./liveCaptions";
 
 export interface LiveCaptionScope {
@@ -49,4 +50,21 @@ export function useLiveCaptionRows(
       </div>
     </section>
   );
+}
+
+export function useLiveCaptionFooter(
+  scope: LiveCaptionScope | undefined,
+  entries: ReadonlyArray<TimelineEntry>,
+  footer: ReactNode,
+) {
+  const rows = useLiveCaptionRows(
+    scope,
+    new Set(entries.flatMap((entry) => (entry.kind === "message" ? [entry.message.id] : []))),
+  );
+  return rows || footer ? (
+    <>
+      {rows}
+      {footer}
+    </>
+  ) : null;
 }

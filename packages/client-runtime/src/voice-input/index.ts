@@ -21,8 +21,6 @@ export {
   transcribeCloudPcm,
   getEnvironmentSpeechStatus,
   getEnvironmentSpeechStreamUrl,
-  getEnvironmentLiveVoiceUrl,
-  supportsEnvironmentNativeLiveVoice,
   linkEnvironmentSpeechModels,
   postProcessEnvironmentTranscript,
   removeEnvironmentSpeechModel,
@@ -41,3 +39,5 @@ export {
   type VoiceTranscriptionErrorCode,
   type VoiceTranscriptionOptions,
 } from "./transcription.ts";
+export { getEnvironmentLiveVoiceUrl } from "../voice-conversation/environmentUrl.ts";
+export { supportsEnvironmentNativeLiveVoice } from "../voice-conversation/environmentUrl.ts";

@@ -6,11 +6,11 @@ import type {
 } from "@t3tools/contracts";
 import type { ServerUpdateState } from "@t3tools/client-runtime/state/server";
 import { cliReleaseChannelOf } from "@t3tools/shared/cliRelease";
-import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
 import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
 import * as Schema from "effect/Schema";
 
 import { APP_VERSION } from "./branding";
+import { voiceManualServerUpdateCommand } from "./voice/voiceUpdateCommand";
 import { getLocalStorageItem, setLocalStorageItem } from "./hooks/useLocalStorage";
 
 export interface VersionMismatch {
@@ -102,18 +102,8 @@ export function manualServerUpdateCommand(
   targetVersion: string,
   installation?: ServerInstallation,
 ): string {
-  if (
-    cliReleaseChannelOf(targetVersion) === "voice" ||
-    cliReleaseChannelOf(APP_VERSION) === "voice"
-  ) {
-    const voiceVersion =
-      cliReleaseChannelOf(targetVersion) === "voice" ? targetVersion : APP_VERSION;
-    if (installation?.kind === "t3-launcher") {
-      const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
-      return `${quote(installation.launcher)} update --base-dir ${quote(installation.baseDir)} ${voiceVersion}`;
-    }
-    return `Install the matching Voice release (${voiceVersion}) from ${FORK_DESKTOP.releasesUrl}. Follow its manual desktop, standalone archive, or Docker server instructions.`;
-  }
+  const voiceCommand = voiceManualServerUpdateCommand(targetVersion, APP_VERSION, installation);
+  if (voiceCommand !== null) return voiceCommand;
   const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   if (installation?.kind === "npm-global") {
     return `npm install --global --prefix ${quote(installation.prefix)} t3@${targetVersion}`;

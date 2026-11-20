@@ -2,16 +2,10 @@ import { encodeSpeechPcmRequest } from "@t3tools/shared/speech";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
-import {
-  CloudSpeechError,
-  LIVE_VOICE_PATH,
-  LiveVoiceStartupError,
-  SPEECH_STREAM_PATH,
-} from "@t3tools/contracts";
+import { CloudSpeechError, LIVE_VOICE_PATH, SPEECH_STREAM_PATH } from "@t3tools/contracts";
 import type {
   CloudSpeechModelId,
   CloudSpeechProvider,
-  ExecutionEnvironmentDescriptor,
   SettingsSecretValue,
   SpeechAcceleration,
   SpeechModelUnloadTimeout,
@@ -165,7 +159,7 @@ export const transcribeCloudPcm = (
   );
 };
 
-const getEnvironmentMediaStreamUrl = (
+export const getEnvironmentMediaStreamUrl = (
   prepared: PreparedConnection,
   path: typeof SPEECH_STREAM_PATH | typeof LIVE_VOICE_PATH,
 ) => {
@@ -191,40 +185,6 @@ const getEnvironmentMediaStreamUrl = (
 
 export const getEnvironmentSpeechStreamUrl = (prepared: PreparedConnection) =>
   getEnvironmentMediaStreamUrl(prepared, SPEECH_STREAM_PATH);
-
-export const supportsEnvironmentNativeLiveVoice = (
-  descriptor: Pick<ExecutionEnvironmentDescriptor, "capabilities"> | null | undefined,
-): boolean => descriptor?.capabilities.nativeLiveVoice === true;
-
-export const getEnvironmentLiveVoiceUrl = (
-  prepared: PreparedConnection,
-  descriptor:
-    | Pick<ExecutionEnvironmentDescriptor, "environmentId" | "capabilities">
-    | null
-    | undefined,
-) =>
-  Effect.suspend(() => {
-    if (descriptor != null && descriptor.environmentId !== prepared.environmentId) {
-      return Effect.fail(new LiveVoiceStartupError({ reason: "connection-changed" }));
-    }
-    if (!supportsEnvironmentNativeLiveVoice(descriptor)) {
-      return Effect.fail(new LiveVoiceStartupError({ reason: "unsupported-server" }));
-    }
-    return getEnvironmentMediaStreamUrl(prepared, LIVE_VOICE_PATH).pipe(
-      Effect.mapError(
-        (error) =>
-          new LiveVoiceStartupError({
-            reason:
-              error._tag === "EnvironmentAuthInvalidError"
-                ? "environment-auth-required"
-                : error._tag === "EnvironmentScopeRequiredError" ||
-                    error._tag === "EnvironmentOperationForbiddenError"
-                  ? "forbidden"
-                  : "temporarily-unavailable",
-          }),
-      ),
-    );
-  });
 
 export const getEnvironmentSpeechModels = (
   prepared: PreparedConnection,
