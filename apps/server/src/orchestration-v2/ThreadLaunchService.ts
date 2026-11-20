@@ -2,7 +2,6 @@ import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
-import { resolveProjectScripts } from "@t3tools/shared/projectScripts";
 import {
   CommandId,
   type ChatAttachment,
@@ -60,6 +59,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as Orchestrator from "./Orchestrator.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
+import { makeVoiceLaunchPolicy } from "./VoiceLaunchPolicy.ts";
 import { DispatchModeLimit } from "./DispatchModeLimit.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 
@@ -276,27 +276,13 @@ const make = Effect.gen(function* () {
         cause,
       });
 
-  const assertNoScripts = Effect.fn("ThreadLaunchService.assertNoScripts")(function* (
-    input: PreparationInput,
-  ) {
-    if (input.workspaceStrategy.enforceNoSetupScripts !== true) return;
-    const project = yield* projects.getById(input.projectId).pipe(
-      Effect.mapError(mapError(input, "resolve-project")),
-      Effect.flatMap(
-        Option.match({
-          onNone: () => Effect.fail(mapError(input, "resolve-project")("Project not found.")),
-          onSome: Effect.succeed,
-        }),
-      ),
-    );
-    const settings = yield* serverSettings.getSettings.pipe(
-      Effect.mapError(mapError(input, "resolve-project")),
-    );
-    if (resolveProjectScripts(settings, project).length > 0)
-      return yield* mapError(
-        input,
-        "resolve-project",
-      )(new ProjectSetupScriptRunner.ProjectSetupScriptsForbiddenError({ projectId: project.id }));
+  const voicePolicy = makeVoiceLaunchPolicy({
+    getProject: projects.getById,
+    getSettings: serverSettings.getSettings,
+    isScratchProject: managedFolders.isScratchProject,
+    resolveApprovedWorktreeBase: git.resolveApprovedWorktreeBase,
+    mapError,
+    baseRefError: (fields) => new ThreadLaunchBaseRefError(fields),
   });
 
   const recordBranchRenameFailure = Effect.fn("ThreadLaunchService.recordBranchRenameFailure")(
@@ -385,44 +371,12 @@ const make = Effect.gen(function* () {
       { concurrency: "unbounded" },
     );
     if (strategy.approvedBase !== undefined) {
-      const project = Option.getOrUndefined(projectOption);
-      if (
-        isScratch ||
-        project === undefined ||
-        strategy.startFromOrigin !== false ||
-        strategy.baseRef !== strategy.approvedBase.commit
-      )
-        return yield* new ThreadLaunchBaseRefError({
-          projectId: input.projectId,
-          projectTitle: project?.title ?? "",
-          workspaceRoot: project?.workspaceRoot ?? "",
-          baseRef: strategy.baseRef,
-        });
-      const resolved = yield* git
-        .resolveApprovedWorktreeBase({
-          cwd: project.workspaceRoot,
-          branch: strategy.approvedBase.branch,
-          acceptedCommit: strategy.approvedBase.commit,
-        })
-        .pipe(
-          Effect.mapError(
-            () =>
-              new ThreadLaunchBaseRefError({
-                projectId: project.id,
-                projectTitle: project.title,
-                workspaceRoot: project.workspaceRoot,
-                baseRef: strategy.baseRef,
-              }),
-          ),
-        );
-      if (resolved !== strategy.approvedBase.commit)
-        return yield* new ThreadLaunchBaseRefError({
-          projectId: project.id,
-          projectTitle: project.title,
-          workspaceRoot: project.workspaceRoot,
-          baseRef: strategy.baseRef,
-        });
-      return;
+      return yield* voicePolicy.checkApprovedBase({
+        projectId: input.projectId,
+        strategy,
+        isScratch,
+        project: Option.getOrUndefined(projectOption),
+      });
     }
     // launch() turns a Scratch worktree request into a root launch.
     if (isScratch) return;
@@ -600,7 +554,7 @@ const make = Effect.gen(function* () {
       });
     }
     yield* Effect.gen(function* () {
-      yield* assertNoScripts(input);
+      yield* voicePolicy.assertNoScripts(input);
       const initialMessage = input.initialMessage;
       const generateBranchNameFor = Effect.fn("ThreadLaunchService.generateBranchNameFor")(
         function* (cwd: string, message: ThreadLaunchInitialMessage) {
@@ -1018,7 +972,7 @@ const make = Effect.gen(function* () {
           })
           .pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
       }
-      yield* assertNoScripts(input);
+      yield* voicePolicy.assertNoScripts(input);
       yield* setupTracker.stageStatus(threadId, "setup-script", "running");
       const setup =
         worktreePath === null
@@ -1301,26 +1255,7 @@ const make = Effect.gen(function* () {
     function* (request) {
       // Scratch has no Git repository. Normalize before folder allocation so
       // durable preparation and retries use the thread's own Scratch folder.
-      const normalizedStrategy: ThreadLaunchWorkspaceStrategy =
-        request.workspaceStrategy.type === "worktree" &&
-        request.workspaceStrategy.approvedBase === undefined &&
-        (yield* managedFolders.isScratchProject(request.projectId))
-          ? {
-              type: "root",
-              enforceNoSetupScripts: request.workspaceStrategy.enforceNoSetupScripts,
-              cleanProviderConstraint: request.workspaceStrategy.cleanProviderConstraint,
-            }
-          : request.workspaceStrategy;
-      const input: ThreadLaunchInput = {
-        ...request,
-        workspaceStrategy: {
-          ...normalizedStrategy,
-          ...(request.enforceNoSetupScripts === true ? { enforceNoSetupScripts: true } : {}),
-          ...(request.cleanProviderConstraint === undefined
-            ? {}
-            : { cleanProviderConstraint: request.cleanProviderConstraint }),
-        },
-      };
+      const input: ThreadLaunchInput = yield* voicePolicy.normalizeRequest(request);
       const constraint = input.workspaceStrategy.cleanProviderConstraint;
       if (constraint !== undefined) {
         return yield* mapError(
@@ -1328,7 +1263,7 @@ const make = Effect.gen(function* () {
           "resolve-project",
         )("Clean-provider automation is retired. Start a new ordinary thread explicitly.");
       }
-      yield* assertNoScripts(input);
+      yield* voicePolicy.assertNoScripts(input);
       yield* ProjectCloneTracker.rejectCommandsDuringClone(cloneTracker, {
         type: "thread.create",
         projectId: input.projectId,
