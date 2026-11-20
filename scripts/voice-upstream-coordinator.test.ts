@@ -112,9 +112,18 @@ test("claims once before returning fixed worktree request; top-level thread reco
     );
     for (const instruction of [
       "gh pr merge --match-head-commit <reviewed-head-SHA>",
-      "nonempty set of required checks all passing",
-      "stale-approval dismissal",
+      "every reviewer scoring at least 9.2/10 on the exact head",
+      "at most 8 council rounds",
+      "relevant runnable checks all passing",
+      "A separate GitHub reviewer account or app is not required",
+      "Honor all existing enforced GitHub protections",
       "re-read both immediately before merging",
+      "--merge)",
+      "Require exactly two parents",
+      "first parent equals the recorded reviewed base SHA",
+      "second parent equals the reviewed head SHA",
+      "do not dispatch a build; stop for manual reconciliation",
+      "does not undo the merge",
       "stopping for manual reconciliation",
       "not a polling loop",
       "pr_number=<PR-number>, reviewed_head=<reviewed-head-SHA>",
@@ -122,6 +131,8 @@ test("claims once before returning fixed worktree request; top-level thread reco
       "manual deployment handoff",
     ])
       NodeAssert.ok(request.message.includes(instruction));
+    NodeAssert.ok(!request.message.includes("require a protected base"));
+    NodeAssert.ok(!request.message.includes("missing approvals"));
     NodeAssert.ok(!request.message.includes("feature/codex-voice-stable"));
     NodeAssert.ok(
       request.message.includes(`based on ${request.workspaceStrategy.approvedBase.branch}`),
