@@ -32,6 +32,86 @@ function mockProcess(exitCode: number, stdout = "") {
 }
 
 it.layer(NodeServices.layer)("build-desktop-artifact Voice", (it) => {
+  it.effect("isolates macOS identity and refuses all inferred or mock update feeds", () =>
+    Effect.gen(function* () {
+      for (const version of [
+        "0.0.33-pr.8182.1",
+        "0.0.33",
+        "0.0.41-preview.20260912.1589",
+        "0.0.43-nightly.20260929.1",
+      ]) {
+        for (const mock of [false, true]) {
+          const config = yield* createBuildConfig(
+            "mac",
+            "dmg",
+            version,
+            false,
+            mock,
+            4141,
+            undefined,
+          );
+          assert.isNull(config.publish);
+          assert.equal(config.appId, "io.github.notrllyrn.t3codevoice");
+          assert.equal(
+            config.productName,
+            version.includes("nightly") ? "T3 Code Voice (Nightly)" : "T3 Code Voice",
+          );
+          assert.equal(config.artifactName, "T3-Code-Voice-${version}-${arch}.${ext}");
+          assert.deepEqual((config.mac as { protocols: unknown }).protocols, [
+            { name: "T3 Code Voice", schemes: ["t3code-voice", "t3code-voice-dev"] },
+          ]);
+          assert.notProperty(
+            (config.mac as { extendInfo: object }).extendInfo,
+            "CFBundleDocumentTypes",
+          );
+          assert.notProperty(config.mac, "bundleShortVersion");
+          assert.notProperty(
+            (config.mac as { extendInfo: object }).extendInfo,
+            "ElectronSquirrelPreventDowngrades",
+          );
+        }
+      }
+    }).pipe(
+      Effect.provide(
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({
+            env: {
+              GITHUB_REPOSITORY: "pingdotgg/t3code",
+              T3CODE_DESKTOP_UPDATE_REPOSITORY: "pingdotgg/t3code",
+            },
+          }),
+        ),
+      ),
+    ),
+  );
+
+  it.effect(
+    "keeps stable and nightly AppImages manual-only despite upstream publishing config",
+    () =>
+      Effect.gen(function* () {
+        for (const version of ["0.0.37", "0.0.38-nightly.20261026.3740"]) {
+          const config = yield* createBuildConfig(
+            "linux",
+            "AppImage",
+            version,
+            false,
+            false,
+            undefined,
+            undefined,
+          );
+          assert.isNull(config.publish);
+          assert.isUndefined(config.appImage);
+          assert.equal(config.artifactName, "T3-Code-Voice-${version}-${arch}.${ext}");
+        }
+      }).pipe(
+        Effect.provide(
+          ConfigProvider.layer(
+            ConfigProvider.fromEnv({ env: { GITHUB_REPOSITORY: "pingdotgg/t3code" } }),
+          ),
+        ),
+      ),
+  );
+
   it.effect("publishes latest-mac only for an explicit signed Voice stable configuration", () =>
     Effect.gen(function* () {
       const voice = {
