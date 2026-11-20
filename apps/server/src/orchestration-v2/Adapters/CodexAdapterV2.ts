@@ -2463,9 +2463,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             rootNodeId: input.turnInput.rootNodeId,
             subagent: null,
             startedAt: input.startedAt,
-            messagePhases: new Map(),
             itemPositions: new Map(),
             fileChangeKindsByItem: new Map(),
+            messagePhases: new Map(),
             runningCompactionItemIds: new Set(),
             runningWebSearchItems: new Map(),
           };
@@ -3099,9 +3099,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               rootNodeId: providerNodeId,
               subagent,
               startedAt: turn.startedAt,
-              messagePhases: new Map(),
               itemPositions: new Map(),
               fileChangeKindsByItem: new Map(),
+              messagePhases: new Map(),
               runningCompactionItemIds: new Set(),
               runningWebSearchItems: new Map(),
             };
@@ -7351,9 +7351,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             rootNodeId: turnInput.rootNodeId,
             subagent: null,
             startedAt: now,
-            messagePhases: new Map(),
             itemPositions: new Map(),
             fileChangeKindsByItem: new Map(),
+            messagePhases: new Map(),
             runningCompactionItemIds: new Set(),
             runningWebSearchItems: new Map(),
           };
