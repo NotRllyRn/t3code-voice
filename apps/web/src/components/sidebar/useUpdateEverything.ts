@@ -8,7 +8,7 @@ import { useEnvironments } from "~/state/environments";
 import { environmentIdsKey } from "~/state/environmentAtomList";
 import { environmentUpdateStatesAtom, serverEnvironment } from "~/state/server";
 import { environmentSessionStatesAtom } from "~/state/session";
-import { voiceServerReleasesAtom } from "~/state/npmRelease";
+import { voiceServerReleasesAtom } from "~/voice/voiceServerReleases";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { getProviderUpdateRunOutcome } from "../ProviderUpdateLaunchNotification.logic";
 import { useProviderUpdates } from "../ProviderUpdatesAction";

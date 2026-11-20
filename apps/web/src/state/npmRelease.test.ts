@@ -8,7 +8,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { vi } from "vite-plus/test";
 
-import { npmReleaseAtom, npmReleaseFailureMessage, voiceServerReleasesAtom } from "./npmRelease";
+import { npmReleaseAtom, npmReleaseFailureMessage } from "./npmRelease";
 import { primaryEnvironmentIdAtom } from "./primaryEnvironment";
 import { serverEnvironment } from "./server";
 
@@ -66,35 +66,6 @@ function setup(supported = true) {
     .mockImplementation((environmentId) => Atom.make(configFor(environmentId, supported)));
   return vi.mocked(serverEnvironment.npmRelease).mockReset();
 }
-
-it("discovers Voice archives per connected capable host, leaving older servers alone", () => {
-  const query = setup();
-  const config = configFor(first);
-  vi.mocked(serverEnvironment.configValueAtom).mockImplementation((environmentId) =>
-    Atom.make({
-      ...config,
-      environment: {
-        ...config.environment,
-        serverVersion: "0.1.10-voice.5",
-        capabilities: {
-          repositoryIdentity: true,
-          ...(environmentId === first ? { voiceReleaseLookup: true } : {}),
-        },
-      },
-    }),
-  );
-  query.mockReturnValue(Atom.make(AsyncResult.success({ version: "0.1.10-voice.6" })));
-  const registry = AtomRegistry.make();
-  try {
-    expect([...registry.get(voiceServerReleasesAtom)]).toEqual([[first, "0.1.10-voice.6"]]);
-    expect(query).toHaveBeenCalledExactlyOnceWith({
-      environmentId: first,
-      input: { spec: "voice" },
-    });
-  } finally {
-    registry.dispose();
-  }
-});
 
 it.effect(
   "resolves track metadata through the primary environment and follows primary changes",

@@ -35,6 +35,7 @@ import { MESSAGE_HEADING_LEVEL, MessageAuthorHeading } from "./TimelineRowParts"
 import { useAtomValue } from "@effect/atom-react";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { vcsEnvironment } from "../../state/vcs";
+import { AssistantVoiceDeliveryNote } from "~/voice/AssistantVoiceDeliveryNote";
 
 const NO_VCS_STATUS = Atom.make(AsyncResult.initial());
 
@@ -55,17 +56,7 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
     <>
       <div className="relative min-w-0 px-1 py-0.5">
         <MessageAuthorHeading>T3 Code</MessageAuthorHeading>
-        {voice ? (
-          <Tooltip>
-            <TooltipTrigger render={<p className="mb-1 text-xs text-muted-foreground" />}>
-              Generated voice ·{" "}
-              {voice.delivery === "drained" ? "audio drained" : `playback ${voice.delivery}`}
-            </TooltipTrigger>
-            <TooltipPopup>
-              Full generated text, not an exact record of words heard or verified coding output.
-            </TooltipPopup>
-          </Tooltip>
-        ) : null}
+        {voice ? <AssistantVoiceDeliveryNote voice={voice} /> : null}
         <div data-thread-find-text="true">
           <AssistantCitationSource
             messageId={row.message.id}
