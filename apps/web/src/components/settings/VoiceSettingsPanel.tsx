@@ -1,5 +1,5 @@
 import { useLiveVoiceSessionActive } from "../../voice/VoicePanel";
-import { LiveVoiceSettingsSection } from "./LiveVoiceSettingsSection";
+import { LiveVoiceSettingsSection, MicrophoneTestGate } from "./LiveVoiceSettingsSection";
 import {
   cancelEnvironmentSpeechModelDownload,
   downloadEnvironmentSpeechModel,
@@ -122,7 +122,6 @@ import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
 import { toastManager } from "../ui/toast";
 import { MicrophoneOrderList } from "./MicrophoneOrderList";
-import { MicrophoneTest } from "./MicrophoneTest";
 import { CloudVoiceConfiguration } from "./CloudVoiceConfiguration";
 import { ModelBenchmarks, orderSpeechLanguages } from "./SpeechModelComparison";
 import { languageLabel, SpeechLanguageSelect } from "./SpeechLanguageSelect";
@@ -1347,18 +1346,11 @@ export function VoiceSettingsPanel() {
             <MicrophoneOrderList order={order} devices={microphones} />
           </div>
         </SettingsRow>
-        {liveSessionActive ? (
-          <SettingsRow
-            title="Microphone test"
-            description="Stop Live voice before testing another microphone."
-          />
-        ) : (
-          <MicrophoneTest
-            key={selectedMicrophone}
-            microphoneId={selectedMicrophone}
-            onMicrophoneAccess={() => void refreshMicrophones()}
-          />
-        )}
+        <MicrophoneTestGate
+          active={liveSessionActive}
+          microphoneId={selectedMicrophone}
+          onMicrophoneAccess={() => void refreshMicrophones()}
+        />
         <SettingsRow
           {...searchableSetting("dictation-shortcut-mode")}
           title="Dictation shortcut"

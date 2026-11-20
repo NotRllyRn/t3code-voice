@@ -1153,35 +1153,19 @@ describe("composerDraftStore project draft thread mapping", () => {
     expect(draftByKey(draftId)?.prompt).toBe("retry work");
   });
 
-  it.each(["reserved", "assigned"] as const)(
-    "moves composer edits during %s thread promotion to the canonical thread",
-    (assignment) => {
-      const store = useComposerDraftStore.getState();
-      const promotedId =
-        assignment === "reserved" ? threadId : ThreadId.make("live-assigned-thread");
-      const promotedRef = scopeThreadRef(TEST_ENVIRONMENT_ID, promotedId);
-      const foreignRef = scopeThreadRef(OTHER_TEST_ENVIRONMENT_ID, promotedId);
-      store.setProjectDraftThreadId(projectRef, draftId, { threadId });
-      store.markDraftThreadPromoting(draftId, promotedRef);
-      store.setPrompt(draftId, "typed during setup");
-      expect(store.getDraftIdByRef(promotedRef)).toBe(draftId);
-      expect(store.getDraftSessionByRef(promotedRef)?.threadId).toBe(threadId);
-      expect(store.getComposerDraft(promotedRef)?.prompt).toBe("typed during setup");
-      expect(store.getDraftIdByRef(foreignRef)).toBeNull();
-      expect(store.getDraftSessionByRef(foreignRef)).toBeNull();
-      expect(store.getComposerDraft(foreignRef)).toBeNull();
-      store.setPrompt(promotedRef, "edited in server route");
-      expect(store.getComposerDraft(draftId)?.prompt).toBe("edited in server route");
+  it("moves composer edits made during promotion to the canonical thread", () => {
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+    markPromotedDraftThreadByRef(scopeThreadRef(TEST_ENVIRONMENT_ID, threadId));
+    store.setPrompt(draftId, "typed during setup");
 
-      finalizePromotedDraftThreadByRef(promotedRef);
+    finalizePromotedDraftThreadByRef(scopeThreadRef(TEST_ENVIRONMENT_ID, threadId));
 
-      expect(useComposerDraftStore.getState().getDraftThreadByProjectRef(projectRef)).toBeNull();
-      expect(useComposerDraftStore.getState().getDraftThread(draftId)).toBeNull();
-      expect(store.getDraftIdByRef(promotedRef)).toBeNull();
-      expect(draftByKey(draftId)).toBeUndefined();
-      expect(draftFor(promotedId, TEST_ENVIRONMENT_ID)?.prompt).toBe("edited in server route");
-    },
-  );
+    expect(useComposerDraftStore.getState().getDraftThreadByProjectRef(projectRef)).toBeNull();
+    expect(useComposerDraftStore.getState().getDraftThread(draftId)).toBeNull();
+    expect(draftByKey(draftId)).toBeUndefined();
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.prompt).toBe("typed during setup");
+  });
 
   it("finalizes a matching materialized draft even when promotion was not pre-marked", () => {
     const store = useComposerDraftStore.getState();

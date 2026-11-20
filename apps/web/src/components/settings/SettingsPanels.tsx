@@ -27,7 +27,7 @@ import {
   ToolCallVisibility,
 } from "@t3tools/contracts/settings";
 import { desktopUpdateChannelOf } from "@t3tools/shared/cliRelease";
-import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
+import { manualVoiceDesktopUpdate } from "../../voice/manualVoiceDesktopUpdate";
 import { createModelSelection, pickModelSelection } from "@t3tools/shared/model";
 import { resolvePastedPath } from "@t3tools/shared/path";
 import * as Equal from "effect/Equal";
@@ -178,12 +178,16 @@ function AboutVersionSection() {
   const checkProviderUpdates = useCheckProviderUpdates();
 
   const hasDesktopBridge = typeof window !== "undefined" && Boolean(window.desktopBridge);
-  const manualVoiceUpdates =
-    hasDesktopBridge && FORK_DESKTOP.manualUpdatesOnly && updateState?.enabled !== true;
   const selectedUpdateChannel = updateState?.channel ?? "latest";
   // The desktop updates this machine, whose policy the primary environment reports.
   const primaryPolicy = usePrimaryManagedPolicy();
   const updatesDenial = hasDesktopBridge ? managedUpdatesDenial(primaryPolicy) : undefined;
+  const manualVoiceUpdates = manualVoiceDesktopUpdate({
+    hasDesktopBridge,
+    updateState,
+    isPending: isUpdateActionPending,
+    denial: updatesDenial,
+  });
   const nightlyDeniedBy =
     hasDesktopBridge && primaryPolicy?.limits?.updates?.allowNightly === false
       ? primaryPolicy.organization
@@ -213,21 +217,9 @@ function AboutVersionSection() {
     if (!bridge) return;
 
     if (manualVoiceUpdates) {
-      if (isUpdateActionPending || updatesDenial) return;
-      setIsUpdateActionPending(true);
-      try {
-        await bridge.checkForUpdate();
-      } catch {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Could not check Voice updates",
-            description: "Try checking again later.",
-          }),
-        );
-      } finally {
-        setIsUpdateActionPending(false);
-      }
+      await manualVoiceUpdates.run(bridge, setIsUpdateActionPending, (failure) =>
+        toastManager.add(stackedThreadToast(failure)),
+      );
       return;
     }
 
@@ -310,12 +302,12 @@ function AboutVersionSection() {
 
   const action = updateState ? resolveDesktopUpdateButtonAction(updateState) : "none";
   const buttonTooltip = manualVoiceUpdates
-    ? null
+    ? manualVoiceUpdates.tooltip
     : updateState
       ? getDesktopUpdateButtonTooltip(updateState)
       : null;
   const buttonDisabled = manualVoiceUpdates
-    ? Boolean(updatesDenial)
+    ? manualVoiceUpdates.disabled
     : action === "none"
       ? !canCheckForUpdate(updateState)
       : isDesktopUpdateButtonDisabled(updateState);
@@ -328,12 +320,10 @@ function AboutVersionSection() {
     ...(appOffTrack ? {} : { "up-to-date": "Up to Date" }),
   };
   const buttonLabel = manualVoiceUpdates
-    ? isUpdateActionPending
-      ? "Checking…"
-      : "Check Voice updates"
+    ? manualVoiceUpdates.label
     : (actionLabel[action] ?? statusLabel[updateState?.status ?? ""] ?? "Check for Updates");
   const description = manualVoiceUpdates
-    ? "Check fork releases for an Apple Silicon Mac DMG. Download and install manually; automatic installation is disabled."
+    ? manualVoiceUpdates.description
     : action === "download" || action === "install"
       ? "Update available."
       : (getDesktopUpdateDisabledReason(updateState, updatesDenial) ??

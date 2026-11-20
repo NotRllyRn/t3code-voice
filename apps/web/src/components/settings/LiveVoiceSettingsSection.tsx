@@ -1,3 +1,4 @@
+import { MicrophoneTest } from "./MicrophoneTest";
 import { useEffect, useState } from "react";
 import { useStableCallback } from "../../hooks/useStableCallback";
 import { liveVoices, useLiveVoiceSettings } from "../../voice/liveVoiceSettings";
@@ -123,5 +124,28 @@ export function LiveVoiceSettingsSection() {
         }
       />
     </SettingsSection>
+  );
+}
+
+export function MicrophoneTestGate({
+  active,
+  microphoneId,
+  onMicrophoneAccess,
+}: {
+  active: boolean;
+  microphoneId: string;
+  onMicrophoneAccess: () => void;
+}) {
+  return active ? (
+    <SettingsRow
+      title="Microphone test"
+      description="Stop Live voice before testing another microphone."
+    />
+  ) : (
+    <MicrophoneTest
+      key={microphoneId}
+      microphoneId={microphoneId}
+      onMicrophoneAccess={onMicrophoneAccess}
+    />
   );
 }
