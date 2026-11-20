@@ -54,11 +54,8 @@ import {
   latestNativeContextUsage,
 } from "@t3tools/provider-core/server/handoffBudget";
 import { deliverContextHandoffs, withInlineContext } from "./ContextHandoffDelivery.ts";
-import {
-  voiceHistoryBoundaryOrdinal,
-  voiceHistoryHandoff,
-  voiceHistoryItemFilter,
-} from "./VoiceHistory.ts";
+import { voiceHistoryHandoffFilter, voiceHistoryItemFilter } from "./VoiceHistory.ts";
+import { prepareVoiceHistoryHandoffs } from "./VoiceHistoryDelivery.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -484,18 +481,11 @@ export const layer: Layer.Layer<
       const isSideChatHandoff = (handoff: OrchestrationV2ContextHandoff) =>
         projection.thread.lineage.sideChat === true &&
         ContextHandoffService.isSideChatContextHandoff(handoff);
-      const voiceBoundaryOrdinal =
-        projection.runs.findLast(
-          (source) => source.freshContext === true && source.ordinal <= run.ordinal,
-        )?.ordinal ?? 0;
+      const eligibleVoiceHandoff = voiceHistoryHandoffFilter(run, projection.runs);
       const handoffs = projection.contextHandoffs.filter(
         (handoff) =>
           !isSideChatHandoff(handoff) &&
-          (!handoff.id.startsWith("context-handoff:voice:") ||
-            projection.runs.some(
-              (source) =>
-                source.id === handoff.targetRunId && source.ordinal > voiceBoundaryOrdinal,
-            )) &&
+          eligibleVoiceHandoff(handoff) &&
           (handoff.transferId == null || !subagentResultTransfers.has(handoff.transferId)) &&
           isPendingForRun(handoff),
       );
@@ -1751,34 +1741,20 @@ export const layer: Layer.Layer<
           ],
         });
       });
-      const voiceHandoff =
-        run.voiceHistoryCutoffOrdinal === undefined
-          ? null
-          : voiceHistoryHandoff({
-              run,
-              providerThread: runningProviderThread,
-              runs: projection.runs,
-              alreadyDeliveredItemIds: deliveredItemIds,
-              nativeInputRunIds: new Set([
-                ...handoffContext.nativeInputRunIds,
-                ...(handoffContext.sameNativeThread ? handoffContext.legacyInputRunIds : []),
-              ]),
-              items: (yield* projectionStore.getThreadRecords(input.threadId, ["turnItems"], {
-                voiceHistory: {
-                  throughOrdinal: run.voiceHistoryCutoffOrdinal,
-                  afterOrdinal: voiceHistoryBoundaryOrdinal(run, projection.runs),
-                },
-                turnItemTypes: ["user_message", "assistant_message"],
-              })).turnItems,
-            });
-      if (
-        voiceHandoff !== null &&
-        !effectiveHandoffs.some((handoff) => handoff.id === voiceHandoff.id)
-      ) {
-        const saved = projection.contextHandoffs.find((handoff) => handoff.id === voiceHandoff.id);
-        if (saved === undefined) yield* persistHandoff(voiceHandoff);
-        effectiveHandoffs = [...effectiveHandoffs, saved ?? voiceHandoff];
-      }
+      effectiveHandoffs = yield* prepareVoiceHistoryHandoffs({
+        threadId: input.threadId,
+        run,
+        providerThread: runningProviderThread,
+        runs: projection.runs,
+        contextHandoffs: projection.contextHandoffs,
+        effectiveHandoffs,
+        alreadyDeliveredItemIds: deliveredItemIds,
+        nativeInputRunIds,
+        legacyInputRunIds,
+        sameNativeThread,
+        getThreadRecords: projectionStore.getThreadRecords,
+        persist: persistHandoff,
+      });
       const startWithHandoffs = Effect.fn("ProviderTurnStartService.startWithHandoffs")(
         function* (turnInput: Parameters<typeof session.startTurn>[0], compact = false) {
           const delivery = yield* deliverContextHandoffs({

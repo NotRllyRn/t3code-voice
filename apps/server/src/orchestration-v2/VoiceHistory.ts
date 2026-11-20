@@ -45,6 +45,21 @@ export function voiceHistoryBoundaryOrdinal(
   );
 }
 
+/** Saved handoffs use run ordinals; transcript reads use item ordinals. */
+export function voiceHistoryHandoffFilter(
+  run: OrchestrationV2Run,
+  runs: ReadonlyArray<OrchestrationV2Run>,
+): (handoff: OrchestrationV2ContextHandoff) => boolean {
+  const boundary =
+    runs.findLast((source) => source.freshContext === true && source.ordinal <= run.ordinal)
+      ?.ordinal ?? 0;
+  const eligibleRunIds = new Set(
+    runs.filter((source) => source.ordinal > boundary).map((source) => source.id),
+  );
+  return (handoff) =>
+    !handoff.id.startsWith("context-handoff:voice:") || eligibleRunIds.has(handoff.targetRunId);
+}
+
 /** Shares voice boundaries across normal, retry and recovery paths without changing nonvoice history. */
 export function voiceHistoryItemFilter(
   run: OrchestrationV2Run,
