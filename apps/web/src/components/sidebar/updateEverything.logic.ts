@@ -84,6 +84,12 @@ export function collectServerUpdateTargets(
     const config = machine.serverConfig;
     if (machine.hostedByThisApp) continue;
     if (
+      config?.environment.capabilities.voiceReleaseLookup === true &&
+      cliReleaseChannelOf(config.environment.serverVersion) === "voice" &&
+      !releases.has(machine.environmentId)
+    )
+      continue;
+    if (
       config !== null &&
       resolveVersionMismatch(config.environment.serverVersion, targetVersion) === null
     ) {

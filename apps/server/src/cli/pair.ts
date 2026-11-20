@@ -96,7 +96,7 @@ export class IncompatibleServerProtocolError extends Schema.TaggedError<Incompat
     return [
       `The running T3 Code server (${this.serverVersion}) speaks orchestration protocol ${String(this.serverProtocolVersion)}, but this CLI speaks protocol ${String(ORCHESTRATION_PROTOCOL_VERSION)}.`,
       cliReleaseChannelOf(this.serverVersion) === "voice"
-        ? `Use the matching Voice ${this.serverVersion} runtime from ${FORK_DESKTOP.releasesUrl}. Follow README-server.md for its manual Docker server setup (separate pinned Node image, provider CLIs and authentication required). With the guide's default container name, run \`docker exec --user 1000:1000 t3-voice-server /usr/local/bin/node /opt/t3/dist/bin.mjs pair --base-dir /state\`; substitute your container name if changed. No standalone automatic updater is shipped.`
+        ? `Use the matching Voice ${this.serverVersion} runtime from ${FORK_DESKTOP.releasesUrl}. Install its standalone archive or follow the release's desktop or Docker instructions, then pair using that runtime and the same --base-dir.`
         : `Pair with the matching CLI instead: \`${this.pairCommand}\`.`,
     ].join("\n");
   }

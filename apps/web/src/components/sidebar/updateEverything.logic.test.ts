@@ -60,6 +60,27 @@ describe("collectServerUpdateTargets", () => {
       ["newer", "0.1.10-voice.6"],
     ]);
     expect(skipped.map(({ label }) => label)).toEqual(["no-scope"]);
+    const capable = machine("unpublished", "0.1.10-voice.5", "boot-service");
+    expect(
+      collectServerUpdateTargets(
+        [
+          {
+            ...capable,
+            serverConfig: {
+              ...capable.serverConfig!,
+              environment: {
+                ...capable.serverConfig!.environment,
+                capabilities: {
+                  ...capable.serverConfig!.environment.capabilities,
+                  voiceReleaseLookup: true,
+                },
+              },
+            },
+          },
+        ],
+        "0.1.10-voice.6",
+      ).targets,
+    ).toEqual([]);
   });
 
   it("updates remote servers that can move to the target and names every skipped one", () => {
