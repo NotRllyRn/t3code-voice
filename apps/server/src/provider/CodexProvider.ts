@@ -11,8 +11,6 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as RcMap from "effect/RcMap";
 import * as Result from "effect/Result";
-import * as Redacted from "effect/Redacted";
-import { LiveConnectionError } from "@t3tools/provider-core/server/liveConnection";
 import * as Schema from "effect/Schema";
 import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
@@ -681,28 +679,6 @@ export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(fu
   yield* client.notify("initialized", undefined);
   return { client, initialize, pid: child.pid };
 });
-
-const encodePrivateLiveConfig = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
-
-export const readPrivateCodexLiveConfig = Effect.fn("CodexLiveConnection.readConfig")(
-  function* (input: {
-    readonly binaryPath: string;
-    readonly homePath: string;
-    readonly launchArgs: string;
-    readonly environment: NodeJS.ProcessEnv;
-  }) {
-    const { client } = yield* withCodexAppServerClient({ ...input, cwd: input.homePath });
-    // Raw request avoids schema errors retaining a bearer-bearing config response.
-    const response = yield* client.raw.request("config/read", { includeLayers: true });
-    const encoded = yield* encodePrivateLiveConfig(response);
-    if (new TextEncoder().encode(encoded).byteLength > 262144)
-      return yield* new LiveConnectionError({ reason: "unsupported-provider" });
-    return Redacted.make(response);
-  },
-  Effect.scoped,
-  Effect.timeout("5 seconds"),
-  Effect.mapError(() => new LiveConnectionError({ reason: "unsupported-provider" })),
-);
 
 // Codex runs git (ssh for ssh URLs) for plugin marketplaces at launch and exits without waiting
 // for it, so stopping a short probe mid-fetch strands ssh in an SSH-agent request.

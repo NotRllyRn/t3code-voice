@@ -31,7 +31,6 @@ import {
   makePendingCodexProvider,
   makeCodexSkillsProbe,
   withCodexAppServerClient,
-  readPrivateCodexLiveConfig,
 } from "../CodexProvider.ts";
 import { resolveCodexLaunchArgs } from "../codexLaunchArgs.ts";
 import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
@@ -63,7 +62,7 @@ import * as CodexInstallation from "../CodexInstallation.ts";
 import * as CodexManagedTokenBroker from "../CodexManagedTokenBroker.ts";
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
-import { makeCodexLiveConnection } from "../CodexLiveConnection.ts";
+import { makePrivateCodexLiveConnection } from "../CodexLiveConfig.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
@@ -318,21 +317,11 @@ export const CodexDriver: ProviderDriver<
           }),
       ),
     );
-    const liveHome = effectiveConfig.homePath || homeLayout.sharedHomePath;
-    const liveLaunchArgs = resolveCodexLaunchArgs(effectiveConfig.launchArgs, processEnv);
-    const liveConnection = yield* makeCodexLiveConnection({
-      homePath: liveHome,
-      launchArgs: liveLaunchArgs,
+    const liveConnection = yield* makePrivateCodexLiveConnection({
+      binaryPath: effectiveConfig.binaryPath,
+      homePath: effectiveConfig.homePath || homeLayout.sharedHomePath,
+      launchArgs: effectiveConfig.launchArgs,
       environment: processEnv,
-      readConfig: readPrivateCodexLiveConfig({
-        binaryPath: effectiveConfig.binaryPath,
-        homePath: liveHome,
-        launchArgs: liveLaunchArgs,
-        environment: processEnv,
-      }).pipe(
-        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-        Effect.provideService(HostProcess.HomeDirectory, yield* HostProcess.HomeDirectory),
-      ),
     });
     const textGeneration = yield* makeCodexTextGeneration(
       effectiveConfig,
