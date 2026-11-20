@@ -58,10 +58,19 @@ export type VoiceReleaseSelection =
 export function selectVoiceRelease(
   currentVersion: string,
   releases: ReadonlyArray<VoiceGitHubRelease>,
-  target: { readonly kind: "desktop-dmg"; readonly platform: "darwin"; readonly arch: "arm64" },
+  target:
+    | { readonly kind: "desktop-dmg"; readonly platform: "darwin"; readonly arch: "arm64" }
+    | { readonly kind: "cli-archive"; readonly platform: NodeJS.Platform; readonly arch: string },
 ): VoiceReleaseSelection {
   const current = parseVoiceVersion(currentVersion);
   if (!current && currentVersion !== LEGACY_PREVIEW) return { status: "invalid-current" };
+
+  const platformKey = `${target.platform}-${target.arch}`;
+  if (
+    target.kind === "cli-archive" &&
+    !["darwin-arm64", "linux-arm64", "linux-x64", "win32-arm64", "win32-x64"].includes(platformKey)
+  )
+    return { status: "unavailable" };
 
   let best: Extract<VoiceReleaseSelection, { status: "offered" }> | undefined;
   for (const release of releases) {
@@ -74,14 +83,35 @@ export function selectVoiceRelease(
       continue;
     if (compareSemverVersions(version, currentVersion) <= 0) continue;
     if (best && compareSemverVersions(version, best.version) <= 0) continue;
-    const name = `T3-Code-Voice-${version}-${target.arch}.dmg`;
-    const url = `https://github.com/${FORK_RELEASE.repository}/releases/download/v${version}/${name}`;
+    const name =
+      target.kind === "desktop-dmg"
+        ? `T3-Code-Voice-${version}-${target.arch}.dmg`
+        : `t3-${version}-${platformKey}.${target.platform === "win32" ? "zip" : "tar.gz"}`;
+    const base = `https://github.com/${FORK_RELEASE.repository}/releases/download/v${version}/`;
+    const url = `${base}${name}`;
+    if (
+      target.kind === "cli-archive" &&
+      !release.assets.some(
+        (candidate) =>
+          candidate.name === "SHA256SUMS" &&
+          candidate.browser_download_url === `${base}SHA256SUMS` &&
+          ["text/plain", "application/octet-stream"].includes(candidate.content_type),
+      )
+    )
+      continue;
     const asset = release.assets.find(
       (candidate) =>
         candidate.name === name &&
         candidate.browser_download_url === url &&
         (candidate.content_type === "application/octet-stream" ||
-          candidate.content_type === "application/x-apple-diskimage"),
+          (target.kind === "desktop-dmg"
+            ? candidate.content_type === "application/x-apple-diskimage"
+            : [
+                "application/gzip",
+                "application/x-gzip",
+                "application/zip",
+                "application/x-tar",
+              ].includes(candidate.content_type))),
     );
     if (!asset) continue;
     const digest = /^sha256:([a-fA-F0-9]{64})$/.exec(asset.digest ?? "")?.[1];

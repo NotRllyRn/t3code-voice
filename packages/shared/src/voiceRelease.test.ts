@@ -40,15 +40,15 @@ describe("Voice release contract", () => {
         tag: "v0.1.10",
         sha: "7d32075e3757ded707914e2450c3e392a9665765",
       },
-      voiceRevision: 1,
+      voiceRevision: 6,
       githubPrerelease: true,
     });
   });
 
   it("increments numeric revisions and resets only for a newer upstream", () => {
-    expect(nextVoiceVersion("0.1.9")).toBe("0.1.9-voice.1");
+    expect(nextVoiceVersion("0.1.9")).toBe("0.1.9-voice.6");
     expect(nextVoiceVersion("0.1.9", "0.1.9-voice.9")).toBe("0.1.9-voice.10");
-    expect(nextVoiceVersion("0.1.10", "0.1.9-voice.10")).toBe("0.1.10-voice.1");
+    expect(nextVoiceVersion("0.1.10", "0.1.9-voice.10")).toBe("0.1.10-voice.6");
     expect(nextVoiceVersion("0.1.8", "0.1.9-voice.1")).toBeNull();
     expect(nextVoiceVersion("0.1.9", "0.1.9-preview.20261116.1")).toBeNull();
   });
@@ -119,6 +119,46 @@ describe("Voice release contract", () => {
     expect(selectVoiceRelease("0.1.9-voice.6", releases, target)).toEqual({
       status: "unavailable",
     });
+  });
+
+  it("offers only compatible CLI archives with canonical checksum assets", () => {
+    const version = "0.1.10-voice.6";
+    const base = `https://github.com/NotRllyRn/t3code-voice/releases/download/v${version}/`;
+    const archive = {
+      name: `t3-${version}-linux-x64.tar.gz`,
+      content_type: "application/gzip",
+      browser_download_url: `${base}t3-${version}-linux-x64.tar.gz`,
+    };
+    const sums = {
+      name: "SHA256SUMS",
+      content_type: "text/plain",
+      browser_download_url: `${base}SHA256SUMS`,
+    };
+    const candidate = release(version, { assets: [archive, sums] });
+    const cli = { kind: "cli-archive", platform: "linux", arch: "x64" } as const;
+    expect(selectVoiceRelease("0.1.10-voice.5", [candidate], cli)).toMatchObject({
+      status: "offered",
+      version,
+      asset: { name: archive.name, url: archive.browser_download_url },
+    });
+    for (const assets of [
+      [archive],
+      [sums],
+      [archive, { ...sums, browser_download_url: "https://other.test/SHA256SUMS" }],
+      [{ ...archive, content_type: "text/html" }, sums],
+      [{ ...archive, browser_download_url: `${archive.browser_download_url}?token=x` }, sums],
+    ]) {
+      expect(selectVoiceRelease("0.1.10-voice.5", [{ ...candidate, assets }], cli)).toEqual({
+        status: "unavailable",
+      });
+    }
+    expect(selectVoiceRelease("0.1.10-voice.5", [candidate], { ...cli, arch: "arm64" })).toEqual({
+      status: "unavailable",
+    });
+    expect(
+      selectVoiceRelease("0.1.10-voice.5", [candidate], { ...cli, platform: "freebsd" }),
+    ).toEqual({ status: "unavailable" });
+    expect(selectVoiceRelease(version, [candidate], cli)).toEqual({ status: "unavailable" });
   });
 
   it("rejects upstream, credentialed, query, traversal and wrong-content-type assets", () => {

@@ -23,12 +23,12 @@ function fixture() {
     protocolSource,
     'export const ORCHESTRATION_PROTOCOL_VERSION = 3;\nexport const VOICE_HISTORY_CAPABILITY = "voiceHistoryV1";\n',
   );
-  const asset = NodePath.join(dir, "t3-0.1.10-voice.1-linux-x64.tar.gz");
+  const asset = NodePath.join(dir, "t3-0.1.10-voice.6-linux-x64.tar.gz");
   NodeFS.writeFileSync(asset, "archive bytes");
   return {
     repository: "NotRllyRn/t3code-voice",
     sourceSha: "a".repeat(40),
-    version: "0.1.10-voice.1",
+    version: "0.1.10-voice.6",
     target: "linux-x64" as const,
     assets: [asset],
     smoke: ["archive-layout", "cli-version"],
@@ -88,7 +88,7 @@ it("requires both macOS artifacts and exact architecture and version", () => {
   const input = fixture();
   const dmg = NodePath.join(
     input.assets[0]!.replace(/t3-.*$/, ""),
-    "T3-Code-Voice-0.1.10-voice.1-arm64.dmg",
+    "T3-Code-Voice-0.1.10-voice.6-arm64.dmg",
   );
   const zip = dmg.replace(/\.dmg$/, ".zip");
   NodeFS.writeFileSync(dmg, "dmg");

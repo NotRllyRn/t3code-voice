@@ -8,7 +8,7 @@ const upstream = {
   html_url: "https://github.com/pingdotgg/t3code/releases/tag/v0.1.10",
   body: "# Upstream highlights\n\nKeep this exact text.\nDo not execute: $(touch /tmp/untrusted)\n",
 };
-const version = "0.1.10-voice.1";
+const version = "0.1.10-voice.6";
 const sha = "a".repeat(40);
 
 test("retains the pinned upstream notes verbatim and appends fork provenance without evaluating release text", async () => {
