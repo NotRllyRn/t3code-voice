@@ -1,3 +1,11 @@
+import { vi } from "vite-plus/test";
+
+// Exercise the retained remote updater engine separately from Voice's manual policy.
+vi.mock("@t3tools/shared/forkIdentity", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@t3tools/shared/forkIdentity")>();
+  return { ...actual, FORK_DESKTOP: { ...actual.FORK_DESKTOP, manualUpdatesOnly: false } };
+});
+
 import { assert, describe, it } from "@effect/vitest";
 import type {
   DesktopTelemetryRequestDesktopUpdate,
