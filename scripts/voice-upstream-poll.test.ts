@@ -309,9 +309,38 @@ test("API uses fixed paths, rejects oversized responses and HTTP failures", asyn
       async () => new Response("", { headers: { "content-length": String(16 * 1024 * 1024 + 1) } }),
     ),
   ).rejects.toThrow("too large");
+  const releaseWithNotes = { ...release, body: "x".repeat(180_000), assets: [] };
   await expect(
-    githubJson("/releases/latest", async (url) => {
-      expect(String(url)).toBe("https://api.github.com/repos/pingdotgg/t3code/releases/latest");
+    githubJson("/releases/latest", async () => new Response(JSON.stringify(releaseWithNotes))),
+  ).resolves.toEqual(releaseWithNotes);
+  await expect(
+    githubJson(
+      "/releases/latest",
+      async () => new Response("", { headers: { "content-length": String(1024 * 1024 + 1) } }),
+    ),
+  ).rejects.toThrow("too large");
+  let cancelled = false;
+  await expect(
+    githubJson(
+      "/releases/latest",
+      async () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new Uint8Array(1024 * 1024));
+              controller.enqueue(new Uint8Array(1));
+            },
+            cancel() {
+              cancelled = true;
+            },
+          }),
+        ),
+    ),
+  ).rejects.toThrow("too large");
+  expect(cancelled).toBe(true);
+  await expect(
+    githubJson("/git/ref/heads/main", async (url) => {
+      expect(String(url)).toBe("https://api.github.com/repos/pingdotgg/t3code/git/ref/heads/main");
       return new Response("x".repeat(32_769));
     }),
   ).rejects.toThrow("too large");
