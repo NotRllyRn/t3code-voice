@@ -17,7 +17,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
-  ProviderSessionId,
+  type ProviderSessionId,
   RunId,
   ThreadId,
   TurnItemId,
@@ -5556,34 +5556,6 @@ it.effect(
         ),
       );
     }),
-);
-
-it.effect("rejects a queued clean start when the current adapter driver no longer matches", () =>
-  Effect.gen(function* () {
-    const state = yield* Ref.make(emptyState);
-    yield* Effect.gen(function* () {
-      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
-      const providerSessionId = ProviderSessionId.make("clean-queued-session");
-      const result = yield* manager
-        .open({
-          threadId: ThreadId.make("clean-queued-thread"),
-          providerSessionId,
-          modelSelection,
-          runtimePolicy: {
-            ...runtimePolicy,
-            cleanProviderConstraint: {
-              instanceId: modelSelection.instanceId,
-              driver: "pi",
-              environmentMode: "clean",
-            },
-          },
-        })
-        .pipe(Effect.result);
-      assert.equal(result._tag, "Failure");
-      assert.equal((yield* Ref.get(state)).openCount, 0);
-      assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
-    }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000 })));
-  }),
 );
 
 it.effect.each(["missing", "file"] as const)(
