@@ -142,6 +142,11 @@ it("offers nine contract voices and persists voice/progress choices separately f
 
 it("rejects unsupported saved voices and progress modes in the actual settings UI", async () => {
   using fixture = setup();
+  fixture.store.setState({
+    voice: "cove",
+    notifications: "progress",
+    microphoneId: "mic-sentinel",
+  });
   fixture.saved.set(
     storageKey,
     JSON.stringify({
@@ -150,6 +155,11 @@ it("rejects unsupported saved voices and progress modes in the actual settings U
     }),
   );
   await fixture.store.persist.rehydrate();
+  expect(fixture.store.getState()).toMatchObject({
+    voice: "maple",
+    notifications: "terminal",
+    microphoneId: "",
+  });
   await using screen = await render(<LiveVoiceSettingsSection />);
   await expect
     .element(screen.getByRole("combobox", { name: "Live voice", exact: true }))
