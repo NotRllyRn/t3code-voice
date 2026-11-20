@@ -977,6 +977,10 @@ it.effect.each([false, true])(
             (event) => event.type === "live.agent" && event.runId,
           ),
           terminalIds: terminal.map((event) => event.type === "live.agent" && event.runId),
+          quietAcknowledgments: appends.filter(
+            (append) =>
+              append.channel === "quiet" && append.text.includes("T3 accepted the typed request"),
+          ).length,
           speakableAcknowledgments: appends.filter(
             (append) =>
               append.channel === "speakable" &&
@@ -985,7 +989,8 @@ it.effect.each([false, true])(
         }).toEqual({
           acknowledgmentIds: joinExisting ? [] : accepted.map((sent) => sent.run.id),
           terminalIds: accepted.slice(1).map((sent) => sent.run.id),
-          speakableAcknowledgments: joinExisting ? 0 : 9,
+          quietAcknowledgments: joinExisting ? 0 : 9,
+          speakableAcknowledgments: 0,
         });
       }),
     ).pipe(Effect.provide(agentServices)),
