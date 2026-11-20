@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as CommandReceiptStore from "../../orchestration-v2/CommandReceiptStore.ts";
+import * as Orchestrator from "../../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../../orchestration-v2/ProjectionStore.ts";
 import * as ThreadManagement from "../../orchestration-v2/ThreadManagementService.ts";
 import { recordVoiceMessage } from "../../orchestration-v2/VoiceConversation.ts";
@@ -187,4 +188,114 @@ it.effect(
         ).toEqual(after);
       }).pipe(Effect.provide(layer));
     }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "stale Live model selection refuses without changing speech or queued work; accepted receipts replay",
+  () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread:live-model-admission");
+      yield* create(threadId);
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+      const original = (yield* store.getThreadShell(threadId))!.modelSelection;
+      const firstVoice = { ...voice, sessionId: "model-admission", itemId: "accepted-human" };
+      yield* recordVoiceMessage({
+        projectId,
+        threadId,
+        role: "user",
+        text: "Inspect the fixture",
+        voice: firstVoice,
+        creationSource: "web",
+      });
+      const acceptedInput = {
+        projectId,
+        threadId,
+        sessionId: firstVoice.sessionId,
+        delegationId: "accepted",
+        userTurnId: firstVoice.itemId,
+        userTranscript: "Inspect the fixture",
+        expectedUserMessageCount: 0,
+        expectedModelSelection: original,
+      };
+      const accepted = yield* sendLiveDelegation(acceptedInput);
+      const receiptId = CommandId.make("live_execute_model-admission_accepted");
+      const receipt = yield* receipts.getByCommandId(receiptId);
+      expect(Option.isSome(receipt)).toBe(true);
+      const queued = yield* threads.sendToThread({
+        projectId,
+        threadId,
+        commandId: CommandId.make("model-queued-typed"),
+        messageId: MessageId.make("model-queued-typed"),
+        text: "Queued typed work",
+        attachments: [],
+        mode: "queue",
+        createdBy: "user",
+        creationSource: "web",
+      });
+      expect(queued.delivery).toBe("queued");
+      // Leave queued work eligible for promotion, so refusal must precede that mutation.
+      yield* store.apply({
+        id: EventId.make("event:model-accepted-ended"),
+        type: "run.updated",
+        threadId,
+        occurredAt: yield* DateTime.now,
+        payload: { ...accepted.run, status: "completed" },
+      });
+      const staleVoice = { ...firstVoice, itemId: "stale-human", sequence: 2 };
+      const speech = yield* recordVoiceMessage({
+        projectId,
+        threadId,
+        role: "user",
+        text: "Use my earlier selection",
+        voice: staleVoice,
+        creationSource: "web",
+      });
+      const switched = { ...original, model: "gpt-6" };
+      yield* orchestrator.dispatch({
+        type: "thread.model-selection.set",
+        commandId: CommandId.make("model-admission-switch"),
+        threadId,
+        modelSelection: switched,
+      });
+      const beforeShell = yield* store.getThreadShell(threadId);
+      expect(beforeShell!.modelSelection).toEqual(switched);
+      const fields = ["messages", "turnItems", "runs", "providerTurns"] as const;
+      const before = yield* store.getThreadRecords(threadId, fields);
+      expect(before.messages.filter((message) => !message.voice)).toHaveLength(1);
+      expect(before.runs.map((run) => [run.id, run.status])).toEqual([
+        [accepted.run.id, "completed"],
+        [queued.run.id, "queued"],
+      ]);
+      expect(before.messages.find((message) => message.id === speech.messageId)!.runId).toBe(null);
+      const speechItem = before.turnItems.find(
+        (item) => item.type === "user_message" && item.messageId === speech.messageId,
+      )!;
+      expect(speechItem.runId).toBe(null);
+      expect(before.providerTurns).toEqual([]);
+      const result = yield* sendLiveDelegation({
+        ...acceptedInput,
+        delegationId: "stale",
+        userTurnId: staleVoice.itemId,
+        userTranscript: "Use my earlier selection",
+        expectedUserMessageCount: 1,
+      }).pipe(Effect.result);
+      expect(result._tag).toBe("Failure");
+      if (result._tag === "Failure")
+        expect(result.failure._tag).toBe("OrchestratorInputChangedError");
+      expect(
+        (yield* receipts.getByCommandId(CommandId.make("live_execute_model-admission_stale")))._tag,
+      ).toBe("None");
+      expect(yield* store.getThreadRecords(threadId, fields)).toEqual(before);
+      expect(yield* store.getThreadShell(threadId)).toEqual(beforeShell);
+      // The accepted command replays despite both its count and selection now being stale.
+      const replay = yield* sendLiveDelegation(acceptedInput);
+      expect(replay.run.id).toBe(accepted.run.id);
+      expect(replay.message.id).toBe(accepted.message.id);
+      expect(yield* receipts.getByCommandId(receiptId)).toEqual(receipt);
+      expect(yield* store.getThreadRecords(threadId, fields)).toEqual(before);
+      expect(yield* store.getThreadShell(threadId)).toEqual(beforeShell);
+    }).pipe(Effect.provide(makeLayer())),
 );
