@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeUtil from "node:util";
+import * as NodeVM from "node:vm";
 import { build } from "vite-plus";
 import { expect, test } from "vite-plus/test";
 import {
@@ -65,6 +66,40 @@ test("the sender CLI runs from the workflow's sparse checkout with only fake IO"
       new URL("../.github/workflows/voice-upstream-watch.yml", import.meta.url),
       "utf8",
     );
+    const jobCondition = /^    if: (.+)$/m.exec(workflow)![1]!;
+    const sendCondition =
+      /name: Verify stable upstream release and notify signed coordinator\n        if: (.+)/.exec(
+        workflow,
+      )![1]!;
+    const readCondition =
+      /name: Check stable upstream release without delivery\n        if: (.+)/.exec(workflow)![1]!;
+    for (const ref of ["refs/heads/main", "refs/heads/other", "refs/tags/main"]) {
+      for (const event of ["schedule", "workflow_dispatch"]) {
+        for (const enabled of [undefined, "false", "true"]) {
+          for (const send of [false, true]) {
+            const context = {
+              github: {
+                repository: "NotRllyRn/t3code-voice",
+                ref,
+                event_name: event,
+                event: { repository: { default_branch: "main" } },
+              },
+              vars: { VOICE_UPSTREAM_WATCH_ENABLED: enabled },
+              inputs: { send_webhook: send },
+              format: (pattern: string, value: string) => pattern.replace("{0}", value),
+            };
+            const evaluate = (condition: string) =>
+              Boolean(NodeVM.runInNewContext(condition, context));
+            expect(evaluate(jobCondition) && evaluate(sendCondition)).toBe(
+              ref === "refs/heads/main" && enabled === "true" && (event === "schedule" || send),
+            );
+            expect(evaluate(jobCondition) && evaluate(readCondition)).toBe(
+              ref === "refs/heads/main" && event === "workflow_dispatch" && !send,
+            );
+          }
+        }
+      }
+    }
     const sparse = /sparse-checkout: \|\n((?: {12}[^\n]+\n)+)/
       .exec(workflow)?.[1]
       ?.trim()
@@ -311,7 +346,10 @@ test("API uses fixed paths, rejects oversized responses and HTTP failures", asyn
   ).rejects.toThrow("too large");
   const releaseWithNotes = { ...release, body: "x".repeat(180_000), assets: [] };
   await expect(
-    githubJson("/releases/latest", async () => new Response(JSON.stringify(releaseWithNotes))),
+    githubJson("/releases/latest", async (url) => {
+      expect(String(url)).toBe("https://api.github.com/repos/pingdotgg/t3code/releases/latest");
+      return new Response(JSON.stringify(releaseWithNotes));
+    }),
   ).resolves.toEqual(releaseWithNotes);
   await expect(
     githubJson(
