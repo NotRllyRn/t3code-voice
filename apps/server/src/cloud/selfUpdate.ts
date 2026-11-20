@@ -26,7 +26,6 @@ import {
   cliReleaseChannelOf,
   crossesReleaseTrack,
 } from "@t3tools/shared/cliRelease";
-import { parseVoiceVersion } from "@t3tools/shared/voiceRelease";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
@@ -48,7 +47,10 @@ import {
 import { bootServiceProgramOf, bootServiceUnitPath } from "./bootService.ts";
 import { decodeServicePreflightResult } from "./servicePreflight.ts";
 import * as ServiceLauncherClient from "./serviceLauncherClient.ts";
-import { compareExactServiceVersions, isExactServiceVersion } from "./serviceProtocol.ts";
+import { isExactServiceVersion } from "./serviceProtocol.ts";
+import { voiceServerUpdateRefusal } from "./voiceSelfUpdate.ts";
+
+export { voiceServerUpdateRefusal } from "./voiceSelfUpdate.ts";
 
 // A staged runtime's cold start can take over a minute on a loaded, swapping host.
 const PREFLIGHT_TIMEOUT = Duration.minutes(3);
@@ -59,23 +61,6 @@ export function resolveServerSelfUpdateCapability(input: {
 }): ServerSelfUpdateCapability | null {
   if (input.desktopManaged) return "desktop-managed" as const;
   return input.launcherManaged ? ("boot-service" as const) : null;
-}
-
-export function voiceServerUpdateRefusal(input: {
-  readonly serverVersion: string;
-  readonly targetVersion: string;
-  readonly channel?: string;
-}): string | null {
-  if (parseVoiceVersion(input.serverVersion) === null) return null;
-  if (input.channel !== undefined) {
-    return "Voice servers cannot switch to upstream release channels; update to a Voice release instead.";
-  }
-  if (parseVoiceVersion(input.targetVersion) === null) {
-    return `Voice servers can update only to Voice releases; refusing t3@${input.targetVersion}.`;
-  }
-  return compareExactServiceVersions(input.targetVersion, input.serverVersion) <= 0
-    ? `Voice updates require a newer release than ${input.serverVersion}.`
-    : null;
 }
 
 export class ServerSelfUpdate extends Context.Service<
