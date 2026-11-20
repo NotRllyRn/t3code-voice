@@ -1,0 +1,55 @@
+name: Voice upstream watch (disabled until configured)
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      send_webhook:
+        description: Send a signed delivery if a newer stable release exists
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: voice-upstream-watch
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    if: github.repository == 'NotRllyRn/t3code-voice' && (github.event_name == 'workflow_dispatch' || vars.VOICE_UPSTREAM_WATCH_ENABLED == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    environment: voice-automation
+    steps:
+      - name: Require an approved immutable sender source
+        env:
+          SOURCE_SHA: ${{ vars.VOICE_UPSTREAM_SOURCE_SHA }}
+        run: |
+          if [[ ! "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo 'Set VOICE_UPSTREAM_SOURCE_SHA to the reviewed full sender commit in the protected environment.' >&2
+            exit 1
+          fi
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ vars.VOICE_UPSTREAM_SOURCE_SHA }}
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/voice-upstream-poll.ts
+            scripts/lib/voice-upstream-poll.ts
+            packages/shared/src/forkIdentity.ts
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Check stable upstream release without delivery
+        if: github.event_name == 'workflow_dispatch' && !inputs.send_webhook
+        run: node scripts/voice-upstream-poll.ts
+      - name: Verify stable upstream release and notify signed coordinator
+        if: github.event_name == 'schedule' || inputs.send_webhook
+        env:
+          VOICE_UPSTREAM_WEBHOOK_URL: ${{ secrets.VOICE_UPSTREAM_WEBHOOK_URL }}
+          VOICE_UPSTREAM_WEBHOOK_SECRET: ${{ secrets.VOICE_UPSTREAM_WEBHOOK_SECRET }}
+        run: node scripts/voice-upstream-poll.ts --enable-webhook
