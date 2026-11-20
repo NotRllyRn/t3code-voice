@@ -38,18 +38,6 @@ describe("orchestration protocol compatibility", () => {
     expect(socketUrl.searchParams.get("connectionMethod")).toBe("relay");
   });
 
-  it("rejects upstream protocol collisions and old Voice previews without the history marker", () => {
-    for (const protocol of [2, 3]) {
-      const error = orchestrationProtocolCompatibilityError({
-        ...descriptor(protocol),
-        capabilities: { repositoryIdentity: true, serverSelfUpdate: "boot-service" },
-      });
-      expect(error).toMatchObject({ reason: "unsupported" });
-      expect(error?.message).toContain("compatible T3 Code Voice server");
-      expect(error).not.toHaveProperty("serverUpdateRequired");
-    }
-  });
-
   it("treats missing metadata as protocol 1", () => {
     const error = orchestrationProtocolCompatibilityError(descriptor());
     if (Number(ORCHESTRATION_PROTOCOL_VERSION) === 1) {

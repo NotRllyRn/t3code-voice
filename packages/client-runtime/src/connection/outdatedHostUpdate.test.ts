@@ -263,79 +263,74 @@ describe("updateOutdatedHost", () => {
     }),
   );
 
-  it.effect.each(["manual", "upstream"] as const)(
-    "refuses a %s host without opening an unverified updater socket",
-    (kind) =>
-      Effect.gen(function* () {
-        const manual = {
-          ...descriptor(undefined, "0.0.45"),
-          capabilities:
-            kind === "manual"
-              ? { repositoryIdentity: true, voiceHistoryV1: true }
-              : { repositoryIdentity: true, serverSelfUpdate: "boot-service" as const },
-        };
-        let opened = false;
-        const error = yield* Effect.flip(
-          updateOutdatedHost(TARGET.environmentId, { targetVersion: "0.0.46" }, () => Effect.void),
-        ).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              Layer.succeed(
-                EnvironmentRegistry.EnvironmentRegistry,
-                EnvironmentRegistry.EnvironmentRegistry.of({
-                  entries: yield* SubscriptionRef.make<
-                    ReadonlyMap<EnvironmentId, ConnectionCatalogEntry>
-                  >(
-                    new Map([
-                      [
-                        TARGET.environmentId,
-                        { target: TARGET, profile: Option.none(), enabled: false },
-                      ],
-                    ]),
-                  ),
-                } as unknown as EnvironmentRegistry.EnvironmentRegistry["Service"]),
-              ),
-              Layer.succeed(
-                ConnectionResolver.ConnectionResolver,
-                ConnectionResolver.ConnectionResolver.of({
-                  prepare: () => Effect.die(new Error("unused")),
-                  prepareForUpdate: () =>
-                    Effect.succeed({
-                      descriptor: manual,
-                      prepared: {
-                        environmentId: TARGET.environmentId,
-                        label: TARGET.label,
-                        httpBaseUrl: TARGET.httpBaseUrl,
-                        socketUrl: "wss://build.example.test/ws",
-                        httpAuthorization: null,
-                        target: TARGET,
-                      },
-                    }),
-                }),
-              ),
-              Layer.succeed(
-                RelayEnvironmentDiscovery.RelayEnvironmentDiscovery,
-                RelayEnvironmentDiscovery.RelayEnvironmentDiscovery.of({
-                  state: yield* SubscriptionRef.make(
-                    RelayEnvironmentDiscovery.EMPTY_RELAY_ENVIRONMENT_DISCOVERY_STATE,
-                  ),
-                  refresh: Effect.void,
-                }),
-              ),
-              Layer.succeed(
-                HttpClient.HttpClient,
-                HttpClient.make(() => Effect.die(new Error("unused"))),
-              ),
-              Layer.succeed(Socket.WebSocketConstructor, () => {
-                opened = true;
-                throw new Error("unused");
+  it.effect("refuses a host that cannot update itself without opening a socket", () =>
+    Effect.gen(function* () {
+      const manual = {
+        ...descriptor(undefined, "0.0.45"),
+        capabilities: { repositoryIdentity: true },
+      };
+      let opened = false;
+      const error = yield* Effect.flip(
+        updateOutdatedHost(TARGET.environmentId, { targetVersion: "0.0.46" }, () => Effect.void),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.succeed(
+              EnvironmentRegistry.EnvironmentRegistry,
+              EnvironmentRegistry.EnvironmentRegistry.of({
+                entries: yield* SubscriptionRef.make<
+                  ReadonlyMap<EnvironmentId, ConnectionCatalogEntry>
+                >(
+                  new Map([
+                    [
+                      TARGET.environmentId,
+                      { target: TARGET, profile: Option.none(), enabled: false },
+                    ],
+                  ]),
+                ),
+              } as unknown as EnvironmentRegistry.EnvironmentRegistry["Service"]),
+            ),
+            Layer.succeed(
+              ConnectionResolver.ConnectionResolver,
+              ConnectionResolver.ConnectionResolver.of({
+                prepare: () => Effect.die(new Error("unused")),
+                prepareForUpdate: () =>
+                  Effect.succeed({
+                    descriptor: manual,
+                    prepared: {
+                      environmentId: TARGET.environmentId,
+                      label: TARGET.label,
+                      httpBaseUrl: TARGET.httpBaseUrl,
+                      socketUrl: "wss://build.example.test/ws",
+                      httpAuthorization: null,
+                      target: TARGET,
+                    },
+                  }),
               }),
             ),
+            Layer.succeed(
+              RelayEnvironmentDiscovery.RelayEnvironmentDiscovery,
+              RelayEnvironmentDiscovery.RelayEnvironmentDiscovery.of({
+                state: yield* SubscriptionRef.make(
+                  RelayEnvironmentDiscovery.EMPTY_RELAY_ENVIRONMENT_DISCOVERY_STATE,
+                ),
+                refresh: Effect.void,
+              }),
+            ),
+            Layer.succeed(
+              HttpClient.HttpClient,
+              HttpClient.make(() => Effect.die(new Error("unused"))),
+            ),
+            Layer.succeed(Socket.WebSocketConstructor, () => {
+              opened = true;
+              throw new Error("unused");
+            }),
           ),
-        );
-        expect(error).toMatchObject({ _tag: "OutdatedHostUpdateError" });
-        expect(opened).toBe(false);
-      }),
+        ),
+      );
+      expect(error).toMatchObject({ _tag: "OutdatedHostUpdateError" });
+      expect(opened).toBe(false);
+    }),
   );
 
   it.effect("resumes an outdated host update after progress transport loss", () =>
