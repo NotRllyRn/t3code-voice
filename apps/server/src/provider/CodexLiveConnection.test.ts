@@ -37,6 +37,185 @@ const make = (config: unknown, environment: NodeJS.ProcessEnv = {}) =>
     readConfig: Effect.succeed(Redacted.make(config)),
   });
 
+const ownedDestination = {
+  name: "Fictional relay",
+  base_url: "https://relay.example.test/prefix/v1",
+  wire_api: "responses",
+  requires_openai_auth: false,
+  supports_websockets: true,
+};
+const ownerArgs = Object.entries({
+  model_provider: "fixture",
+  ...Object.fromEntries(
+    Object.entries(ownedDestination).map(([key, value]) => [
+      `model_providers.fixture.${key}`,
+      value,
+    ]),
+  ),
+})
+  .map(([key, value]) => `-c '${key}=${JSON.stringify(value)}'`)
+  .join(" ");
+const ownerConfig = () => ({
+  ...sessionConfig,
+  config: {
+    ...sessionConfig.config,
+    model_providers: {
+      fixture: { ...sessionConfig.config.model_providers.fixture, ...ownedDestination },
+    },
+  },
+  origins: {
+    ...sessionConfig.origins,
+    ...Object.fromEntries(
+      [
+        "model_provider",
+        ...Object.keys(ownedDestination).map((key) => `model_providers.fixture.${key}`),
+      ].map((key) => [key, sessionConfig.origins.thread_unload_delay_secs]),
+    ),
+  },
+  layers: [
+    {
+      ...sessionConfig.layers[0],
+      config: {
+        thread_unload_delay_secs: 0,
+        model_provider: "fixture",
+        model_providers: { fixture: ownedDestination },
+      },
+    },
+    ...sessionConfig.layers.slice(1),
+  ],
+});
+
+it.effect("binds owner destination args to effective config and selected-home credentials", () =>
+  Effect.gen(function* () {
+    for (const credential of [
+      { env_key: "SELECTED_KEY", experimental_bearer_token: null },
+      { env_key: null, experimental_bearer_token: "fictional-owner-key" },
+    ]) {
+      const config = ownerConfig();
+      Object.assign(config.config.model_providers.fixture, credential);
+      Object.assign(config.origins, {
+        "model_providers.fixture.experimental_bearer_token":
+          sessionConfig.origins["model_providers.fixture.env_key"],
+      });
+      const resolver = yield* makeCodexLiveConnection({
+        homePath: "/fixture/shadow",
+        launchArgs:
+          credential.env_key == null
+            ? ownerArgs
+            : ownerArgs.replace('"Fictional relay"', "Fictional relay"),
+        environment: { SELECTED_KEY: "fictional-owner-key", OPENAI_API_KEY: "wrong-global-key" },
+        readConfig: Effect.succeed(Redacted.make(config)),
+      });
+      const connection = yield* resolver.resolveLiveConnection();
+      expect(connection.createUrl).toBe("https://relay.example.test/prefix/v1/live");
+      expect(Redacted.value(connection.headers).Authorization).toBe("Bearer fictional-owner-key");
+      expect(JSON.stringify(connection)).not.toContain("fictional-owner-key");
+    }
+    const missing = yield* (yield* makeCodexLiveConnection({
+      homePath: "/fixture/shadow",
+      launchArgs: ownerArgs,
+      environment: { OPENAI_API_KEY: "wrong-global-key" },
+      readConfig: Effect.succeed(Redacted.make(ownerConfig())),
+    }))
+      .resolveLiveConnection()
+      .pipe(Effect.result);
+    expect(missing._tag).toBe("Failure");
+    if (missing._tag === "Failure") expect(missing.failure.reason).toBe("auth-required");
+  }),
+);
+
+it.effect(
+  "rejects unmatched owner args and project or arbitrary session overrides without leaks",
+  () =>
+    Effect.gen(function* () {
+      const original = ownerConfig();
+      const sessionOrigin = sessionConfig.origins.thread_unload_delay_secs;
+      for (const config of [
+        sessionConfig,
+        {
+          ...original,
+          origins: Object.fromEntries(
+            Object.entries(original.origins).filter(
+              ([path]) => path !== "model_providers.fixture.env_key",
+            ),
+          ),
+        },
+        { ...original, layers: undefined },
+        { ...original, layers: [...original.layers, original.layers[0]] },
+        { ...original, layers: [...original.layers, { name: { type: "project" } }] },
+        ...[
+          "model_provider",
+          "model_providers.fixture.base_url",
+          "model_providers.fixture.env_key",
+        ].map((key) => ({
+          ...original,
+          origins: { ...original.origins, [key]: { name: { type: "project" }, version: "poison" } },
+        })),
+        ...["model_providers.fixture.env_key", "model_providers", "env.SELECTED_KEY"].map(
+          (key) => ({
+            ...original,
+            origins: { ...original.origins, [key]: sessionOrigin },
+          }),
+        ),
+        {
+          ...original,
+          origins: { ...original.origins, model_provider: { ...sessionOrigin, version: "poison" } },
+        },
+        {
+          ...original,
+          config: {
+            ...original.config,
+            model_providers: {
+              fixture: {
+                ...original.config.model_providers.fixture,
+                base_url: "https://poison.example.test/v1",
+              },
+            },
+          },
+        },
+        {
+          ...original,
+          layers: [
+            {
+              ...original.layers[0],
+              config: { ...original.layers[0]!.config, env: { SELECTED_KEY: "poison" } },
+            },
+          ],
+        },
+      ]) {
+        const result = yield* (yield* makeCodexLiveConnection({
+          homePath: "/fixture/shadow",
+          launchArgs: ownerArgs,
+          environment: { SELECTED_KEY: "fictional-owner-key" },
+          readConfig: Effect.succeed(Redacted.make(config)),
+        }))
+          .resolveLiveConnection()
+          .pipe(Effect.result);
+        expect(result._tag).toBe("Failure");
+        expect(JSON.stringify(result)).not.toContain("poison");
+        expect(JSON.stringify(result)).not.toContain("fictional-owner-key");
+      }
+      for (const launchArgs of [
+        "",
+        `${ownerArgs} --profile poison`,
+        `${ownerArgs} -c env.SELECTED_KEY=poison`,
+        ownerArgs.replace("fixture", "other"),
+        ownerArgs.replace("supports_websockets=true", "requires_openai_auth=false"),
+        ownerArgs.replace("supports_websockets=true", "supports_websockets=false"),
+      ]) {
+        const result = yield* (yield* makeCodexLiveConnection({
+          homePath: "/fixture/shadow",
+          launchArgs,
+          environment: { SELECTED_KEY: "fictional-owner-key" },
+          readConfig: Effect.succeed(Redacted.make(original)),
+        }))
+          .resolveLiveConnection()
+          .pipe(Effect.result);
+        expect(result._tag).toBe("Failure");
+      }
+    }),
+);
+
 // Captured with installed Codex 0.169.0 config/read, a private home and a fictional key.
 it.effect(
   "accepts the normalized Codex provider while keeping null and absent fields equivalent",

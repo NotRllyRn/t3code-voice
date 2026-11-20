@@ -1,4 +1,5 @@
 import { LIVE_VOICE_PROTOCOL, LIVE_VOICE_REQUESTED_MODEL } from "@t3tools/contracts";
+import { tokenizeCliArgs } from "@t3tools/shared/cliArgs";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import {
   LiveConnectionError,
@@ -11,11 +12,8 @@ import * as Schema from "effect/Schema";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import { CODEX_APP_SERVER_THREAD_UNLOAD_DELAY_SECS } from "./codexLaunchArgs.ts";
 
-const decodeOwnedSessionConfig = Schema.decodeUnknownSync(
-  Schema.Struct({
-    thread_unload_delay_secs: Schema.Literal(CODEX_APP_SERVER_THREAD_UNLOAD_DELAY_SECS),
-  }),
-  { onExcessProperty: "error" },
+const decodeSessionUnload = Schema.decodeUnknownSync(
+  Schema.Struct({ thread_unload_delay_secs: Schema.Unknown }),
 );
 
 const Source = Schema.Struct({
@@ -108,8 +106,7 @@ export const makeCodexLiveConnection = Effect.fn("CodexLiveConnection.make")(fun
   let previous: Redacted.Redacted<string> | undefined;
   return {
     resolveLiveConnection: Effect.fn("CodexLiveConnection.resolveLiveConnection")(function* () {
-      // Profiles/CLI destination overrides need an owner trust model, not a TOML/argv guess.
-      if (input.launchArgs.trim() || !input.homePath)
+      if (!input.homePath)
         return yield* new LiveConnectionError({ reason: "unsupported-provider" });
       const privateConfig = yield* input.readConfig;
       return yield* Effect.try({
@@ -127,23 +124,72 @@ export const makeCodexLiveConnection = Effect.fn("CodexLiveConnection.make")(fun
             ([, origin]) => origin.name.type === "sessionFlags",
           );
           const sessionLayer = sessionLayers[0];
-          // Only our unload override may originate in sessionFlags; provider/key origins stay user-owned.
+          const expectedSession: Record<string, unknown> = {
+            thread_unload_delay_secs: CODEX_APP_SERVER_THREAD_UNLOAD_DELAY_SECS,
+          };
+          const expectedOrigins = new Set(["thread_unload_delay_secs"]);
+          const args = tokenizeCliArgs(input.launchArgs);
+          if (input.launchArgs.trim() && args.length === 0)
+            throw new LiveConnectionError({ reason: "unsupported-provider" });
+          if (args.length > 0) {
+            const provider = decodeProvider(config.config.model_providers[key]);
+            const destination = {
+              name: provider.name,
+              base_url: provider.base_url,
+              wire_api: provider.wire_api,
+              requires_openai_auth: provider.requires_openai_auth,
+              supports_websockets: provider.supports_websockets,
+            };
+            const overrides = new Map<string, unknown>([
+              ["model_provider", key],
+              ...Object.entries(destination).map(([field, value]): [string, unknown] => [
+                `model_providers.${key}.${field}`,
+                value,
+              ]),
+            ]);
+            if (args.length !== overrides.size * 2)
+              throw new LiveConnectionError({ reason: "unsupported-provider" });
+            for (let index = 0; index < args.length; index += 2) {
+              const assignment = args[index + 1] ?? "";
+              const equals = assignment.indexOf("=");
+              const path = assignment.slice(0, equals).trim();
+              const value = assignment.slice(equals + 1).trim();
+              const expected = overrides.get(path);
+              // Match only scalar owner args; config/read remains authoritative for TOML semantics.
+              const matches =
+                typeof expected === "boolean"
+                  ? value === String(expected)
+                  : typeof expected === "string" &&
+                    (value === stableStringify(expected) ||
+                      (!expected.includes("'") && value === `'${expected}'`) ||
+                      value === expected);
+              if (args[index] !== "-c" || equals < 1 || !matches || !overrides.delete(path))
+                throw new LiveConnectionError({ reason: "unsupported-provider" });
+              expectedOrigins.add(path);
+            }
+            expectedSession.model_provider = key;
+            expectedSession.model_providers = { [key]: destination };
+          }
+          // A session layer is trusted only when every field and origin matches our actual argv.
           const ownedSessionFlags =
             sessionLayers.length === 1 &&
             !!sessionLayer?.version &&
             Object.is(
-              decodeOwnedSessionConfig(sessionLayer?.config).thread_unload_delay_secs,
+              decodeSessionUnload(sessionLayer.config).thread_unload_delay_secs,
               CODEX_APP_SERVER_THREAD_UNLOAD_DELAY_SECS,
             ) &&
+            stableStringify(sessionLayer.config) === stableStringify(expectedSession) &&
             Object.is(
               config.config.thread_unload_delay_secs,
               CODEX_APP_SERVER_THREAD_UNLOAD_DELAY_SECS,
             ) &&
-            sessionOrigins.length === 1 &&
-            sessionOrigins[0]?.[0] === "thread_unload_delay_secs" &&
-            sessionOrigins[0][1].version === sessionLayer?.version;
+            sessionOrigins.length === expectedOrigins.size &&
+            sessionOrigins.every(
+              ([path, origin]) =>
+                expectedOrigins.has(path) && origin.version === sessionLayer.version,
+            );
           if (
-            (sessionOrigins.length > 0 && !ownedSessionFlags) ||
+            ((args.length > 0 || sessionOrigins.length > 0) && !ownedSessionFlags) ||
             config.layers?.some(
               (layer) =>
                 !layer.disabledReason &&
@@ -154,6 +200,12 @@ export const makeCodexLiveConnection = Effect.fn("CodexLiveConnection.make")(fun
             throw new LiveConnectionError({ reason: "unsupported-provider" });
           const trusted = (path: string) => {
             const origin = config.origins[path];
+            if (
+              ownedSessionFlags &&
+              expectedOrigins.has(path) &&
+              origin?.name.type === "sessionFlags"
+            )
+              return true;
             return (
               origin?.name.type === "user" &&
               !origin.name.profile &&
@@ -180,6 +232,15 @@ export const makeCodexLiveConnection = Effect.fn("CodexLiveConnection.make")(fun
                 : undefined;
           if (!credential || credential.length > 4096 || !/^[\x21-\x7e]+$/.test(credential))
             throw new LiveConnectionError({ reason: "auth-required" });
+          if (
+            args.length > 0 &&
+            ![
+              "model_providers",
+              `model_providers.${key}`,
+              `model_providers.${key}.${provider.env_key == null ? "experimental_bearer_token" : "env_key"}`,
+            ].some((path) => config.origins[path]?.name.type === "user" && trusted(path))
+          )
+            throw new LiveConnectionError({ reason: "unsupported-provider" });
           // Comparison stays private. Public revision is random owner + monotonic generation, not a secret digest.
           // config/read object order varies between app-server processes.
           const identity = stableStringify([raw, input.homePath, createUrl, credential]);
