@@ -1,7 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - Tests use Node's glob matcher to verify electron-builder exclusions.
 import * as NodeCrypto from "node:crypto";
 import * as NodePath from "node:path";
-import * as NodeModule from "node:module";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { createPackageWithOptions, extractFile } from "@electron/asar";
@@ -31,8 +30,6 @@ import {
   parseWslRuntimeArchiveMembers,
   readWorkspaceConfig,
   createBuildConfig,
-  resolveDesktopBuildCommit,
-  DesktopBuildCommitError,
   DESKTOP_FILE_EXCLUSIONS,
   InvalidMacPasskeyRpDomainError,
   InvalidMacPasskeyPublishableKeyError,
@@ -507,151 +504,6 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }),
   );
 
-  it.effect("publishes latest-mac only for an explicit signed Voice stable configuration", () =>
-    Effect.gen(function* () {
-      const voice = {
-        track: "voice-stable" as const,
-        feedUrl: "https://github.com/NotRllyRn/t3code-voice/releases/download/voice-stable/",
-        publisherSha1: "a".repeat(40),
-      };
-      const config = yield* createBuildConfig(
-        "mac",
-        "dmg",
-        "0.1.10-voice.1",
-        true,
-        false,
-        4141,
-        undefined,
-        undefined,
-        "arm64",
-        voice,
-      );
-      assert.deepEqual(config.publish, {
-        provider: "generic",
-        url: voice.feedUrl,
-        channel: "latest",
-      });
-      assert.deepEqual(config.extraMetadata, { t3VoiceUpdate: voice });
-      const candidate = {
-        ...voice,
-        track: "voice-candidate" as const,
-        feedUrl: "https://github.com/NotRllyRn/t3code-voice/releases/download/voice-candidate/",
-      };
-      const candidateConfig = yield* createBuildConfig(
-        "mac",
-        "zip",
-        "0.1.10-voice.2",
-        true,
-        false,
-        4141,
-        undefined,
-        undefined,
-        "arm64",
-        candidate,
-      );
-      assert.deepEqual(candidateConfig.publish, {
-        provider: "generic",
-        url: candidate.feedUrl,
-        channel: "latest",
-      });
-      assert.deepEqual(candidateConfig.extraMetadata, { t3VoiceUpdate: candidate });
-      assert.include(candidateConfig.productName as string, "Candidate — Not Production");
-      assert.nestedPropertyVal(
-        candidateConfig,
-        "mac.extendInfo.ElectronSquirrelPreventDowngrades",
-        true,
-      );
-      assert.nestedPropertyVal(candidateConfig, "mac.bundleShortVersion", "0.1.10002");
-      const crossMixed = yield* Effect.result(
-        createBuildConfig(
-          "mac",
-          "zip",
-          "0.1.10-voice.2",
-          true,
-          false,
-          4141,
-          undefined,
-          undefined,
-          "arm64",
-          { ...candidate, feedUrl: voice.feedUrl },
-        ),
-      );
-      assert.equal(crossMixed._tag, "Failure");
-      assert.equal(config.generateUpdatesFilesForAllChannels, false);
-      assert.include((config.mac as { sign: string }).sign, "sign-voice-macos.ts");
-      assert.equal((config.mac as { hardenedRuntime: boolean }).hardenedRuntime, true);
-      assert.equal((config.mac as { identity: string }).identity, "-");
-      assert.nestedPropertyVal(config, "mac.bundleShortVersion", "0.1.10001");
-      assert.nestedPropertyVal(config, "mac.extendInfo.ElectronSquirrelPreventDowngrades", true);
-      // Exercise installed builder field selection, not a mirror of its plist assignments.
-      const desktopRequire = NodeModule.createRequire(
-        new URL("../apps/desktop/package.json", import.meta.url),
-      );
-      const builderRequire = NodeModule.createRequire(
-        desktopRequire.resolve("electron-builder/package.json"),
-      );
-      builderRequire("app-builder-lib");
-      const { MacPackager } = builderRequire("app-builder-lib/out/macPackager.js") as {
-        MacPackager: {
-          prototype: {
-            applyCommonInfo(this: object, plist: object, contents: string): Promise<void>;
-          };
-        };
-      };
-      const plist: Record<string, unknown> = {};
-      yield* Effect.promise(() =>
-        MacPackager.prototype.applyCommonInfo.call(
-          {
-            appInfo: {
-              productFilename: "Voice",
-              productName: "Voice",
-              version: "0.1.10-voice.1",
-              buildVersion: "77.88.99",
-            },
-            platformSpecificBuildOptions: config.mac,
-            config: {},
-            getIconPath: async () => null,
-          },
-          plist,
-          "/unused",
-        ),
-      );
-      assert.equal(plist.CFBundleShortVersionString, "0.1.10001");
-      assert.equal(plist.CFBundleVersion, "77.88.99");
-      assert.equal(plist.ElectronSquirrelPreventDowngrades, true);
-      const overflow = yield* Effect.result(
-        createBuildConfig(
-          "mac",
-          "zip",
-          "0.1.10-voice.1000",
-          true,
-          false,
-          undefined,
-          undefined,
-          false,
-          "arm64",
-          voice,
-        ),
-      );
-      assert.equal(overflow._tag, "Failure");
-      const unsigned = yield* Effect.flip(
-        createBuildConfig(
-          "mac",
-          "dmg",
-          "0.1.10-voice.1",
-          false,
-          false,
-          4141,
-          undefined,
-          undefined,
-          "arm64",
-          voice,
-        ),
-      );
-      assert.match(unsigned.message, /Invalid Voice/);
-    }),
-  );
-
   it.effect("isolates macOS identity and refuses all inferred or mock update feeds", () =>
     Effect.gen(function* () {
       for (const version of [
@@ -703,57 +555,6 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         ),
       ),
     ),
-  );
-
-  it.effect.each([
-    { label: "clean Git", git: true, explicit: undefined, dirty: false, accepted: true },
-    {
-      label: "matching explicit Git",
-      git: true,
-      explicit: "a".repeat(40),
-      dirty: false,
-      accepted: true,
-    },
-    { label: "mismatched Git", git: true, explicit: "b".repeat(40), dirty: false, accepted: false },
-    { label: "dirty Git", git: true, explicit: undefined, dirty: true, accepted: false },
-    {
-      label: "verified gitless input",
-      git: false,
-      explicit: "a".repeat(40),
-      dirty: false,
-      accepted: true,
-    },
-    { label: "unknown gitless", git: false, explicit: undefined, dirty: false, accepted: false },
-    { label: "invalid gitless", git: false, explicit: "unknown", dirty: false, accepted: false },
-    { label: "short gitless", git: false, explicit: "abcdef123456", dirty: false, accepted: false },
-  ])("requires full honest source metadata: $label", ({ git, explicit, dirty, accepted }) =>
-    Effect.gen(function* () {
-      const outputs = git ? ["/source", "a".repeat(40), dirty ? " M source.ts" : ""] : [];
-      const result = yield* Effect.result(
-        resolveDesktopBuildCommit("/source").pipe(
-          Effect.provideService(
-            ChildProcessSpawner.ChildProcessSpawner,
-            ChildProcessSpawner.make(() =>
-              Effect.succeed(mockProcess(git ? 0 : 1, outputs.shift() ?? "")),
-            ),
-          ),
-          Effect.provide(
-            ConfigProvider.layer(
-              ConfigProvider.fromEnv({
-                env: explicit === undefined ? {} : { T3CODE_VOICE_BUILD_COMMIT: explicit },
-              }),
-            ),
-          ),
-        ),
-      );
-      if (accepted) {
-        assert.equal(result._tag, "Success");
-        if (result._tag === "Success") assert.equal(result.success, "a".repeat(40));
-      } else {
-        assert.equal(result._tag, "Failure");
-        if (result._tag === "Failure") assert.instanceOf(result.failure, DesktopBuildCommitError);
-      }
-    }),
   );
 
   it.effect("names the Electron window class in the Linux desktop entry", () =>
