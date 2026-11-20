@@ -5,6 +5,7 @@ import {
   LIVE_VOICE_READY_TIMEOUT_MS,
   LIVE_VOICE_HEARTBEAT_TIMEOUT_MS,
   type LiveVoiceBinding,
+  type LiveVoicePreferences,
   type LiveVoiceCleanupResult,
   type LiveVoiceCapability,
   type LiveVoiceServerEvent,
@@ -55,6 +56,7 @@ type Work =
 export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
   readonly socket: Socket.Socket;
   readonly binding: LiveVoiceBinding;
+  readonly preferences?: LiveVoicePreferences;
   readonly connection: ResolvedLiveConnection;
   readonly capability: LiveVoiceCapability;
   readonly modelSelection?: import("@t3tools/contracts").ModelSelection;
@@ -112,6 +114,7 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
     });
   const agent = yield* makeLiveAgentSession({
     binding: input.binding,
+    ...(input.preferences ? { preferences: input.preferences } : {}),
     sessionId,
     ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
     validateOwner,
@@ -242,7 +245,12 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
         Effect.provideService(Scope.Scope, resources),
       );
       cleanup = { result: "unknown" };
-      const call = yield* acquireLiveCall(input.connection, event.offerSdp, cleanup).pipe(
+      const call = yield* acquireLiveCall(
+        input.connection,
+        event.offerSdp,
+        cleanup,
+        input.preferences,
+      ).pipe(
         Effect.provideService(Scope.Scope, callScope),
         Effect.tapError(() => diagnose("call-acquire", "unknown")),
       );

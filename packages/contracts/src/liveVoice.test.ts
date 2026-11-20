@@ -2,6 +2,8 @@ import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 import {
   LiveVoiceBinding,
+  LiveVoicePreferences,
+  LIVE_VOICE_VOICES,
   LIVE_VOICE_MAX_FRAME_BYTES,
   LIVE_VOICE_MAX_SDP_BYTES,
   decodeLiveVoiceClientEvent,
@@ -147,4 +149,20 @@ it("bounds reconnect hints and never accepts result content or draft hints", () 
   expect(() =>
     decode({ threadId: "same-thread", resumeRunIds: ["run"], result: "forged" }),
   ).toThrow();
+});
+
+it("negotiates only native voice and notification preferences", () => {
+  const decode = Schema.decodeUnknownSync(LiveVoicePreferences, { onExcessProperty: "error" });
+  for (const voice of LIVE_VOICE_VOICES)
+    expect(decode({ voice, notifications: "terminal" })).toEqual({
+      voice,
+      notifications: "terminal",
+    });
+  for (const invalid of [
+    { voice: "maple", notifications: "terminal", speed: 1.5 },
+    { voice: "maple", notifications: "terminal", instructions: "override" },
+    { voice: "unknown", notifications: "progress" },
+    { voice: "maple", notifications: "all" },
+  ])
+    expect(() => decode(invalid)).toThrow();
 });

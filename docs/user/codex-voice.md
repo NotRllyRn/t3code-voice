@@ -13,8 +13,10 @@ That instance's Codex user configuration must select a custom provider backed by
 a compatible CPA native Live relay, with its existing server-side credential.
 The relay must support native Live calls and media relay; an OpenAI-compatible
 text endpoint or public Realtime endpoint alone is insufficient. Direct Codex
-subscription login, managed providers, profiles or CLI destination overrides,
-and other coding providers are currently unsupported.
+subscription login, managed providers, profiles, and other coding providers are
+currently unsupported. Supported server-owner Codex provider overrides use the
+same effective configuration and existing credential as coding; project-level
+connection overrides are rejected.
 Use the selected provider’s HTTPS `/v1` base URL. Live uses its native `/v1/live`
 endpoint, not a public Realtime WebSocket.
 
@@ -45,7 +47,8 @@ required; credentials and upstream destinations are never supplied by the browse
    Stop does not cancel a coding task. Use the normal coding Stop for that.
 
 A draft is saved as a thread when native voice starts, before speech is admitted.
-Opening its chat keeps voice connected. Typed messages, speech, coding progress
+Voice stays bound to that thread while you switch chats or put the app in the
+background. Other chats cannot start a second session. Typed messages, speech, coding progress
 and results share that thread. Voice uses the normal coding agent and approval
 UI; it cannot approve tools or answer permission requests. Check written results
 and resolve questions there. Brief spoken feedback is based on actual T3 output;
@@ -82,7 +85,8 @@ trigger one delayed retry (at least 90 seconds, within a three-minute startup
 budget). Quota, rate limits, authentication errors, ordinary temporary failures
 and ambiguous request losses do not retry automatically. Quota needs provider
 attention; waiting does not promise credits or access. Connection, selection,
-permission, navigation, unmount or page-visibility changes stop voice.
+permission or provider ownership changes can stop voice; navigating between chats
+or hiding the app does not. Quit the app or use Stop to end the session.
 
 The requested alias is `gpt-live-1.1-codex`. The effective served model and version
 are unknown; the alias does not establish a latest model version or entitlement.
@@ -91,6 +95,24 @@ and semantic accuracy are not guaranteed. Missing or stale associations fail
 closed. Delegation keeps its internal correlation to the recorded human turn;
 generated instructions are not submitted as human input. No second executor or
 automatic permission bypass is used.
+
+## Live Voice settings
+
+In **Settings → Live Voice**, choose a native voice and microphone/speaker where
+supported by your browser. Changes apply to the next session; recovery keeps the
+current session’s choices and mute state. Native Live does not expose supported
+speed or tone controls here.
+
+By default, task feedback announces completion, blocked work, and requests for
+attention. Turn on progress narration to also hear actual written coding-agent
+commentary. Private reasoning is never narrated. Task notifications wait while a
+native human turn is active, then resume after its final transcript. There is a
+short detection boundary before the native service reports that turn; this is
+not a guarantee against every interruption.
+
+Assistant captions evolve in place until the native turn finishes. Interrupted
+captions retain interruption metadata; generated text is not proof that all of
+it played or was heard. Only recorded captions enter later coding-agent context.
 
 ## Fork and other surfaces
 

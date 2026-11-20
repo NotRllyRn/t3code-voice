@@ -36,6 +36,7 @@ import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as VoiceFixture from "../orchestration-v2/VoiceConversation.testkit.ts";
 import { makeLiveAgentSession } from "./liveAgentSession.ts";
+import { readLiveHistory } from "./liveHistory.ts";
 import {
   decodeNativeLiveEvent,
   encodeNativeLiveAppend,
@@ -351,7 +352,7 @@ it.live("Stop/disconnect freezes pending concurrent caption windows but never su
       saved.messages.every(
         (message) =>
           message.voice?.transcriptFinality === "application_frozen" &&
-          message.voice.delivery === "unknown",
+          message.voice.delivery === (message.role === "assistant" ? "interrupted" : "unknown"),
       ),
     ).toBe(true);
     expect(events.filter((event) => event.type === "live.caption" && event.committed)).toHaveLength(
@@ -826,8 +827,143 @@ it.effect(
     ).pipe(Effect.provide(services)),
 );
 
+it.effect("assistant previews stay provisional across admission and idle, then persist once", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread:assistant-final-once");
+      yield* VoiceFixture.create(threadId);
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const agent = yield* makeLiveAgentSession({
+        binding: { threadId },
+        sessionId: "assistant-final-once",
+        onBound: () => {},
+        send: () => Effect.void,
+        append: () => Effect.void,
+      });
+      yield* agent.seed;
+      yield* agent.receive({
+        type: "turn_created",
+        role: "user",
+        turnId: "human",
+        text: "Help me.",
+      });
+      yield* agent.receive({ type: "turn_done", role: "user", turnId: "human", text: "Help me." });
+      yield* agent.receive({
+        type: "transcript",
+        role: "assistant",
+        itemId: "preview",
+        text: "I'll get some",
+      });
+      yield* agent.receive({
+        type: "delegation",
+        delegationId: "task",
+        userTurnId: "human",
+        instructions: "Help",
+        provenance: "native_live_delegation",
+      });
+      yield* TestClock.adjust("10 seconds");
+      yield* agent.poll;
+      expect(
+        (yield* threads.getThreadRecords(threadId, ["messages"])).messages.filter(
+          (m) => m.role === "assistant",
+        ),
+      ).toHaveLength(0);
+      yield* agent.receive({
+        type: "turn_done",
+        role: "assistant",
+        turnId: "reply",
+        text: "I'll get some recommendations for you.",
+      });
+      yield* agent.receive({
+        type: "turn_done",
+        role: "assistant",
+        turnId: "reply",
+        text: "I'll get some recommendations for you.",
+      });
+      const messages = (yield* threads.getThreadRecords(threadId, ["messages"])).messages.filter(
+        (m) => m.role === "assistant",
+      );
+      expect(messages.map((m) => m.text)).toEqual(["I'll get some recommendations for you."]);
+      expect(messages[0]?.voice?.delivery).toBe("unknown");
+      const history = yield* readLiveHistory(threadId);
+      expect(history.messages.filter((m) => m.role === "assistant").map((m) => m.text)).toEqual([
+        "I'll get some recommendations for you.",
+      ]);
+      const reconnectHistory: NativeLiveAppend[] = [];
+      const reconnected = yield* makeLiveAgentSession({
+        binding: { threadId },
+        sessionId: "assistant-reconnected",
+        onBound: () => {},
+        send: () => Effect.void,
+        append: (event) =>
+          Effect.sync(() => {
+            reconnectHistory.push(event);
+          }),
+      });
+      yield* reconnected.seed;
+      yield* reconnected.seed;
+      expect(
+        reconnectHistory.filter((e) => e.text.includes("I'll get some recommendations for you.")),
+      ).toHaveLength(1);
+    }),
+  ).pipe(Effect.provide(services)),
+);
+
 it.effect(
-  "inactivity freezes assistant history without finalizing human authority; completion and Stop do not duplicate history",
+  "a replaced unfinished assistant turn retains interruption without accepting its late full text",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("thread:assistant-interruption");
+        yield* VoiceFixture.create(threadId);
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const agent = yield* makeLiveAgentSession({
+          binding: { threadId },
+          sessionId: "interrupted-reply",
+          onBound: () => {},
+          send: () => Effect.void,
+          append: () => Effect.void,
+        });
+        yield* agent.receive({
+          type: "turn_created",
+          role: "assistant",
+          turnId: "first",
+          text: "I'll get some",
+        });
+        yield* agent.receive({
+          type: "turn_created",
+          role: "assistant",
+          turnId: "second",
+          text: "Understood",
+        });
+        yield* agent.receive({
+          type: "turn_done",
+          role: "assistant",
+          turnId: "first",
+          text: "I'll get some recommendations for you.",
+        });
+        yield* agent.receive({
+          type: "turn_done",
+          role: "assistant",
+          turnId: "second",
+          text: "Understood; keep the correction.",
+        });
+        const messages = (yield* threads.getThreadRecords(threadId, ["messages"])).messages;
+        expect(messages.map((m) => m.text)).toEqual([
+          "I'll get some",
+          "Understood; keep the correction.",
+        ]);
+        expect(messages.map((m) => m.voice?.delivery)).toEqual(["interrupted", "unknown"]);
+        expect((yield* readLiveHistory(threadId)).messages.map((m) => m.voice?.delivery)).toEqual([
+          "interrupted",
+          "unknown",
+        ]);
+      }),
+    ).pipe(Effect.provide(services)),
+);
+
+it.effect(
+  "inactivity keeps assistant preview provisional; completion and Stop do not duplicate history",
   () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("thread:live-inactivity");
@@ -853,7 +989,7 @@ it.effect(
           yield* agent.poll;
           const threads = yield* ThreadManagement.ThreadManagementService;
           expect((yield* threads.getThreadRecords(threadId, ["messages"])).messages).toHaveLength(
-            1,
+            0,
           );
           for (const role of ["user", "assistant"] as const) {
             yield* agent.receive({
@@ -884,9 +1020,9 @@ it.effect(
       );
       expect(records.runs).toHaveLength(0);
       expect(records.messages.map((message) => message.text)).toEqual([
-        "Initial assistant.",
         "Initial user.",
         "Corrected user.",
+        "Initial assistant.",
         "Corrected assistant.",
       ]);
       expect(
@@ -897,9 +1033,13 @@ it.effect(
     }).pipe(Effect.provide(services)),
 );
 
-it.effect.each([false, true])(
-  "progress expires and coalesces globally without suppressing canonical terminal results (escaped: %s)",
-  (escaped) =>
+it.effect.each([
+  { escaped: false, notifications: "progress" },
+  { escaped: true, notifications: "progress" },
+  { escaped: false, notifications: "terminal" },
+] as const)(
+  "notifications respect speech and opt-in progress ($notifications, escaped: $escaped)",
+  ({ escaped, notifications }) =>
     Effect.scoped(
       Effect.gen(function* () {
         const threadId = ThreadId.make("thread:live-stale-narration");
@@ -929,6 +1069,7 @@ it.effect.each([false, true])(
         const agent = yield* makeLiveAgentSession({
           binding: { threadId },
           sessionId: "stale-session",
+          preferences: { voice: "maple", notifications },
           onBound: () => {},
           send: () => Effect.void,
           append: (event) =>
@@ -999,9 +1140,10 @@ it.effect.each([false, true])(
         timestamp = DateTime.makeUnsafe(25000);
         yield* agent.poll;
         const progress = notices.filter((notice) => notice.text.includes('"status":"progress"'));
-        expect(progress).toHaveLength(1);
-        expect(Buffer.byteLength(progress[0]!.text, "utf8")).toBeLessThanOrEqual(8192);
-        if (escaped) {
+        expect(progress).toHaveLength(notifications === "progress" ? 1 : 0);
+        if (progress[0])
+          expect(Buffer.byteLength(progress[0].text, "utf8")).toBeLessThanOrEqual(8192);
+        if (escaped && progress[0]) {
           expect(JSON.parse(progress[0]!.text).actualAgentCommentary).toBeUndefined();
           expect(progress[0]!.text).toContain("Read the written T3 result");
         }
@@ -1015,8 +1157,49 @@ it.effect.each([false, true])(
         yield* agent.poll;
         expect(
           notices.filter((notice) => notice.text.includes('"status":"progress"')),
-        ).toHaveLength(1);
+        ).toHaveLength(notifications === "progress" ? 1 : 0);
+        yield* agent.receive({
+          type: "turn_created",
+          role: "user",
+          turnId: "speaking",
+          text: "One more",
+        });
+        yield* agent.receive({ type: "turn_delta", turnId: "speaking", text: " constraint" });
         completed = true;
+        yield* agent.poll;
+        expect(notices.filter((n) => JSON.parse(n.text).status === "completed")).toHaveLength(0);
+        yield* agent.receive({
+          type: "turn_done",
+          role: "user",
+          turnId: "speaking",
+          text: "One more constraint.",
+        });
+        yield* agent.receive({
+          type: "turn_created",
+          role: "user",
+          turnId: "older-overlap",
+          text: "Wait",
+        });
+        yield* agent.receive({
+          type: "turn_created",
+          role: "user",
+          turnId: "rapid-followup",
+          text: "And",
+        });
+        yield* agent.receive({
+          type: "turn_done",
+          role: "user",
+          turnId: "older-overlap",
+          text: "Wait.",
+        });
+        yield* agent.poll;
+        expect(notices.filter((n) => JSON.parse(n.text).status === "completed")).toHaveLength(0);
+        yield* agent.receive({
+          type: "turn_done",
+          role: "user",
+          turnId: "rapid-followup",
+          text: "And keep approvals.",
+        });
         yield* agent.poll;
         yield* agent.poll;
         const finals = notices.filter((notice) => JSON.parse(notice.text).status === "completed");
@@ -1868,6 +2051,17 @@ it.effect(
                 appends.push(event);
               }),
           });
+        const disconnected = yield* make([run.id]);
+        yield* disconnected.seed;
+        yield* disconnected.receive({
+          type: "turn_created",
+          role: "user",
+          turnId: "outage-speech",
+          text: "Keep",
+        });
+        yield* disconnected.poll;
+        expect(appends.filter((event) => event.text.includes("actualAgentResult"))).toHaveLength(0);
+        yield* disconnected.stop;
         const resumed = yield* make([run.id]);
         yield* resumed.seed;
         yield* resumed.poll;

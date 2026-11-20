@@ -6,6 +6,8 @@ import {
   LIVE_VOICE_REQUESTED_MODEL,
   LiveVoiceBinding,
   LiveVoiceResumeRunIds,
+  LiveVoicePreferences,
+  DEFAULT_LIVE_VOICE_PREFERENCES,
   type LiveVoiceReason,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -28,6 +30,9 @@ import { VoiceOwners } from "./owner.ts";
 import { runLiveSession } from "./liveSession.ts";
 import { liveNetworkLayer } from "./liveTransport.ts";
 
+const decodePreferences = Schema.decodeUnknownEffect(Schema.fromJsonString(LiveVoicePreferences), {
+  onExcessProperty: "error",
+});
 const decodeResume = Schema.decodeUnknownEffect(Schema.fromJsonString(LiveVoiceResumeRunIds));
 const decodeBinding = Schema.decodeUnknownEffect(Schema.fromJsonString(LiveVoiceBinding), {
   onExcessProperty: "error",
@@ -82,14 +87,21 @@ export const liveVoiceRouteLayer = Layer.unwrap(
         if (
           query.getAll("threadId").length + query.getAll("draft").length !== 1 ||
           query.getAll("resumeRunIds").length > 1 ||
+          query.getAll("preferences").length > 1 ||
+          (query.get("preferences")?.length ?? 0) > 512 ||
           (query.has("resumeRunIds") &&
             (!query.has("threadId") ||
               new TextEncoder().encode(query.get("resumeRunIds") ?? "").byteLength > 8192)) ||
           [...query.keys()].some(
-            (key) => !["threadId", "draft", "wsTicket", "resumeRunIds"].includes(key),
+            (key) =>
+              !["threadId", "draft", "wsTicket", "resumeRunIds", "preferences"].includes(key),
           )
         )
           return HttpServerResponse.empty({ status: 400 });
+        const preferences = yield* decodePreferences(
+          query.get("preferences") ?? encodeSelection(DEFAULT_LIVE_VOICE_PREFERENCES),
+        ).pipe(Effect.result);
+        if (preferences._tag === "Failure") return HttpServerResponse.empty({ status: 400 });
         const resume = yield* decodeResume(query.get("resumeRunIds") ?? "[]").pipe(Effect.result);
         if (resume._tag === "Failure") return HttpServerResponse.empty({ status: 400 });
         const rawBinding = query.has("threadId")
@@ -178,6 +190,7 @@ export const liveVoiceRouteLayer = Layer.unwrap(
           yield* runLiveSession({
             socket,
             binding,
+            preferences: preferences.success,
             connection,
             modelSelection: selection,
             validateOwner,

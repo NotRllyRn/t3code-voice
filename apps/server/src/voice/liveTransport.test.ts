@@ -38,17 +38,22 @@ it.effect.each(["acknowledged", "timeout", "failure", "defect"] as const)(
       const events: string[] = [];
       const logs: unknown[] = [];
       const cleanup: { result: LiveVoiceCleanupResult } = { result: "unknown" };
-      const call = yield* acquireLiveCall(connection, sdp, cleanup).pipe(
+      const call = yield* acquireLiveCall(connection, sdp, cleanup, {
+        voice: "cove",
+        notifications: "terminal",
+      }).pipe(
         Effect.provideService(Scope.Scope, scope),
         Effect.provideService(LiveNetwork, {
-          create: () =>
-            Effect.succeed({
+          create: (_connection, body) => {
+            expect(JSON.parse(body).session.audio.output).toEqual({ voice: "cove" });
+            return Effect.succeed({
               status: 201,
               location: "/v1/live/owned",
               contentType: "application/sdp",
               retryAfter: null,
               body: Effect.succeed(sdp),
-            }),
+            });
+          },
           sideband: () =>
             Effect.succeed(
               Socket.make({

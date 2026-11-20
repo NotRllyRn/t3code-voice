@@ -2,6 +2,7 @@ import {
   CommandId,
   latestProviderTurnForAttempt,
   type LiveVoiceBinding,
+  type LiveVoicePreferences,
   type LiveVoiceServerEvent,
   type ModelSelection,
   type RunId,
@@ -31,7 +32,6 @@ const stringify = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const terminal = new Set(["completed", "failed", "cancelled", "interrupted", "rolled_back"]);
 const fail = () => new LiveConnectionError({ reason: "incompatible-protocol" });
 const bounded = (value: string, max: number) => Buffer.byteLength(value, "utf8") <= max;
-const HISTORY_IDLE_MS = 10000;
 const PROGRESS_FRESH_MS = 20000;
 const DISCOVERY_BATCH = 8;
 const MAX_PENDING_PARENTS = 32;
@@ -98,6 +98,7 @@ export const sendLiveDelegation = Effect.fn("LiveAgent.sendDelegation")(function
 /** Owns captions and admission, never an executor, provider turn, or approval mechanism. */
 export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input: {
   readonly binding: LiveVoiceBinding;
+  readonly preferences?: LiveVoicePreferences;
   readonly sessionId: string;
   readonly modelSelection?: ModelSelection;
   readonly validateOwner?: Effect.Effect<void, LiveConnectionError>;
@@ -119,6 +120,8 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
   let stopped = false;
   const segments = new Map<"user" | "assistant", Segment>();
   const userTurns = new Map<string, Segment>();
+  const assistantTurns = new Map<string, Segment>();
+  const humanSpeaking = () => segments.get("user")?.nativeDone === false;
   const pending = new Map<string, { event: Delegation; expiresAt: number }>();
   const historyLock = yield* Semaphore.make(1);
   const ids = new Set<string>();
@@ -197,7 +200,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
         ...(role === "assistant" ? { responseId: `live_response_${segment.id}` } : {}),
         textKind: role === "user" ? "final_user_transcript" : "generated_voice_reply",
         transcriptFinality: "application_frozen",
-        delivery: "unknown",
+        delivery: role === "assistant" && !segment.nativeDone ? "interrupted" : "unknown",
       },
     });
     segment.frozen = true;
@@ -303,7 +306,6 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
     // Newer speech is a veto, never authority for an older parent's instruction.
     if (segments.get("user") !== human) return yield* reject(event, "superseded_parent");
     yield* freeze("user", human);
-    yield* freeze("assistant");
     const shell = yield* ensureThread();
     const state = yield* threads.getThreadRecords(shell.id, ["runtimeRequests", "messages"], {
       messageRoles: ["user"],
@@ -357,7 +359,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       runId: sent.run.id,
       messageId: sent.message.id,
     });
-    yield* append(event.delegationId, "speakable", {
+    yield* append(event.delegationId, "quiet", {
       status: sent.delivery,
       runId: sent.run.id,
       messageId: sent.message.id,
@@ -368,6 +370,21 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
     if (stopped) return;
     const now = yield* Clock.currentTimeMillis;
     yield* expirePending(now);
+    if (event.type === "turn_created" && event.role === "assistant") {
+      if (assistantTurns.has(event.turnId)) return;
+      if (assistantTurns.size >= 1024) return yield* fail();
+      let segment = segments.get("assistant");
+      if (segment?.turnId && segment.turnId !== event.turnId) {
+        yield* freeze("assistant", segment);
+        segment = undefined;
+      }
+      if (!segment || segment.frozen) segment = yield* newSegment("assistant", now);
+      segment.turnId = event.turnId;
+      segment.text = event.text || segment.text;
+      assistantTurns.set(event.turnId, segment);
+      yield* caption("assistant", segment);
+      return;
+    }
     if (
       event.type === "turn_created" ||
       event.type === "turn_delta" ||
@@ -412,7 +429,11 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
         if (seen.size >= 4096) return yield* fail();
         seen.add(nativeId);
       }
-      let segment = segments.get(event.role);
+      let segment =
+        event.role === "assistant" && event.type === "turn_done" && nativeId
+          ? (assistantTurns.get(nativeId) ?? segments.get(event.role))
+          : segments.get(event.role);
+      if (event.role === "assistant" && segment?.frozen && segment.turnId === nativeId) return;
       // Native user turn deltas own their text. Transcript items carry no evidenced parent key.
       if (event.role === "user" && segment?.turnId && !segment.nativeDone) return;
       if (
@@ -470,9 +491,6 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
     if (stopped) return;
     const tick = yield* Clock.currentTimeMillis;
     yield* expirePending(tick);
-    for (const [role, segment] of segments)
-      if (role === "assistant" && !segment.frozen && tick - segment.at >= HISTORY_IDLE_MS)
-        yield* freeze(role);
     if (!threadId || !seeded) return;
     const updates = yield* threads.getThreadRecords(threadId, ["runs", "messages"], {
       messageRoles: ["user"],
@@ -528,7 +546,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
           note: "Read full typed request in T3. Already submitted, not a new task or instruction to delegate again.",
         },
       );
-      yield* append(undefined, "speakable", {
+      yield* append(undefined, "quiet", {
         status: "accepted",
         runId: run.id,
         note: "T3 accepted the typed request. Not a completion result.",
@@ -566,6 +584,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       const run = runs.get(current.runId);
       if (!run || run.threadId !== threadId) continue;
       if (records.runtimeRequests.length) {
+        if (humanSpeaking()) continue;
         if (current.status !== "waiting") {
           current.status = "waiting";
           yield* input.send({ type: "live.agent", status: "waiting", runId: run.id });
@@ -623,6 +642,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
         return message.nodeId === null || message.nodeId === run.rootNodeId;
       });
       if (terminal.has(run.status)) {
+        if (humanSpeaking()) continue;
         const explicit = messages.filter(
           (message) => phases.get(message.id)?.phase === "final_answer",
         );
@@ -667,7 +687,13 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
         continue;
       }
       const now = yield* Clock.currentTimeMillis;
-      if (current.progress >= 3 || now - progressAt < PROGRESS_FRESH_MS) continue;
+      if (
+        input.preferences?.notifications !== "progress" ||
+        humanSpeaking() ||
+        current.progress >= 3 ||
+        now - progressAt < PROGRESS_FRESH_MS
+      )
+        continue;
       const candidates = messages.filter(
         (message) =>
           !message.streaming &&

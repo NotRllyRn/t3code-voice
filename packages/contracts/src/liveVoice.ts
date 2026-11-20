@@ -27,6 +27,28 @@ export const LIVE_VOICE_HEARTBEAT_INTERVAL_MS = 15_000;
 export const LIVE_VOICE_HEARTBEAT_TIMEOUT_MS = 45_000;
 export const LIVE_VOICE_STOP_TIMEOUT_MS = 12_000;
 
+// Codex d32063 native v3 (quicksilver=v2) RealtimeVoicesList; speed/tone are not wire controls.
+export const LIVE_VOICE_VOICES = [
+  "juniper",
+  "maple",
+  "spruce",
+  "ember",
+  "vale",
+  "breeze",
+  "arbor",
+  "sol",
+  "cove",
+] as const;
+export const LiveVoicePreferences = Schema.Struct({
+  voice: Schema.Literals(LIVE_VOICE_VOICES),
+  notifications: Schema.Literals(["terminal", "progress"]),
+});
+export type LiveVoicePreferences = typeof LiveVoicePreferences.Type;
+export const DEFAULT_LIVE_VOICE_PREFERENCES: LiveVoicePreferences = {
+  voice: "maple",
+  notifications: "terminal",
+};
+
 export const LiveVoiceCleanupResult = Schema.Literals(["acknowledged", "failed", "unknown"]);
 export type LiveVoiceCleanupResult = typeof LiveVoiceCleanupResult.Type;
 
