@@ -13,6 +13,15 @@
   },
   "intervalSeconds": 300,
   "workerBudgetMinutes": 90,
-  "modelSelection": { "instanceId": "codex", "model": "gpt-6.1-sol" },
-  "instructions": "Use the repository's release instructions. Publish a prerelease only; do not deploy production."
+  "modelSelection": {
+    "instanceId": "codex",
+    "model": "gpt-6-astra",
+    "options": [
+      {
+        "id": "reasoningEffort",
+        "value": "high"
+      }
+    ]
+  },
+  "instructions": "Use gpt-6.1-sol implementation/review/fix loops and council reviews to resolve merge conflicts and verify the release. Follow the repository release instructions. Publish a prerelease only; do not deploy production. Keep the poller standalone; no existing application files should change to support polling."
 }
