@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off -- Offline CLI fixtures use the coordinator's native file and Date boundary.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -22,7 +23,6 @@ try {
     schema: 1,
     upstream: "pingdotgg/t3code",
     fork: "NotRllyRn/t3code-voice",
-    base: "feature/codex-voice-stable",
     tag: "v0.1.10",
     sha: "a".repeat(40),
     releaseId: 42,
@@ -34,6 +34,7 @@ try {
   const replies: Record<string, unknown> = {
     "/releases/latest": {
       draft: false,
+      target_commitish: "main",
       prerelease: false,
       tag_name: candidate.tag,
       id: candidate.releaseId,
@@ -43,13 +44,24 @@ try {
       ref: "refs/tags/v0.1.10",
       object: { type: "commit", sha: candidate.sha },
     },
+    "/git/ref/heads/main": {
+      ref: "refs/heads/main",
+      object: { type: "commit", sha: candidate.sha },
+    },
+    [`/compare/${candidate.sha}...${candidate.sha}`]: { status: "identical" },
     [`/compare/${old}...${candidate.sha}`]: { status: "ahead" },
   };
-  const request = await claimCandidate(candidate, {
+  const payload =
+    process.env.VOICE_UPSTREAM_LEGACY_CANDIDATE === "1"
+      ? { ...candidate, base: "feature/codex-voice-stable" }
+      : candidate;
+  const request = await claimCandidate(payload, {
     stateDir,
     now: new Date(candidate.issuedAt),
     pin: { repository: candidate.upstream, tag: "v0.1.9", commit: old },
     project: { id: "mcp:65bad731-4011-462c-96b6-58b9e4fe1cee", scripts: [], autoPull: false },
+    authorizedProjectId: "mcp:65bad731-4011-462c-96b6-58b9e4fe1cee",
+    approvedBase: { branch: "fix/voice8-footprint", commit: "c".repeat(40) },
     api: async (endpoint) => {
       if (!(endpoint in replies)) throw new Error(`Unexpected fixture endpoint: ${endpoint}`);
       return replies[endpoint];

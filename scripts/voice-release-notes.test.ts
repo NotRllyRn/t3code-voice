@@ -1,4 +1,4 @@
-import { expect, test } from "vitest";
+import { expect, test } from "vite-plus/test";
 import { FORK_RELEASE } from "../packages/shared/src/forkIdentity.ts";
 import { appendVoiceNotes, loadVoiceNotes } from "./voice-release-notes.ts";
 

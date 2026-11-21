@@ -5,5 +5,15 @@
     "types": ["node"],
     "lib": ["ESNext", "esnext.disposable"]
   },
-  "include": ["**/*.ts"]
+  "include": [
+    "**/*.ts",
+    "../apps/desktop/src/updates/voiceMacIdentity.ts",
+    "../apps/desktop/src/updates/voiceMacVersion.ts",
+    "../apps/desktop/src/updates/voiceUpdateConfig.ts",
+    "../packages/shared/src/forkIdentity.ts",
+    "../packages/shared/src/semver.ts",
+    "../packages/shared/src/voiceRelease.ts",
+    "../vite.config.ts",
+    "../infra/task-cache/src/remoteCache.ts"
+  ]
 }

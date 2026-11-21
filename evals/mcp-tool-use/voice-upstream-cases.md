@@ -12,6 +12,7 @@ git archive 3660a1590edc0e834d85d29c9c90686666ba3ca1 \
   scripts/voice-upstream-coordinator.ts scripts/voice-upstream-poll.ts \
   packages/shared/src/forkIdentity.ts |
   tar -x -C "$baseline_source"
+VOICE_UPSTREAM_LEGACY_CANDIDATE=1 \
 VOICE_UPSTREAM_COORDINATOR_SOURCE="$baseline_source/scripts/voice-upstream-coordinator.ts" \
   node evals/mcp-tool-use/voice-upstream-cases.ts > /tmp/voice-upstream-baseline.ndjson
 node evals/mcp-tool-use/voice-upstream-cases.ts > /tmp/voice-upstream-candidate.ndjson
