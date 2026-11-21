@@ -140,29 +140,23 @@ NodeTest.test(
     });
   },
 );
-NodeTest.test(
-  "new releases coalesce while busy then reuse exactly the existing thread/branch",
-  async () => {
-    const f = fixture();
-    await f.run();
-    const branch = f.state.active.branch;
-    f.data.latest = "v1.2.0";
-    await f.run();
-    NodeAssert.equal(f.state.desired.sha, c);
-    NodeAssert.equal(f.data.calls.filter((x) => x.tool === "t3_thread_send").length, 0);
-    f.data.status = "completed";
-    f.data.activeRunId = null;
-    await f.run();
-    const sends = f.data.calls.filter((x) => x.tool === "t3_thread_send");
-    NodeAssert.equal(sends.length, 1);
-    NodeAssert.equal(sends[0].args.threadId, "worker");
-    NodeAssert.equal(sends[0].args.mode, "queue");
-    NodeAssert.equal(f.state.active.branch, branch);
-    NodeAssert.equal(f.state.active.target.sha, c);
-    await f.run();
-    NodeAssert.equal(f.data.calls.filter((x) => x.tool === "t3_thread_send").length, 1);
-  },
-);
+NodeTest.test("new releases immediately steer the busy thread and reuse its branch", async () => {
+  const f = fixture();
+  await f.run();
+  const branch = f.state.active.branch;
+  f.data.latest = "v1.2.0";
+  await f.run();
+  NodeAssert.equal(f.state.desired.sha, c);
+  NodeAssert.equal(f.data.calls.filter((x) => x.tool === "t3_thread_send").length, 1);
+  const sends = f.data.calls.filter((x) => x.tool === "t3_thread_send");
+  NodeAssert.equal(sends.length, 1);
+  NodeAssert.equal(sends[0].args.threadId, "worker");
+  NodeAssert.equal(sends[0].args.mode, "auto");
+  NodeAssert.equal(f.state.active.branch, branch);
+  NodeAssert.equal(f.state.active.target.sha, c);
+  await f.run();
+  NodeAssert.equal(f.data.calls.filter((x) => x.tool === "t3_thread_send").length, 1);
+});
 NodeTest.test("pending send replay stays byte-identical even when upstream changes", async () => {
   const f = fixture();
   await f.run();
@@ -517,4 +511,46 @@ NodeTest.test("pairing approval uses PKCE and stores no token in stdout or argum
   } finally {
     await NodeFSP.rm(dir, { recursive: true, force: true });
   }
+});
+
+NodeTest.test(
+  "merge racing with injection credits the old published target, not the new request",
+  async () => {
+    const f = fixture();
+    await f.run();
+    f.data.latest = "v1.2.0";
+    await f.run();
+    NodeAssert.equal(f.state.active.target.sha, c);
+    NodeAssert.deepEqual(f.state.active.superseded, [{ tag: "v1.1.0", sha: b }]);
+    merged(f);
+    await f.run();
+    f.data.now += 11_000;
+    await f.run();
+    NodeAssert.equal(f.state.accepted.sha, b);
+    NodeAssert.equal(f.state.active.target.sha, c);
+    NodeAssert.equal(f.data.calls.filter((x) => x.tool === "t3_thread_launch").length, 2);
+  },
+);
+NodeTest.test("never retarget an already merged PR while publication is pending", async () => {
+  const f = fixture();
+  await f.run();
+  merged(f);
+  f.data.status = "running";
+  f.data.activeRunId = "run";
+  f.data.latest = "v1.2.0";
+  await f.run();
+  NodeAssert.equal(f.state.desired.sha, c);
+  NodeAssert.equal(f.state.active.target.sha, b);
+  NodeAssert.equal(f.data.calls.filter((x) => x.tool === "t3_thread_send").length, 0);
+});
+NodeTest.test("busy injection dry-run changes neither state nor deliveries", async () => {
+  const f = fixture();
+  await f.run();
+  const before = structuredClone(f.state);
+  const saves = f.data.saves.length;
+  f.data.latest = "v1.2.0";
+  NodeAssert.match(await f.run({ dryRun: true }), /Would inject/);
+  NodeAssert.deepEqual(f.state, before);
+  NodeAssert.equal(f.data.saves.length, saves);
+  NodeAssert.equal(f.data.calls.filter((x) => x.tool === "t3_thread_send").length, 0);
 });
