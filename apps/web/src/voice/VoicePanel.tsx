@@ -1,3 +1,4 @@
+import { T, useGT } from "gt-react";
 import { useAtomValue } from "@effect/atom-react";
 import {
   getEnvironmentLiveVoiceUrl,
@@ -45,6 +46,7 @@ import { acquireLiveVoiceLock } from "./liveVoiceLock";
 import { useLiveVoiceSettings } from "./liveVoiceSettings";
 import { liveCaptionKey, liveCaptions } from "./liveCaptions";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
+import { m } from "../i18n/messages";
 
 interface Props {
   environmentId: EnvironmentId;
@@ -117,6 +119,7 @@ export function LiveVoiceProvider({ children }: { children: ReactNode }) {
     let showingCaptions = false;
     const controller = new LiveVoiceController(
       {
+        resolve: m,
         acquire: acquireLiveVoiceLock,
         media: (options) => browserLiveMedia({ ...options, devices }),
         socket: (url) => new WebSocket(url),
@@ -182,6 +185,7 @@ export function useLiveVoiceSessionActive() {
 }
 
 export function useComposerLiveVoice({ environmentId, threadId, draftId, draft, disabled }: Props) {
+  const gt = useGT();
   const app = useContext(LiveVoiceContext);
   const prepared = Option.getOrNull(usePreparedConnection(environmentId));
   const canOperate = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
@@ -216,21 +220,27 @@ export function useComposerLiveVoice({ environmentId, threadId, draftId, draft, 
     },
   };
   const unavailableReason = occupied
-    ? "Only one Live voice session can run. Stop the current session before starting another thread."
+    ? gt(
+        "Only one Live voice session can run. Stop the current session before starting another thread.",
+      )
     : !supported()
-      ? "Live voice requires a secure desktop browser with WebRTC, Web Locks and microphone support"
+      ? gt(
+          "Live voice requires a secure desktop browser with WebRTC, Web Locks and microphone support",
+        )
       : !canOperate
-        ? "Live voice requires permission to operate this environment"
+        ? gt("Live voice requires permission to operate this environment")
         : !prepared
-          ? "Connect to use live voice"
+          ? gt("Connect to use live voice")
           : !descriptor
-            ? "Waiting for this environment's live voice capabilities"
+            ? gt("Waiting for this environment's live voice capabilities")
             : descriptor.environmentId !== environmentId
-              ? "The environment connection changed. Reconnect and try live voice again."
+              ? gt("The environment connection changed. Reconnect and try live voice again.")
               : !nativeLiveSupported
-                ? "This server does not support native live voice. Update T3 Code on this environment and reconnect."
+                ? gt(
+                    "This server does not support native live voice. Update T3 Code on this environment and reconnect.",
+                  )
                 : disabled
-                  ? "Live voice is unavailable for the current composer"
+                  ? gt("Live voice is unavailable for the current composer")
                   : null;
   return {
     controller,
@@ -244,6 +254,7 @@ export function useComposerLiveVoice({ environmentId, threadId, draftId, draft, 
 }
 
 export function LiveVoiceSessionControls() {
+  const gt = useGT();
   const app = useContext(LiveVoiceContext);
   if (!app?.snapshot.owner || (!isActive(app.snapshot.voice) && !app.snapshot.voice.error))
     return null;
@@ -265,7 +276,7 @@ export function LiveVoiceSessionControls() {
   return (
     <div
       role="region"
-      aria-label="Live voice session"
+      aria-label={gt("Live voice session")}
       className="fixed right-4 top-12 z-50 flex items-center gap-2 rounded-lg border bg-background p-2 shadow-sm"
     >
       {threadId ? (
@@ -274,10 +285,12 @@ export function LiveVoiceSessionControls() {
           params={{ environmentId: target.environmentId, threadId }}
           className="px-2 text-sm underline"
         >
-          Live voice · Open chat
+          <T>Live voice · Open chat</T>
         </Link>
       ) : (
-        <span className="px-2 text-sm">Live voice</span>
+        <span className="px-2 text-sm">
+          <T>Live voice</T>
+        </span>
       )}
       {live.voice.error ? (
         <span role="alert" className="max-w-72 text-sm">
@@ -289,7 +302,7 @@ export function LiveVoiceSessionControls() {
         <Button
           variant="ghost"
           size="icon-sm"
-          aria-label="Dismiss voice error"
+          aria-label={gt("Dismiss voice error")}
           onClick={app.dismiss}
         >
           <XIcon />
@@ -305,6 +318,7 @@ const voiceButtonClassName =
   "inline-flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-full outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-default disabled:opacity-50 sm:size-8 [&_svg]:size-4";
 
 export function ComposerLiveVoiceControls({ live }: { live: LiveVoice }) {
+  const gt = useGT();
   const { voice, controller, allowed, unavailableReason } = live;
   const active = voice.phase !== "idle" && voice.phase !== "error";
   const button = (
@@ -343,7 +357,7 @@ export function ComposerLiveVoiceControls({ live }: { live: LiveVoice }) {
   );
   if (!active)
     return button(
-      "Start live voice",
+      gt("Start live voice"),
       () => void controller?.start(),
       <AudioLinesIcon aria-hidden="true" />,
       { disabled: !allowed, tooltip: unavailableReason },
@@ -354,16 +368,16 @@ export function ComposerLiveVoiceControls({ live }: { live: LiveVoice }) {
     voice.phase === "reconnecting";
   const microphoneLabel =
     voice.phase === "reconnecting"
-      ? `Reconnecting live voice (${voice.recoveryAttempt}/4)`
+      ? gt("Reconnecting live voice ({attempt}/4)", { attempt: voice.recoveryAttempt })
       : voice.phase === "connecting"
-        ? "Connecting live voice"
+        ? gt("Connecting live voice")
         : voice.phase === "refresh_wait"
-          ? "Waiting for provider refresh"
+          ? gt("Waiting for provider refresh")
           : voice.phase === "stopping"
-            ? "Live microphone off"
+            ? gt("Live microphone off")
             : voice.muted
-              ? "Unmute live microphone"
-              : "Mute live microphone";
+              ? gt("Unmute live microphone")
+              : gt("Mute live microphone");
   const busyIcon = (
     <LoaderCircleIcon aria-hidden="true" className="animate-spin motion-reduce:animate-none" />
   );
@@ -385,12 +399,18 @@ export function ComposerLiveVoiceControls({ live }: { live: LiveVoice }) {
           pressed: voice.phase === "connected" ? voice.muted : undefined,
           muted: voice.phase === "connected" && voice.muted,
           tooltip: waiting
-            ? `${microphoneLabel}. Microphone is off; Stop is available.`
+            ? voice.phase === "reconnecting"
+              ? gt("Reconnecting live voice ({attempt}/4). Microphone is off; Stop is available.", {
+                  attempt: voice.recoveryAttempt,
+                })
+              : voice.phase === "connecting"
+                ? gt("Connecting live voice. Microphone is off; Stop is available.")
+                : gt("Waiting for provider refresh. Microphone is off; Stop is available.")
             : microphoneLabel,
         },
       )}
       {button(
-        voice.phase === "stopping" ? "Stopping live voice" : "Stop live voice",
+        voice.phase === "stopping" ? gt("Stopping live voice") : gt("Stop live voice"),
         () => void controller?.stop(),
         voice.phase === "stopping" ? busyIcon : <XIcon aria-hidden="true" />,
         {
@@ -398,8 +418,8 @@ export function ComposerLiveVoiceControls({ live }: { live: LiveVoice }) {
           busy: voice.phase === "stopping",
           tooltip:
             voice.phase === "stopping"
-              ? "Finishing voice cleanup. Microphone and playback are off."
-              : "Stop live voice",
+              ? gt("Finishing voice cleanup. Microphone and playback are off.")
+              : gt("Stop live voice"),
         },
       )}
     </>
@@ -407,6 +427,7 @@ export function ComposerLiveVoiceControls({ live }: { live: LiveVoice }) {
 }
 
 export function ComposerLiveVoiceFeedback({ live }: { live: LiveVoice }) {
+  const gt = useGT();
   const { voice, environmentId, threadId, controller, allowed } = live;
   const active = voice.phase !== "idle" && voice.phase !== "error";
   return (
@@ -414,16 +435,21 @@ export function ComposerLiveVoiceFeedback({ live }: { live: LiveVoice }) {
       <span role="status" className="sr-only">
         {active
           ? voice.phase === "stopping"
-            ? "Stopping voice. Microphone and playback are off."
+            ? gt("Stopping voice. Microphone and playback are off.")
             : voice.phase === "reconnecting"
-              ? `Reconnecting voice, attempt ${voice.recoveryAttempt} of 4. Microphone is off; Stop is available.`
+              ? gt(
+                  "Reconnecting voice, attempt {attempt} of 4. Microphone is off; Stop is available.",
+                  { attempt: voice.recoveryAttempt },
+                )
               : voice.phase === "refresh_wait"
-                ? "Waiting for the selected provider to refresh. You can stop voice at any time."
+                ? gt(
+                    "Waiting for the selected provider to refresh. You can stop voice at any time.",
+                  )
                 : voice.phase !== "connected"
-                  ? "Connecting voice…"
+                  ? gt("Connecting voice…")
                   : voice.muted
-                    ? "Mic muted"
-                    : "Listening"
+                    ? gt("Mic muted")
+                    : gt("Listening")
           : ""}
       </span>
       <span role="alert" className="sr-only">
@@ -435,7 +461,7 @@ export function ComposerLiveVoiceFeedback({ live }: { live: LiveVoice }) {
             render={
               <button
                 type="button"
-                aria-label="Live voice error"
+                aria-label={gt("Live voice error")}
                 className={cn(voiceButtonClassName, "text-destructive hover:bg-destructive/15")}
               />
             }
@@ -443,7 +469,9 @@ export function ComposerLiveVoiceFeedback({ live }: { live: LiveVoice }) {
             <CircleAlertIcon aria-hidden="true" />
           </PopoverTrigger>
           <PopoverPopup side="top" align="end" width="sm" padding="compact">
-            <PopoverTitle>Voice stopped</PopoverTitle>
+            <PopoverTitle>
+              <T>Voice stopped</T>
+            </PopoverTitle>
             <p className="my-2 max-h-40 overflow-y-auto break-words text-sm">{voice.error}</p>
             <Button
               type="button"
@@ -452,7 +480,7 @@ export function ComposerLiveVoiceFeedback({ live }: { live: LiveVoice }) {
               disabled={!allowed || active}
               onClick={() => void controller?.start()}
             >
-              Try voice again
+              <T>Try voice again</T>
             </Button>
           </PopoverPopup>
         </Popover>
@@ -464,14 +492,16 @@ export function ComposerLiveVoiceFeedback({ live }: { live: LiveVoice }) {
               <Link
                 to="/$environmentId/$threadId"
                 params={{ environmentId, threadId: voice.threadId }}
-                aria-label="Open chat (keeps voice)"
+                aria-label={gt("Open chat (keeps voice)")}
                 className={cn(voiceButtonClassName, "text-muted-foreground hover:bg-accent")}
               />
             }
           >
             <MessageSquareIcon aria-hidden="true" />
           </TooltipTrigger>
-          <TooltipPopup>Open chat (keeps voice)</TooltipPopup>
+          <TooltipPopup>
+            <T>Open chat (keeps voice)</T>
+          </TooltipPopup>
         </Tooltip>
       ) : null}
     </>

@@ -34,21 +34,21 @@ describe("Voice release contract", () => {
     expect(FORK_DESKTOP.manualUpdatesOnly).toBe(true);
     expect(FORK_RELEASE).toMatchObject({
       repository: "NotRllyRn/t3code-voice",
-      baseBranch: "feature/codex-voice-stable",
+      baseBranch: "fix/voice8-footprint",
       upstream: {
         repository: "pingdotgg/t3code",
-        tag: "v0.1.10",
-        sha: "7d32075e3757ded707914e2450c3e392a9665765",
+        tag: "v0.1.11",
+        sha: "59651c1761f6c63e9b6056839067066968e6a406",
       },
-      voiceRevision: 8,
+      voiceRevision: 1,
       githubPrerelease: true,
     });
   });
 
   it("increments numeric revisions and resets only for a newer upstream", () => {
-    expect(nextVoiceVersion("0.1.9")).toBe("0.1.9-voice.8");
+    expect(nextVoiceVersion("0.1.9")).toBe("0.1.9-voice.1");
     expect(nextVoiceVersion("0.1.9", "0.1.9-voice.9")).toBe("0.1.9-voice.10");
-    expect(nextVoiceVersion("0.1.10", "0.1.9-voice.10")).toBe("0.1.10-voice.8");
+    expect(nextVoiceVersion("0.1.10", "0.1.9-voice.10")).toBe("0.1.10-voice.1");
     expect(nextVoiceVersion("0.1.8", "0.1.9-voice.1")).toBeNull();
     expect(nextVoiceVersion("0.1.9", "0.1.9-preview.20261116.1")).toBeNull();
   });

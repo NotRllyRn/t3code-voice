@@ -3,7 +3,13 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
+import { FORK_RELEASE } from "../packages/shared/src/forkIdentity.ts";
 import { manifestFromFiles } from "./voice-build-manifest.ts";
+
+const upstreamVersion = FORK_RELEASE.upstream.tag.slice(1);
+const version = `${upstreamVersion}-voice.${FORK_RELEASE.voiceRevision}`;
+const wrongRevision = `${upstreamVersion}-voice.${FORK_RELEASE.voiceRevision + 1}`;
+const wrongVersion = `999.0.0-voice.${FORK_RELEASE.voiceRevision}`;
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -23,12 +29,12 @@ function fixture() {
     protocolSource,
     'export const ORCHESTRATION_PROTOCOL_VERSION = 3;\nexport const VOICE_HISTORY_CAPABILITY = "voiceHistoryV1";\n',
   );
-  const asset = NodePath.join(dir, "t3-0.1.10-voice.6-linux-x64.tar.gz");
+  const asset = NodePath.join(dir, `t3-${version}-linux-x64.tar.gz`);
   NodeFS.writeFileSync(asset, "archive bytes");
   return {
-    repository: "NotRllyRn/t3code-voice",
+    repository: FORK_RELEASE.repository,
     sourceSha: "a".repeat(40),
-    version: "0.1.10-voice.6",
+    version,
     target: "linux-x64" as const,
     assets: [asset],
     smoke: ["archive-layout", "cli-version"],
@@ -57,12 +63,8 @@ it("fails closed for repository, source SHA, version, platform, missing and extr
     "unexpected repository",
   );
   expect(() => manifestFromFiles({ ...input, sourceSha: "a".repeat(39) })).toThrow("source SHA");
-  expect(() => manifestFromFiles({ ...input, version: "0.1.10-voice.2" })).toThrow(
-    "Voice revision",
-  );
-  expect(() => manifestFromFiles({ ...input, version: "0.1.9-voice.1" })).toThrow(
-    "release version",
-  );
+  expect(() => manifestFromFiles({ ...input, version: wrongRevision })).toThrow("Voice revision");
+  expect(() => manifestFromFiles({ ...input, version: wrongVersion })).toThrow("release version");
   expect(() => manifestFromFiles({ ...input, target: "mac-arm64" })).toThrow("missing or excess");
   expect(() => manifestFromFiles({ ...input, assets: [] })).toThrow("missing or excess");
   expect(() =>
@@ -88,7 +90,7 @@ it("requires both macOS artifacts and exact architecture and version", () => {
   const input = fixture();
   const dmg = NodePath.join(
     input.assets[0]!.replace(/t3-.*$/, ""),
-    "T3-Code-Voice-0.1.10-voice.6-arm64.dmg",
+    `T3-Code-Voice-${version}-arm64.dmg`,
   );
   const zip = dmg.replace(/\.dmg$/, ".zip");
   NodeFS.writeFileSync(dmg, "dmg");
@@ -107,5 +109,11 @@ it("requires both macOS artifacts and exact architecture and version", () => {
       ...mac,
       assets: [dmg, zip.replace("arm64", "x64")],
     }),
-  ).toThrow();
+  ).toThrow("unexpected asset");
+  expect(() =>
+    manifestFromFiles({
+      ...mac,
+      assets: [dmg, zip.replace(version, wrongRevision)],
+    }),
+  ).toThrow("unexpected asset");
 });

@@ -42,6 +42,6 @@ Old private bindings are unused; they cannot activate ordinary scheduler tasks. 
 
 ## Local checks
 
-From `packages/shared`, run `vp test run --config ../../vite.config.ts src/voiceRelease.test.ts src/semver.test.ts`. From `scripts`, run `vp test run --config ../vite.config.ts voice-*.test.ts`. These checks use offline synthetic API/webhook/artifact fixtures. Run `vp run check:changed feature/codex-voice-stable` before pushing. No root dependency install or production state is needed for these checks.
+From `packages/shared`, run `vp test run --config ../../vite.config.ts src/voiceRelease.test.ts src/semver.test.ts`. From `scripts`, run `vp test run --config ../vite.config.ts voice-*.test.ts`. These checks use offline synthetic API/webhook/artifact fixtures. Run `vp run check:changed fix/voice8-footprint` before pushing. No root dependency install or production state is needed for these checks.
 
 [Voice upgrade deadline evaluations](../../evals/mcp-tool-use/voice-upstream-cases.md) describe offline prompt fixtures and their limits.

@@ -19,6 +19,8 @@ import {
   type RunId,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
+import { mFallback, msg } from "gt-i18n";
+import type { MFunctionType } from "gt-i18n/types";
 import type { VoiceSocket } from "./media.ts";
 import type { LiveMedia, LiveMediaFactory } from "./liveMedia.ts";
 
@@ -101,6 +103,7 @@ interface Session {
   hadCall: boolean;
 }
 export interface LiveVoiceDependencies {
+  resolve?: MFunctionType;
   media: LiveMediaFactory;
   acquire?(signal: AbortSignal): Promise<(() => void) | null>;
   socket(url: string): VoiceSocket;
@@ -225,7 +228,9 @@ export class LiveVoiceController {
             : "") + reasons[session.stopReason]
         : result === "acknowledged" || !session.hadCall
           ? ""
-          : "Voice stopped. Remote cleanup was not acknowledged.",
+          : (this.deps.resolve ?? mFallback)(
+              msg("Voice stopped. Remote cleanup was not acknowledged."),
+            ),
       reason: session.stopReason,
       cleanupResult: result,
       muted: false,
@@ -321,8 +326,11 @@ export class LiveVoiceController {
         if (!release) {
           this.end("forbidden", true);
           this.update({
-            error:
-              "Live voice is running or finishing cleanup in this or another window. Try again after it stops.",
+            error: (this.deps.resolve ?? mFallback)(
+              msg(
+                "Live voice is running or finishing cleanup in this or another window. Try again after it stops.",
+              ),
+            ),
           });
           return;
         }
