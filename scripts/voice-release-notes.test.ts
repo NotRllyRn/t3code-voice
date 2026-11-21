@@ -31,7 +31,11 @@ test("retains the pinned upstream notes verbatim and appends fork provenance wit
   ]) {
     expect(() => appendVoiceNotes({ ...upstream, ...changed }, version, sha)).toThrow();
   }
-  for (const invalid of [upstreamVersion, wrongRevision, `999.0.0-voice.${FORK_RELEASE.voiceRevision}`])
+  for (const invalid of [
+    upstreamVersion,
+    wrongRevision,
+    `999.0.0-voice.${FORK_RELEASE.voiceRevision}`,
+  ])
     expect(() => appendVoiceNotes(upstream, invalid, sha)).toThrow();
   await expect(
     loadVoiceNotes(version, sha, async (url, init) => {

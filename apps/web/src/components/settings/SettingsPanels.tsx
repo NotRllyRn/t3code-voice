@@ -192,12 +192,15 @@ function AboutVersionSection() {
   const updatesDenial = hasDesktopBridge
     ? managedUpdatesDenial(primaryPolicy, messages)
     : undefined;
-  const manualVoiceUpdates = manualVoiceDesktopUpdate({
-    hasDesktopBridge,
-    updateState,
-    isPending: isUpdateActionPending,
-    denial: updatesDenial,
-  });
+  const manualVoiceUpdates = manualVoiceDesktopUpdate(
+    {
+      hasDesktopBridge,
+      updateState,
+      isPending: isUpdateActionPending,
+      denial: updatesDenial,
+    },
+    messages,
+  );
   const nightlyDeniedBy =
     hasDesktopBridge && primaryPolicy?.limits?.updates?.allowNightly === false
       ? primaryPolicy.organization

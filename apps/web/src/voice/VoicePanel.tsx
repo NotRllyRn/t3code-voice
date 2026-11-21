@@ -46,6 +46,7 @@ import { acquireLiveVoiceLock } from "./liveVoiceLock";
 import { useLiveVoiceSettings } from "./liveVoiceSettings";
 import { liveCaptionKey, liveCaptions } from "./liveCaptions";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
+import { m } from "../i18n/messages";
 
 interface Props {
   environmentId: EnvironmentId;
@@ -118,6 +119,7 @@ export function LiveVoiceProvider({ children }: { children: ReactNode }) {
     let showingCaptions = false;
     const controller = new LiveVoiceController(
       {
+        resolve: m,
         acquire: acquireLiveVoiceLock,
         media: (options) => browserLiveMedia({ ...options, devices }),
         socket: (url) => new WebSocket(url),

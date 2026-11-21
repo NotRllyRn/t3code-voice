@@ -399,7 +399,7 @@ export function ServerUpdateAction({
   }
 
   const manualCommand =
-    selfUpdate === null ? manualServerUpdateCommand(targetVersion, installation) : null;
+    selfUpdate === null ? manualServerUpdateCommand(targetVersion, installation, messages) : null;
   const actionLabel =
     manualCommand !== null
       ? updatesInstall

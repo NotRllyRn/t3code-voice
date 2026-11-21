@@ -63,12 +63,8 @@ it("fails closed for repository, source SHA, version, platform, missing and extr
     "unexpected repository",
   );
   expect(() => manifestFromFiles({ ...input, sourceSha: "a".repeat(39) })).toThrow("source SHA");
-  expect(() => manifestFromFiles({ ...input, version: wrongRevision })).toThrow(
-    "Voice revision",
-  );
-  expect(() => manifestFromFiles({ ...input, version: wrongVersion })).toThrow(
-    "release version",
-  );
+  expect(() => manifestFromFiles({ ...input, version: wrongRevision })).toThrow("Voice revision");
+  expect(() => manifestFromFiles({ ...input, version: wrongVersion })).toThrow("release version");
   expect(() => manifestFromFiles({ ...input, target: "mac-arm64" })).toThrow("missing or excess");
   expect(() => manifestFromFiles({ ...input, assets: [] })).toThrow("missing or excess");
   expect(() =>

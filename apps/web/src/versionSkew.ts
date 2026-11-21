@@ -107,8 +107,14 @@ export function supportsDesktopAppUpdate(
 export function manualServerUpdateCommand(
   targetVersion: string,
   installation?: ServerInstallation,
+  resolve: MessageResolver = m,
 ): string {
-  const voiceCommand = voiceManualServerUpdateCommand(targetVersion, APP_VERSION, installation);
+  const voiceCommand = voiceManualServerUpdateCommand(
+    targetVersion,
+    APP_VERSION,
+    installation,
+    resolve,
+  );
   if (voiceCommand !== null) return voiceCommand;
   const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   if (installation?.kind === "npm-global") {
