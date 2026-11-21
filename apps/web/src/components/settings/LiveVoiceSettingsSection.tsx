@@ -1,3 +1,4 @@
+import { T, useGT } from "gt-react";
 import { MicrophoneTest } from "./MicrophoneTest";
 import { useEffect, useState } from "react";
 import { useStableCallback } from "../../hooks/useStableCallback";
@@ -8,6 +9,7 @@ import { Switch } from "../ui/switch";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 
 export function LiveVoiceSettingsSection() {
+  const gt = useGT();
   const settings = useLiveVoiceSettings();
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const refresh = useStableCallback(async () => {
@@ -45,29 +47,34 @@ export function LiveVoiceSettingsSection() {
         <SelectTrigger size="sm" aria-label={label}>
           <SelectValue>
             {settings[key]
-              ? choices.find((device) => device.deviceId === settings[key])?.label || "Saved device"
-              : "System default"}
+              ? choices.find((device) => device.deviceId === settings[key])?.label ||
+                gt("Saved device")
+              : gt("System default")}
           </SelectValue>
         </SelectTrigger>
         <SelectPopup align="end" alignItemWithTrigger={false}>
-          <SelectItem value="default">System default</SelectItem>
+          <SelectItem value="default">
+            <T>System default</T>
+          </SelectItem>
           {choices.map((device, index) => (
             <SelectItem key={device.deviceId} value={device.deviceId}>
-              {device.label || `${label} ${index + 1}`}
+              {device.label || gt("{label} {number}", { label, number: index + 1 })}
             </SelectItem>
           ))}
           {settings[key] && !choices.some((device) => device.deviceId === settings[key]) ? (
-            <SelectItem value={settings[key]}>Saved device (unavailable)</SelectItem>
+            <SelectItem value={settings[key]}>
+              <T>Saved device (unavailable)</T>
+            </SelectItem>
           ) : null}
         </SelectPopup>
       </Select>
     );
   };
   return (
-    <SettingsSection id="live-voice" title="Live Voice">
+    <SettingsSection id="live-voice" title={gt("Live Voice")}>
       <SettingsRow
-        title="Voice"
-        description="Used for new Live sessions. Dictation settings are separate."
+        title={gt("Voice")}
+        description={gt("Used for new Live sessions. Dictation settings are separate.")}
         control={
           <Select
             value={settings.voice}
@@ -76,7 +83,7 @@ export function LiveVoiceSettingsSection() {
               if (voice) useLiveVoiceSettings.setState({ voice });
             }}
           >
-            <SelectTrigger size="sm" aria-label="Live voice">
+            <SelectTrigger size="sm" aria-label={gt("Live voice")}>
               <SelectValue>{settings.voice}</SelectValue>
             </SelectTrigger>
             <SelectPopup align="end" alignItemWithTrigger={false}>
@@ -90,11 +97,13 @@ export function LiveVoiceSettingsSection() {
         }
       />
       <SettingsRow
-        title="Progress updates"
-        description="Announce completed or blocked tasks and requests for attention. Enable to also hear written progress."
+        title={gt("Progress updates")}
+        description={gt(
+          "Announce completed or blocked tasks and requests for attention. Enable to also hear written progress.",
+        )}
         control={
           <Switch
-            aria-label="Live voice progress updates"
+            aria-label={gt("Live voice progress updates")}
             checked={settings.notifications === "progress"}
             onCheckedChange={(checked) =>
               useLiveVoiceSettings.setState({ notifications: checked ? "progress" : "terminal" })
@@ -103,23 +112,25 @@ export function LiveVoiceSettingsSection() {
         }
       />
       <SettingsRow
-        title="Live microphone"
-        description="The session keeps this microphone across navigation and reconnects. Device names appear after microphone access is granted."
-        control={devicePicker("audioinput", "microphoneId", "Live microphone")}
+        title={gt("Live microphone")}
+        description={gt(
+          "The session keeps this microphone across navigation and reconnects. Device names appear after microphone access is granted.",
+        )}
+        control={devicePicker("audioinput", "microphoneId", gt("Live microphone"))}
       />
       {typeof HTMLMediaElement !== "undefined" && "setSinkId" in HTMLMediaElement.prototype ? (
         <SettingsRow
-          title="Live speaker"
-          description="Changes apply to the next session."
-          control={devicePicker("audiooutput", "speakerId", "Live speaker")}
+          title={gt("Live speaker")}
+          description={gt("Changes apply to the next session.")}
+          control={devicePicker("audiooutput", "speakerId", gt("Live speaker"))}
         />
       ) : null}
       <SettingsRow
-        title="Audio devices"
-        description="Live continues in the background until you stop it or quit the app."
+        title={gt("Audio devices")}
+        description={gt("Live continues in the background until you stop it or quit the app.")}
         control={
           <Button variant="outline" size="sm" onClick={() => void refresh()}>
-            Refresh devices
+            <T>Refresh devices</T>
           </Button>
         }
       />
@@ -136,10 +147,11 @@ export function MicrophoneTestGate({
   microphoneId: string;
   onMicrophoneAccess: () => void;
 }) {
+  const gt = useGT();
   return active ? (
     <SettingsRow
-      title="Microphone test"
-      description="Stop Live voice before testing another microphone."
+      title={gt("Microphone test")}
+      description={gt("Stop Live voice before testing another microphone.")}
     />
   ) : (
     <MicrophoneTest

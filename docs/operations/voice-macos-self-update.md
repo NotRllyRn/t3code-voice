@@ -10,7 +10,7 @@ Provision one persistent code-signing certificate and matching PEM private key s
 
 The optional signer is the official `indygreg/apple-platform-rs` release `apple-codesign/0.29.0`, artifact `apple-codesign-0.29.0-aarch64-apple-darwin.tar.gz` (SHA-256 `d1a532150adaf90048260d76359261aa716abafc45c53c5dc18845029184334a`). Fetch from the official GitHub release, verify the archive checksum, then verify the extracted executable with system `codesign --verify --strict` **before execution**. The build additionally requires its Apple-trusted Developer ID team `MK22MZP987`, exact CDHash `b19a77eacc2cc2c524b3af822ecaa29c33f4d418`, and version `apple-codesign 0.29.0`. Do not install globally. The signer's Apple identity does not notarize our output.
 
-On a macOS arm64 builder, set all four build-time variables, then invoke the existing desktop artifact builder with `--platform mac --arch arm64 --target dmg --signed` and an approved `--version`:
+On a macOS arm64 builder, set all four build-time variables, then invoke the existing desktop artifact builder with `--platform mac --arch arm64 --target dmg --signed` and an approved `--build-version`:
 
 ```sh
 export T3VOICE_MAC_UPDATE_FEED='https://github.com/NotRllyRn/t3code-voice/releases/download/voice-stable/'

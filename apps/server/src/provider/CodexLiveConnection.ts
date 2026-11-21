@@ -76,7 +76,7 @@ const isConnectionError = Schema.is(LiveConnectionError);
 const decodeConfig = Schema.decodeUnknownSync(Config);
 const decodeProvider = Schema.decodeUnknownSync(Provider, { onExcessProperty: "error" });
 
-export function codexLiveCreateUrl(base: string): string {
+function codexLiveCreateUrl(base: string): string {
   const url = new URL(base);
   if (
     base.length > 2048 ||

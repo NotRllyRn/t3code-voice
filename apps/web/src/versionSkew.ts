@@ -8,10 +8,12 @@ import type { ServerUpdateState } from "@t3tools/client-runtime/state/server";
 import { cliReleaseChannelOf } from "@t3tools/shared/cliRelease";
 import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
 import * as Schema from "effect/Schema";
+import { msg } from "gt-react";
 
 import { APP_VERSION } from "./branding";
 import { voiceManualServerUpdateCommand } from "./voice/voiceUpdateCommand";
 import { getLocalStorageItem, setLocalStorageItem } from "./hooks/useLocalStorage";
+import { m, type MessageResolver } from "./i18n/messages";
 
 export interface VersionMismatch {
   readonly clientVersion: string;
@@ -49,6 +51,7 @@ function versionCore(version: string): string {
 export function resolveVersionMismatch(
   serverVersion: string | null | undefined,
   clientVersion: string = APP_VERSION,
+  resolve: MessageResolver = m,
 ): VersionMismatch | null {
   const normalizedClientVersion = normalizeVersion(clientVersion);
   const normalizedServerVersion = normalizeVersion(serverVersion);
@@ -76,14 +79,17 @@ export function resolveVersionMismatch(
   return {
     clientVersion: normalizedClientVersion,
     serverVersion: normalizedServerVersion,
-    hint: "Version mismatch. Try syncing the client and server to the same T3 Code version.",
+    hint: resolve(
+      msg("Version mismatch. Try syncing the client and server to the same T3 Code version."),
+    ),
   };
 }
 
 export function resolveServerConfigVersionMismatch(
   serverConfig: Pick<ServerConfig, "environment"> | null | undefined,
+  resolve: MessageResolver = m,
 ): VersionMismatch | null {
-  return resolveVersionMismatch(serverConfig?.environment.serverVersion);
+  return resolveVersionMismatch(serverConfig?.environment.serverVersion, APP_VERSION, resolve);
 }
 
 export function resolveServerSelfUpdateCapability(

@@ -6,7 +6,6 @@ import {
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
-export const NATIVE_LIVE_ALPHA_HEADER = "quicksilver=v2";
 export const NATIVE_LIVE_MAX_FRAME_BYTES = 128 * 1024;
 export const NATIVE_LIVE_APPEND_CHUNK_BYTES = 500;
 export const NATIVE_LIVE_MAX_CONTEXT_BYTES = 32 * 1024;
