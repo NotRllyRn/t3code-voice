@@ -10,11 +10,22 @@ export async function githubApi(path) {
     const paged = path.includes("per_page=100");
     const { stdout } = await execute(
       "gh",
-      ["api", "--hostname", "github.com", ...(paged ? ["--paginate", "--slurp"] : []), path],
+      [
+        "api",
+        "--hostname",
+        "github.com",
+        ...(paged ? ["--paginate", "--jq", ".[] | @json"] : []),
+        path,
+      ],
       { timeout: 30_000, maxBuffer: 16 * 1024 * 1024 },
     );
-    const result = JSON.parse(stdout);
-    return paged ? result.flat() : result;
+    return paged
+      ? stdout
+          .trim()
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => JSON.parse(line))
+      : JSON.parse(stdout);
   } catch {
     // A subprocess error includes its environment/arguments on some runtimes.
     throw new Error(

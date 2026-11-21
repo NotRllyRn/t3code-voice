@@ -406,7 +406,7 @@ NodeTest.test(
       await mkdir(bin);
       await NodeFSP.writeFile(
         NodePath.join(bin, "gh"),
-        `#!/usr/bin/env node\nconst fs=require('fs');fs.writeFileSync(process.env.POLLER_FIXTURE_PID,String(process.ppid));const p=process.argv.at(-1);let r;if(p.endsWith('/releases/latest'))r={tag_name:'v1.1.0',target_commitish:'main',draft:false,prerelease:false};else if(p.includes('/git/ref/tags/')){const t=p.split('/tags/')[1];r={ref:'refs/tags/'+t,object:{type:'commit',sha:t==='v1.0.0'?'${a}':'${b}'}};}else if(p.includes('/commits/'))r={sha:'${c}'};else if(p.includes('/compare/'))r={status:'ahead'};else if(p.includes('/pulls?'))r=[];else r={};console.log(JSON.stringify(process.argv.includes('--slurp')?[r]:r));\n`,
+        `#!/usr/bin/env node\nconst fs=require('fs');fs.writeFileSync(process.env.POLLER_FIXTURE_PID,String(process.ppid));const p=process.argv.at(-1);let r;if(p.endsWith('/releases/latest'))r={tag_name:'v1.1.0',target_commitish:'main',draft:false,prerelease:false};else if(p.includes('/git/ref/tags/')){const t=p.split('/tags/')[1];r={ref:'refs/tags/'+t,object:{type:'commit',sha:t==='v1.0.0'?'${a}':'${b}'}};}else if(p.includes('/commits/'))r={sha:'${c}'};else if(p.includes('/compare/'))r={status:'ahead'};else if(p.includes('/pulls?'))r=[];else r={};if(process.argv.includes('--slurp'))process.exit(1);if(process.argv.includes('--paginate')){for(const item of r)console.log(JSON.stringify(item));}else console.log(JSON.stringify(r));\n`,
         { mode: 0o700 },
       );
       const cfg = {
