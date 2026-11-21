@@ -1,5 +1,7 @@
 # Experimental Voice releases and upstream automation
 
+For local polling and agent-driven prereleases without GitHub workflows, see [Local release poller](local-release-poller.md).
+
 This fork uses `U-voice.R`: `U` is a pinned, stable upstream version and `R` is a positive Voice revision. For example, `0.1.9-voice.1` → `0.1.9-voice.2` → `0.1.10-voice.1`. The pin and channel policy live in [`forkIdentity.ts`](../../packages/shared/src/forkIdentity.ts). Voice versions are SemVer prereleases, not build metadata. The current experimental channel requires GitHub `prerelease: true`; changing that policy needs a reviewed consumer compatibility change. It does not mean upstream stable releases belong in a Voice feed.
 
 Only the exact installed `0.1.9-preview.20261116.1` preview is an allowed legacy current version. Persistently signed macOS builds support native ZIP/feed updates through the Voice feed; the manual ARM64 DMG path remains available. Voice.6 was verified through pristine public .4 → .6 and local .5 → .6 upgrades. Each later release still needs its own packaged acceptance. Keychain requests were denied in those isolated fixtures, so encrypted credential continuity remains unverified. macOS private self-signing is not Apple-trusted Developer ID signing or notarization. This release targets macOS and its matching server/web client. Fork mobile/iOS work is deferred; upstream mobile source is retained.

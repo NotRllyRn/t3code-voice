@@ -1,0 +1,18 @@
+{
+  "upstream": "example/upstream",
+  "fork": "example/fork",
+  "upstreamBranch": "main",
+  "baseBranch": "main",
+  "projectId": "replace-with-project-id",
+  "endpoint": "http://127.0.0.1:3773/mcp",
+  "authorizationFile": "authorization.txt",
+  "stateFile": "state.json",
+  "accepted": {
+    "tag": "v1.0.0",
+    "sha": "0000000000000000000000000000000000000000"
+  },
+  "intervalSeconds": 300,
+  "workerBudgetMinutes": 90,
+  "modelSelection": { "instanceId": "codex", "model": "gpt-6.1-sol" },
+  "instructions": "Use the repository's release instructions. Publish a prerelease only; do not deploy production."
+}
