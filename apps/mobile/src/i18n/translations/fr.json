@@ -840,6 +840,8 @@
   "ade1c07a7b86bc75": "Exécution de l’action de gestion de versions",
   "bd89398fa7d11169": "Échec de l’action de gestion de versions.",
   "fac0a7eeb4021001": "Exécution de {hook}...",
+  "0438581ab348645a": "Voix arrêtée. Le nettoyage distant n’a pas été confirmé.",
+  "c1ec7c26b17956e4": "La voix en direct est active ou termine son nettoyage dans cette fenêtre ou une autre. Réessayez après son arrêt.",
   "8822e2c36699fc5d": "L’accès au micro est nécessaire pour la saisie vocale. Autorisez-le dans les paramètres de votre navigateur ou de votre système, puis réessayez.",
   "124a9122bc3ecf5c": "La transcription vocale n’est pas encore terminée. Réessayez dans un instant.",
   "a4727d05b33fe336": "La transcription vocale n’est pas disponible pour cette langue.",

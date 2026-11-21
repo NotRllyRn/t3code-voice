@@ -840,6 +840,8 @@
   "ade1c07a7b86bc75": "Ejecutando la acción de control de versiones",
   "bd89398fa7d11169": "Falló la acción de control de versiones.",
   "fac0a7eeb4021001": "Ejecutando {hook}...",
+  "0438581ab348645a": "Voz detenida. No se confirmó la limpieza remota.",
+  "c1ec7c26b17956e4": "La voz en directo está activa o terminando la limpieza en esta u otra ventana. Inténtalo de nuevo cuando se detenga.",
   "8822e2c36699fc5d": "La entrada de voz necesita acceso al micrófono. Permite el acceso en los ajustes del navegador o del sistema y vuelve a intentarlo.",
   "124a9122bc3ecf5c": "La transcripción de voz aún está terminando. Vuelve a intentarlo en breve.",
   "a4727d05b33fe336": "La transcripción de voz no está disponible para este idioma.",
