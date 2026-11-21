@@ -34,7 +34,7 @@ describe("Voice release contract", () => {
     expect(FORK_DESKTOP.manualUpdatesOnly).toBe(true);
     expect(FORK_RELEASE).toMatchObject({
       repository: "NotRllyRn/t3code-voice",
-      baseBranch: "feature/codex-voice-stable",
+      baseBranch: "fix/voice8-footprint",
       upstream: {
         repository: "pingdotgg/t3code",
         tag: "v0.1.11",

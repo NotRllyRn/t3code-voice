@@ -17,7 +17,7 @@ export const FORK_DESKTOP = {
 
 export const FORK_RELEASE = {
   repository: "NotRllyRn/t3code-voice",
-  baseBranch: "feature/codex-voice-stable",
+  baseBranch: "fix/voice8-footprint",
   upstream: {
     repository: "pingdotgg/t3code",
     tag: "v0.1.11",

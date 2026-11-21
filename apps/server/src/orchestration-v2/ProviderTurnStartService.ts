@@ -578,7 +578,11 @@ export const layer: Layer.Layer<
       const isSideChatHandoff = (handoff: OrchestrationV2ContextHandoff) =>
         projection.thread.lineage.sideChat === true &&
         ContextHandoffService.isSideChatContextHandoff(handoff);
-      const eligibleVoiceHandoff = voiceHistoryHandoffFilter(run, projection.runs);
+      const eligibleVoiceHandoff = voiceHistoryHandoffFilter(
+        run,
+        projection.runs,
+        projection.turnItems,
+      );
       const handoffs = projection.contextHandoffs.filter(
         (handoff) =>
           !isSideChatHandoff(handoff) &&
@@ -1003,7 +1007,11 @@ export const layer: Layer.Layer<
         return undefined;
       });
       let effectiveHandoffs = handoffs;
-      const eligibleVoiceHistoryItem = voiceHistoryItemFilter(run, projection.runs);
+      const eligibleVoiceHistoryItem = voiceHistoryItemFilter(
+        run,
+        projection.runs,
+        projection.turnItems,
+      );
       let resumeFellBack = false;
       const userText = withMessageSenderNote(
         providerMessage,
@@ -1997,6 +2005,7 @@ export const layer: Layer.Layer<
         run,
         providerThread: runningProviderThread,
         runs: projection.runs,
+        turnItems: projection.turnItems,
         contextHandoffs: projection.contextHandoffs,
         effectiveHandoffs,
         alreadyDeliveredItemIds: deliveredItemIds,
