@@ -82,20 +82,21 @@ export const makeVoiceCommandHandlers = <ProjectionError, DispatchError>({
     messageIds: ReadonlyArray<MessageId>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
   ) {
-    // The normal command projection deliberately excludes assistant messages.
-    const records = yield* projectionStore
-      .getThreadRecords(projection.thread.id, ["messages", "turnItems"], {
-        messageIds,
-        turnItemIds: messageIds.map(voiceTurnItemId),
-      })
-      .pipe(
-        // A child thread can be created and dispatched in the same command, before
-        // projection persistence. Its validated projection and records are in events below.
-        Effect.catchTags({
-          ProjectionStoreThreadNotFoundError: () => Effect.succeed({ messages: [], turnItems: [] }),
-        }),
-        Effect.mapError((cause) => projectionError({ threadId: projection.thread.id, cause })),
-      );
+    const pending = yield* Ref.get(events);
+    const isNewThread = pending.some(
+      (event) => event.type === "thread.created" && event.threadId === projection.thread.id,
+    );
+    // Command projections omit assistant messages; newly created threads have only pending records.
+    const records = isNewThread
+      ? { messages: [], turnItems: [] }
+      : yield* projectionStore
+          .getThreadRecords(projection.thread.id, ["messages", "turnItems"], {
+            messageIds,
+            turnItemIds: messageIds.map(voiceTurnItemId),
+          })
+          .pipe(
+            Effect.mapError((cause) => projectionError({ threadId: projection.thread.id, cause })),
+          );
     let result: OrchestrationV2ThreadProjection = {
       ...projection,
       messages: [
@@ -112,7 +113,7 @@ export const makeVoiceCommandHandlers = <ProjectionError, DispatchError>({
         ).values(),
       ],
     };
-    for (const event of yield* Ref.get(events)) {
+    for (const event of pending) {
       if (event.threadId === projection.thread.id) result = applyToProjection(result, event);
     }
     return result;

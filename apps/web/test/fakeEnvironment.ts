@@ -45,6 +45,7 @@ import type {
 import type { WsRpcProtocolClient } from "@t3tools/client-runtime/rpc";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
 import { APP_VERSION } from "~/branding";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -67,7 +68,12 @@ const descriptor = {
   // A matching version, since a mismatch adds an update banner a typical user never sees.
   serverVersion: APP_VERSION,
   orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
-  capabilities: { repositoryIdentity: true, sideChats: true, freshContext: true },
+  capabilities: {
+    repositoryIdentity: true,
+    sideChats: true,
+    freshContext: true,
+    voiceHistoryV1: true,
+  },
 };
 const auth = {
   policy: "loopback-browser",
@@ -605,6 +611,8 @@ export function installFakeEnvironment(
     readonly providers?: ReadonlyArray<unknown>;
   },
 ): Disposable {
+  // Imported app modules and earlier tests can leave a connection to an older environment alive.
+  appAtomRegistry.reset();
   threads = fixtures;
   baseServerConfig = {
     ...makeServerConfig(

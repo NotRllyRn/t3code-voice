@@ -91,6 +91,11 @@ it.effect.each(["queue_after_active", "start_immediately"] as const)(
       yield* orchestrator.dispatch(command);
       const firstReads = [...reads];
       expect(firstReads).toEqual([
+        {
+          type: "records",
+          fields: ["turnItems"],
+          filter: { turnItemTypes: ["user_message"], turnItemStatuses: ["pending"] },
+        },
         expect.objectContaining({
           type: "records",
           filter: expect.objectContaining({
@@ -126,7 +131,7 @@ it.effect.each(["queue_after_active", "start_immediately"] as const)(
       reads.length = 0;
       const replayCommandId = CommandId.make(`canonical-replay:${mode}`);
       yield* orchestrator.dispatch({ ...command, commandId: replayCommandId });
-      expect(reads).toEqual(firstReads.slice(0, 2));
+      expect(reads).toEqual(firstReads.slice(0, 3));
       const acknowledgment = yield* events
         .readByCommandId({ commandId: replayCommandId })
         .pipe(Stream.runCollect);
@@ -150,6 +155,11 @@ it.effect.each(["queue_after_active", "start_immediately"] as const)(
         dispatchMode: { type: "queue_after_active" },
       });
       expect(reads).toEqual([
+        {
+          type: "records",
+          fields: ["turnItems"],
+          filter: { turnItemTypes: ["user_message"], turnItemStatuses: ["pending"] },
+        },
         expect.objectContaining({
           type: "records",
           filter: expect.objectContaining({
