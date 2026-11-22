@@ -488,8 +488,10 @@ export function ComposerLiveVoiceControls({
             className={cn(
               voiceButtonClassName,
               props.muted
-                ? "bg-destructive/15 text-destructive hover:bg-destructive/25"
-                : "bg-message-action text-message-action-foreground hover:bg-message-action-hover",
+                ? "border border-border bg-muted text-foreground hover:bg-accent"
+                : active
+                  ? "text-muted-foreground hover:bg-accent hover:text-foreground"
+                  : "bg-message-action text-message-action-foreground hover:bg-message-action-hover",
             )}
           >
             {icon}
