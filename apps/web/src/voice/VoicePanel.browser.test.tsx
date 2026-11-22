@@ -34,6 +34,7 @@ import {
   ComposerLiveVoiceControls,
   ComposerLiveVoiceFeedback,
   useComposerLiveVoice,
+  useLiveVoiceTargetActive,
 } from "./VoicePanel";
 
 async function renderVoice(ui: ReactNode, options?: RenderOptions) {
@@ -148,9 +149,15 @@ function VoiceComposer({
       : undefined,
     disabled: disabled || provider !== "codex",
   });
+  const targetActive = useLiveVoiceTargetActive({
+    environmentId: EnvironmentId.make(environment),
+    threadId: scratch ? undefined : ThreadId.make(owner),
+    draftId: scratch ? "draft_voice" : undefined,
+  });
   const active = live.voice.phase !== "idle" && live.voice.phase !== "error";
   return (
     <form
+      data-live-target-active={targetActive}
       className="m-4 max-w-120 rounded-2xl border border-border bg-background p-3 text-foreground"
       onSubmit={(event) => event.preventDefault()}
     >
@@ -459,8 +466,11 @@ it.each(["link", "sidebar", "redirect"] as const)(
           params: { environmentId: "env_voice", threadId },
         }),
       );
+    expect(screen.container.querySelector("form")?.dataset.liveTargetActive).toBe("false");
     await userEvent.click(screen.getByRole("button", { name: "Start live voice" }));
     await h.connect();
+    expect(screen.container.querySelector("form")?.dataset.liveTargetActive).toBe("true");
+    await expect.element(screen.getByRole("textbox")).toBeEnabled();
     const url = new URL(String(h.socketFactory.mock.calls[0]![0]));
     expect(url.pathname).toBe("/api/voice/live");
     expect(url.searchParams.has("continuous")).toBe(false);
@@ -479,6 +489,7 @@ it.each(["link", "sidebar", "redirect"] as const)(
       await act(() => store.finalizePromotedDraftThread(draftId));
     }
     await expect.element(screen.getByRole("button", { name: "Stop live voice" })).toBeVisible();
+    expect(screen.container.querySelector("form")?.dataset.liveTargetActive).toBe("true");
     expect(h.attempts[0]!.value.dispose).not.toHaveBeenCalled();
     expect(h.audio).toHaveBeenCalledTimes(1);
     expect(h.sockets[0]!.close).not.toHaveBeenCalled();
@@ -493,6 +504,7 @@ it.each(["link", "sidebar", "redirect"] as const)(
     expect(h.attempts[0]!.value.dispose).not.toHaveBeenCalled();
     expect(store.getComposerDraft(ref)?.prompt).toBe("Keep unsent text");
     await navigateThread("unrelated_thread");
+    expect(screen.container.querySelector("form")?.dataset.liveTargetActive).toBe("false");
     expect(h.attempts[0]!.value.stopAudio).not.toHaveBeenCalled();
     await expect.element(screen.getByRole("button", { name: "Start live voice" })).toBeDisabled();
     await navigateThread("created_thread");
@@ -774,8 +786,15 @@ it("keeps the original muted session across navigation and backgrounding", async
   await screen.rerender(<LiveVoiceSessionControls />);
   await expect.element(screen.getByRole("region", { name: "Live voice session" })).toBeVisible();
   await expect
-    .element(screen.getByRole("link", { name: "Live voice · Open chat" }))
+    .element(screen.getByRole("link", { name: "Open chat", exact: true }))
     .toHaveAttribute("href", "/env_voice/thread_1");
+  await act(() => screen.router!.navigate({ to: "/env_voice/thread_1" }));
+  expect(screen.getByRole("region", { name: "Live voice session" }).query()).toBeNull();
+  await act(() => screen.router!.navigate({ to: "/env_other/thread_1" }));
+  await expect.element(screen.getByRole("region", { name: "Live voice session" })).toBeVisible();
+  await expect
+    .element(screen.getByRole("button", { name: "Unmute live microphone" }))
+    .toBeVisible();
   await userEvent.click(screen.getByRole("button", { name: "Stop live voice" }));
   expect(h.attempts[1]!.value.stopAudio).toHaveBeenCalledTimes(1);
   await act(() =>

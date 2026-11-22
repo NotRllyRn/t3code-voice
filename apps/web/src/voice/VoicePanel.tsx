@@ -19,7 +19,7 @@ import {
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import { Link } from "@tanstack/react-router";
+import { Link, useLocation } from "@tanstack/react-router";
 import {
   readPreparedConnection,
   useEnvironmentScope,
@@ -47,6 +47,7 @@ import { useLiveVoiceSettings } from "./liveVoiceSettings";
 import { liveCaptionKey, liveCaptions } from "./liveCaptions";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { m } from "../i18n/messages";
+import { matchesLiveVoiceTarget, liveVoiceTargetIsViewed } from "./liveVoicePresentation";
 
 interface Props {
   environmentId: EnvironmentId;
@@ -184,6 +185,19 @@ export function useLiveVoiceSessionActive() {
   return !!app && isActive(app.snapshot.voice);
 }
 
+export function useLiveVoiceTargetActive(target: {
+  environmentId: EnvironmentId;
+  threadId?: ThreadId | undefined;
+  draftId?: string | undefined;
+}) {
+  const app = useContext(LiveVoiceContext);
+  return (
+    !!app?.snapshot.owner &&
+    isActive(app.snapshot.voice) &&
+    matchesLiveVoiceTarget(app.snapshot.owner.target, app.snapshot.voice, target)
+  );
+}
+
 export function useComposerLiveVoice({ environmentId, threadId, draftId, draft, disabled }: Props) {
   const gt = useGT();
   const app = useContext(LiveVoiceContext);
@@ -194,10 +208,12 @@ export function useComposerLiveVoice({ environmentId, threadId, draftId, draft, 
     descriptor?.environmentId === environmentId && supportsEnvironmentNativeLiveVoice(descriptor);
   const target = app?.snapshot.owner?.target;
   const matches =
-    target?.environmentId === environmentId &&
-    (threadId
-      ? (app?.snapshot.voice.threadId ?? target.threadId) === threadId
-      : !!draftId && target.draftId === draftId);
+    !!target &&
+    matchesLiveVoiceTarget(target, app!.snapshot.voice, {
+      environmentId,
+      threadId,
+      draftId,
+    });
   const occupied = !!app && isActive(app.snapshot.voice) && !matches;
   const voice = matches ? app!.snapshot.voice : INITIAL_LIVE_VOICE_STATE;
   const allowed =
@@ -256,9 +272,11 @@ export function useComposerLiveVoice({ environmentId, threadId, draftId, draft, 
 export function LiveVoiceSessionControls() {
   const gt = useGT();
   const app = useContext(LiveVoiceContext);
+  const pathname = useLocation({ select: (location) => location.pathname });
   if (!app?.snapshot.owner || (!isActive(app.snapshot.voice) && !app.snapshot.voice.error))
     return null;
   const { target, controller } = app.snapshot.owner;
+  if (liveVoiceTargetIsViewed(target, app.snapshot.voice, pathname)) return null;
   const threadId = app.snapshot.voice.threadId ?? target.threadId;
   const live = {
     controller: {
@@ -274,42 +292,83 @@ export function LiveVoiceSessionControls() {
     threadId,
   };
   return (
-    <div
-      role="region"
+    <section
       aria-label={gt("Live voice session")}
-      className="fixed right-4 top-12 z-50 flex items-center gap-2 rounded-lg border bg-background p-2 shadow-sm"
+      className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-t bg-background px-3 py-1.5 text-xs [-webkit-app-region:no-drag] sm:px-4"
     >
-      {threadId ? (
-        <Link
-          to="/$environmentId/$threadId"
-          params={{ environmentId: target.environmentId, threadId }}
-          className="px-2 text-sm underline"
-        >
-          <T>Live voice · Open chat</T>
-        </Link>
-      ) : (
-        <span className="px-2 text-sm">
-          <T>Live voice</T>
-        </span>
-      )}
+      <AudioLinesIcon aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
+      <span className="min-w-0 flex-1 truncate text-muted-foreground" role="status">
+        <T>Live</T> · {liveVoiceStatus(live.voice, gt)}
+      </span>
+      <div className="flex shrink-0 items-center gap-1">
+        {threadId ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            render={
+              <Link
+                to="/$environmentId/$threadId"
+                params={{ environmentId: target.environmentId, threadId }}
+              />
+            }
+          >
+            <MessageSquareIcon aria-hidden="true" />
+            <T>Open chat</T>
+          </Button>
+        ) : target.draftId ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            render={
+              <Link to="/draft/$draftId" params={{ draftId: DraftId.make(target.draftId) }} />
+            }
+          >
+            <MessageSquareIcon aria-hidden="true" />
+            <T>Open chat</T>
+          </Button>
+        ) : null}
+        {live.sessionActive ? (
+          <ComposerLiveVoiceControls live={live} compact />
+        ) : (
+          <>
+            <Button size="sm" variant="ghost" onClick={live.controller.start}>
+              <T>Try voice again</T>
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label={gt("Dismiss voice error")}
+              onClick={app.dismiss}
+            >
+              <XIcon aria-hidden="true" />
+            </Button>
+          </>
+        )}
+      </div>
       {live.voice.error ? (
-        <span role="alert" className="max-w-72 text-sm">
+        <p role="alert" className="w-full break-words text-destructive">
           {live.voice.error}
-        </span>
+        </p>
       ) : null}
-      <ComposerLiveVoiceControls live={live} />
-      {!live.sessionActive ? (
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label={gt("Dismiss voice error")}
-          onClick={app.dismiss}
-        >
-          <XIcon />
-        </Button>
-      ) : null}
-    </div>
+    </section>
   );
+}
+
+function liveVoiceStatus(voice: LiveVoiceState, gt: ReturnType<typeof useGT>) {
+  switch (voice.phase) {
+    case "connecting":
+      return gt("Connecting voice…");
+    case "reconnecting":
+      return gt("Reconnecting live voice ({attempt}/4)", { attempt: voice.recoveryAttempt });
+    case "refresh_wait":
+      return gt("Waiting for provider refresh");
+    case "stopping":
+      return gt("Stopping live voice");
+    case "connected":
+      return voice.muted ? gt("Mic muted") : gt("Listening");
+    default:
+      return gt("Voice stopped");
+  }
 }
 
 type LiveVoice = ReturnType<typeof useComposerLiveVoice>;
@@ -317,7 +376,13 @@ type LiveVoice = ReturnType<typeof useComposerLiveVoice>;
 const voiceButtonClassName =
   "inline-flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-full outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-default disabled:opacity-50 sm:size-8 [&_svg]:size-4";
 
-export function ComposerLiveVoiceControls({ live }: { live: LiveVoice }) {
+export function ComposerLiveVoiceControls({
+  live,
+  compact = false,
+}: {
+  live: LiveVoice;
+  compact?: boolean;
+}) {
   const gt = useGT();
   const { voice, controller, allowed, unavailableReason } = live;
   const active = voice.phase !== "idle" && voice.phase !== "error";
@@ -335,22 +400,37 @@ export function ComposerLiveVoiceControls({ live }: { live: LiveVoice }) {
   ) => (
     <Tooltip>
       <TooltipTrigger render={<span className="inline-flex" />}>
-        <button
-          type="button"
-          aria-label={label}
-          aria-pressed={props.pressed}
-          aria-busy={props.busy || undefined}
-          disabled={props.disabled}
-          onClick={action}
-          className={cn(
-            voiceButtonClassName,
-            props.muted
-              ? "bg-destructive/15 text-destructive hover:bg-destructive/25"
-              : "bg-message-action text-message-action-foreground hover:bg-message-action-hover",
-          )}
-        >
-          {icon}
-        </button>
+        {compact ? (
+          <Button
+            type="button"
+            variant={props.muted ? "destructive-outline" : "ghost"}
+            size="icon-sm"
+            aria-label={label}
+            aria-pressed={props.pressed}
+            aria-busy={props.busy || undefined}
+            disabled={props.disabled}
+            onClick={action}
+          >
+            {icon}
+          </Button>
+        ) : (
+          <button
+            type="button"
+            aria-label={label}
+            aria-pressed={props.pressed}
+            aria-busy={props.busy || undefined}
+            disabled={props.disabled}
+            onClick={action}
+            className={cn(
+              voiceButtonClassName,
+              props.muted
+                ? "bg-destructive/15 text-destructive hover:bg-destructive/25"
+                : "bg-message-action text-message-action-foreground hover:bg-message-action-hover",
+            )}
+          >
+            {icon}
+          </button>
+        )}
       </TooltipTrigger>
       <TooltipPopup>{props.tooltip ?? label}</TooltipPopup>
     </Tooltip>
@@ -432,6 +512,9 @@ export function ComposerLiveVoiceFeedback({ live }: { live: LiveVoice }) {
   const active = voice.phase !== "idle" && voice.phase !== "error";
   return (
     <>
+      {active ? (
+        <span className="px-1 text-xs text-muted-foreground">{liveVoiceStatus(voice, gt)}</span>
+      ) : null}
       <span role="status" className="sr-only">
         {active
           ? voice.phase === "stopping"

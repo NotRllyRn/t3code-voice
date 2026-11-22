@@ -1,3 +1,4 @@
+import { useLiveVoiceTargetActive } from "../voice/VoicePanel";
 import { m } from "../i18n/messages";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { useGT, useMessages } from "gt-react";
@@ -1656,14 +1657,21 @@ export default function ChatView(props: ChatViewProps) {
   const [dockedDraftHeroThreadKey, setDockedDraftHeroThreadKey] = useState<string | null>(null);
   const draftHeroDockRequested =
     activeThreadKey !== null && dockedDraftHeroThreadKey === activeThreadKey;
-  const isDraftHeroState = resolveDraftHeroState({
-    isLocalDraftThread,
-    hasTimelineEntries: !timelineEmpty,
-    isWorking,
-    draftHeroDockRequested,
-    backgroundSubmissionPending,
-    hasWorktreeSetupCard: worktreeSetup !== null,
+  const liveVoiceActive = useLiveVoiceTargetActive({
+    environmentId,
+    threadId: isServerThread ? activeThread?.id : undefined,
+    draftId: draftId ?? undefined,
   });
+  const isDraftHeroState =
+    !liveVoiceActive &&
+    resolveDraftHeroState({
+      isLocalDraftThread,
+      hasTimelineEntries: !timelineEmpty,
+      isWorking,
+      draftHeroDockRequested,
+      backgroundSubmissionPending,
+      hasWorktreeSetupCard: worktreeSetup !== null,
+    });
   const {
     transitionGroupRef: draftHeroTransitionGroupRef,
     composerAnchorRef: draftHeroComposerAnchorRef,
@@ -3602,7 +3610,7 @@ export default function ChatView(props: ChatViewProps) {
                   onIsAtEndChange={onIsAtEndChangeStable}
                   onViewportAttach={attachTimelineViewport}
                   onFooterGrow={onTimelineFooterGrowStable}
-                  hideEmptyPlaceholder={isDraftHeroState || threadDetailLoading}
+                  hideEmptyPlaceholder={isDraftHeroState || threadDetailLoading || liveVoiceActive}
                   emptyPlaceholderInset={composerReservedHeight}
                   topFadeEnabled={!hasTimelineTopBanner}
                   {...(threadHistoryControls === undefined
