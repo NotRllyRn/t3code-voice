@@ -203,7 +203,16 @@ if [ "$1" = --version ]; then printf 1.2.3; exit; fi
 [ "$1" = __ssh-helper ]
 case "$2" in
   update-remaining) printf 'marker %s\\n' "$(cat "$HOME/clock")" >> "$HOME/events"; exec "$TEST_REAL_NODE" --require "$HOME/clock.cjs" "$HOME/helper.ts" "$2" "$3" ;;
-  home-owned) exec "$TEST_REAL_NODE" "$HOME/helper.ts" "$2" "$3" ;;
+  home-owned)
+    # This fixture holds the same lock until runLauncher returns; probe the real CLI once.
+    if [ ! -e "$HOME/home-owned-status" ]; then
+      if "$TEST_REAL_NODE" "$HOME/helper.ts" "$2" "$3"; then
+        printf 0 > "$HOME/home-owned-status"
+      else
+        printf '%s' "$?" > "$HOME/home-owned-status"
+      fi
+    fi
+    exit "$(cat "$HOME/home-owned-status")" ;;
   runtime-port | pick-port | wait-ready) exec "$HOME/bin/test-node" - "$3" ;;
   *) exit 1 ;;
 esac

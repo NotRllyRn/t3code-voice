@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - Release CLI reads the operator-supplied notes file with Node.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeURL from "node:url";
 import { FORK_RELEASE } from "../packages/shared/src/forkIdentity.ts";

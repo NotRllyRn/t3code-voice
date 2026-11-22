@@ -1,3 +1,5 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Match the launcher's native path without adding a service dependency.
+import * as NodePath from "node:path";
 import { LIVE_VOICE_PROTOCOL, LIVE_VOICE_REQUESTED_MODEL } from "@t3tools/contracts";
 import { tokenizeCliArgs } from "@t3tools/shared/cliArgs";
 import { stableStringify } from "@t3tools/shared/relaySigning";
@@ -76,7 +78,7 @@ const isConnectionError = Schema.is(LiveConnectionError);
 const decodeConfig = Schema.decodeUnknownSync(Config);
 const decodeProvider = Schema.decodeUnknownSync(Provider, { onExcessProperty: "error" });
 
-export function codexLiveCreateUrl(base: string): string {
+function codexLiveCreateUrl(base: string): string {
   const url = new URL(base);
   if (
     base.length > 2048 ||
@@ -131,7 +133,22 @@ export const makeCodexLiveConnection = Effect.fn("CodexLiveConnection.make")(fun
           const args = tokenizeCliArgs(input.launchArgs);
           if (input.launchArgs.trim() && args.length === 0)
             throw new LiveConnectionError({ reason: "unsupported-provider" });
-          if (args.length > 0) {
+          const marketplaceSource = NodePath.join(
+            input.homePath,
+            ".tmp",
+            "bundled-marketplaces",
+            "openai-bundled",
+          );
+          const marketplacePath = "marketplaces.openai-bundled.source";
+          const hasOwnedMarketplace =
+            args[0] === "-c" &&
+            args[1] === `${marketplacePath}=${stableStringify(marketplaceSource)}`;
+          if (hasOwnedMarketplace) {
+            expectedSession.marketplaces = { "openai-bundled": { source: marketplaceSource } };
+            expectedOrigins.add(marketplacePath);
+          }
+          const ownerArgs = hasOwnedMarketplace ? args.slice(2) : args;
+          if (ownerArgs.length > 0) {
             const provider = decodeProvider(config.config.model_providers[key]);
             const destination = {
               name: provider.name,
@@ -147,10 +164,10 @@ export const makeCodexLiveConnection = Effect.fn("CodexLiveConnection.make")(fun
                 value,
               ]),
             ]);
-            if (args.length !== overrides.size * 2)
+            if (ownerArgs.length !== overrides.size * 2)
               throw new LiveConnectionError({ reason: "unsupported-provider" });
-            for (let index = 0; index < args.length; index += 2) {
-              const assignment = args[index + 1] ?? "";
+            for (let index = 0; index < ownerArgs.length; index += 2) {
+              const assignment = ownerArgs[index + 1] ?? "";
               const equals = assignment.indexOf("=");
               const path = assignment.slice(0, equals).trim();
               const value = assignment.slice(equals + 1).trim();
@@ -163,7 +180,7 @@ export const makeCodexLiveConnection = Effect.fn("CodexLiveConnection.make")(fun
                     (value === stableStringify(expected) ||
                       (!expected.includes("'") && value === `'${expected}'`) ||
                       value === expected);
-              if (args[index] !== "-c" || equals < 1 || !matches || !overrides.delete(path))
+              if (ownerArgs[index] !== "-c" || equals < 1 || !matches || !overrides.delete(path))
                 throw new LiveConnectionError({ reason: "unsupported-provider" });
               expectedOrigins.add(path);
             }

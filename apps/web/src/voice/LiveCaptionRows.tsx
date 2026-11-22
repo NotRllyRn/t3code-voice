@@ -1,3 +1,4 @@
+import { T, useGT } from "gt-react";
 import { useEffect, useSyncExternalStore, type ReactNode } from "react";
 import type { TimelineEntry } from "../session-logic";
 import { liveCaptionKey, liveCaptions } from "./liveCaptions";
@@ -7,10 +8,11 @@ export interface LiveCaptionScope {
   threadId?: string | undefined;
   draftId?: string | undefined;
 }
-export function useLiveCaptionRows(
+function useLiveCaptionRows(
   scope: LiveCaptionScope | undefined,
   canonicalMessageIds: ReadonlySet<string>,
 ) {
+  const gt = useGT();
   const snapshot = useSyncExternalStore(liveCaptions.subscribe, liveCaptions.getSnapshot);
   const key = scope
     ? liveCaptionKey(scope.environmentId, scope.threadId, scope.draftId)
@@ -29,11 +31,11 @@ export function useLiveCaptionRows(
   );
   if (captions.length === 0 && !snapshot.overflow) return null;
   return (
-    <section aria-label="Live voice captions" className="messages-timeline-row-frame">
+    <section aria-label={gt("Live voice captions")} className="messages-timeline-row-frame">
       <div className="chat-content-lane space-y-3 py-3">
         {snapshot.overflow ? (
           <p role="status" className="text-xs text-muted-foreground">
-            Earlier live previews are no longer shown. Captions are not final transcripts.
+            <T>Earlier live previews are no longer shown. Captions are not final transcripts.</T>
           </p>
         ) : null}
         {captions.map((caption) => (
@@ -42,7 +44,9 @@ export function useLiveCaptionRows(
             data-live-caption={caption.role}
           >
             <p className="text-xs text-muted-foreground">
-              {caption.role === "user" ? "You" : "Assistant"} · Live caption · not final
+              {caption.role === "user"
+                ? gt("You · Live caption · not final")
+                : gt("Assistant · Live caption · not final")}
             </p>
             <p className="whitespace-pre-wrap break-words text-sm">{caption.text}</p>
           </div>

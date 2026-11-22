@@ -17,13 +17,13 @@ export const FORK_DESKTOP = {
 
 export const FORK_RELEASE = {
   repository: "NotRllyRn/t3code-voice",
-  baseBranch: "feature/codex-voice-stable",
+  baseBranch: "fix/voice8-footprint",
   upstream: {
     repository: "pingdotgg/t3code",
-    tag: "v0.1.10",
-    sha: "7d32075e3757ded707914e2450c3e392a9665765",
+    tag: "v0.1.11",
+    sha: "59651c1761f6c63e9b6056839067066968e6a406",
   },
-  voiceRevision: 8,
+  voiceRevision: 1,
   githubPrerelease: true,
 } as const;
 

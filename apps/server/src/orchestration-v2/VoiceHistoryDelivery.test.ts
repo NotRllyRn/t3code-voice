@@ -1,12 +1,23 @@
 import { expect, it } from "@effect/vitest";
-import { CommandId, ContextHandoffId, MessageId, RunId, ThreadId } from "@t3tools/contracts";
+import {
+  CommandId,
+  ContextHandoffId,
+  MessageId,
+  RunId,
+  ScheduledTaskId,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { vi } from "vite-plus/test";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import { recordVoiceMessage } from "./VoiceConversation.ts";
 import { create, layer, projectId, voice } from "./VoiceConversation.testkit.ts";
-import { voiceHistoryHandoffFilter } from "./VoiceHistory.ts";
+import {
+  voiceHistoryBoundaryOrdinal,
+  voiceHistoryHandoffFilter,
+  voiceHistoryItemFilter,
+} from "./VoiceHistory.ts";
 import { prepareVoiceHistoryHandoffs } from "./VoiceHistoryDelivery.ts";
 
 const fixture = Effect.fn("VoiceHistoryDelivery.test.fixture")(function* () {
@@ -33,7 +44,7 @@ const fixture = Effect.fn("VoiceHistoryDelivery.test.fixture")(function* () {
     creationSource: "web",
   });
   const store = yield* ProjectionStore.ProjectionStoreV2;
-  const records = yield* store.getThreadRecords(threadId, ["runs", "providerThreads"]);
+  const records = yield* store.getThreadRecords(threadId, ["runs", "providerThreads", "turnItems"]);
   const getThreadRecords = vi.fn(store.getThreadRecords);
   const persist = vi.fn(() => Effect.void);
   return {
@@ -41,6 +52,7 @@ const fixture = Effect.fn("VoiceHistoryDelivery.test.fixture")(function* () {
     run,
     providerThread: records.providerThreads.find((thread) => thread.id === run.providerThreadId)!,
     runs: records.runs,
+    turnItems: records.turnItems,
     contextHandoffs: [],
     effectiveHandoffs: [],
     alreadyDeliveredItemIds: new Set<string>(),
@@ -130,14 +142,74 @@ it.effect("saved handoff eligibility uses run ordinals, independently of item cu
       id: RunId.make("clear"),
       ordinal: 5,
       freshContext: true,
+      status: "completed" as const,
       voiceHistoryCutoffOrdinal: 500,
     };
     const after = { ...input.run, id: RunId.make("after-clear"), ordinal: 6 };
     const current = { ...input.run, ordinal: 10 };
-    const eligible = voiceHistoryHandoffFilter(current, [before, fresh, after, current]);
+    const eligible = voiceHistoryHandoffFilter(
+      current,
+      [before, fresh, after, current],
+      input.turnItems,
+    );
     expect(eligible({ ...handoff!, targetRunId: before.id })).toBe(false);
     expect(eligible({ ...handoff!, targetRunId: fresh.id })).toBe(false);
     expect(eligible({ ...handoff!, targetRunId: after.id })).toBe(true);
+    const voiceItem = input.turnItems.find((item) => item.voice !== undefined)!;
+    for (const [kind, status, startedAt, cutsHistory] of [
+      ["scheduled", "completed", null, false],
+      ["queued", "queued", null, false],
+      ["cancelled", "cancelled", null, false],
+      ["started-cancelled", "cancelled", fresh.requestedAt, true],
+      ["rolled-back", "rolled_back", fresh.requestedAt, true],
+    ] as const) {
+      const source = {
+        ...fresh,
+        userMessageId: MessageId.make("fresh-prompt"),
+        status,
+        startedAt,
+      };
+      const turnItems =
+        kind === "scheduled" && voiceItem.type === "user_message"
+          ? [
+              ...input.turnItems,
+              {
+                ...voiceItem,
+                messageId: source.userMessageId,
+                scheduledTaskId: ScheduledTaskId.make("task"),
+              },
+            ]
+          : input.turnItems;
+      const runs = [before, source, after, current];
+      expect(voiceHistoryBoundaryOrdinal(current, runs, turnItems), kind).toBe(
+        cutsHistory ? 500 : 0,
+      );
+      const prepared = yield* prepareVoiceHistoryHandoffs({
+        ...input,
+        run: current,
+        runs,
+        turnItems,
+      });
+      expect(
+        prepared.flatMap((saved) => saved.history?.messages ?? []).map((message) => message.text),
+        kind,
+      ).toEqual(cutsHistory ? [] : ["RECORDED_CONVERSATION"]);
+      expect(voiceHistoryItemFilter(current, runs, turnItems)(voiceItem), kind).toBe(!cutsHistory);
+      expect(
+        voiceHistoryHandoffFilter(
+          current,
+          runs,
+          turnItems,
+        )({ ...handoff!, targetRunId: before.id }),
+        kind,
+      ).toBe(!cutsHistory);
+      expect(voiceHistoryItemFilter(source, runs, turnItems)(voiceItem), kind).toBe(false);
+      expect(
+        voiceHistoryHandoffFilter(source, runs, turnItems)({ ...handoff!, targetRunId: before.id }),
+        kind,
+      ).toBe(false);
+    }
+
     expect(
       eligible({
         ...handoff!,

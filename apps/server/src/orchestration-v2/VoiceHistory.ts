@@ -13,6 +13,7 @@ import {
   type OrchestrationV2VoiceMessage,
 } from "@t3tools/contracts";
 import { historicalMessage } from "@t3tools/provider-core/server/handoffBudget";
+import { contextBoundaryOrdinal } from "./contextBoundary.ts";
 
 export function voiceMessageId(
   role: "user" | "assistant",
@@ -35,38 +36,49 @@ export function voiceTurnItemId(messageId: MessageId): TurnItemId {
   return TurnItemId.make(`turn-item:voice:${messageId}`);
 }
 
+function voiceHistoryBoundaryRun(
+  run: OrchestrationV2Run,
+  runs: ReadonlyArray<OrchestrationV2Run>,
+  turnItems: ReadonlyArray<OrchestrationV2TurnItem>,
+): OrchestrationV2Run | undefined {
+  const boundary = contextBoundaryOrdinal({
+    runs: runs.filter((source) => source.ordinal <= run.ordinal),
+    turnItems,
+  });
+  return runs.find((source) => source.ordinal === boundary);
+}
+
 export function voiceHistoryBoundaryOrdinal(
   run: OrchestrationV2Run,
   runs: ReadonlyArray<OrchestrationV2Run>,
+  turnItems: ReadonlyArray<OrchestrationV2TurnItem>,
 ): number {
-  return (
-    runs.findLast((source) => source.freshContext === true && source.ordinal <= run.ordinal)
-      ?.voiceHistoryCutoffOrdinal ?? 0
-  );
+  return voiceHistoryBoundaryRun(run, runs, turnItems)?.voiceHistoryCutoffOrdinal ?? 0;
 }
 
 /** Saved handoffs use run ordinals; transcript reads use item ordinals. */
 export function voiceHistoryHandoffFilter(
   run: OrchestrationV2Run,
   runs: ReadonlyArray<OrchestrationV2Run>,
+  turnItems: ReadonlyArray<OrchestrationV2TurnItem>,
 ): (handoff: OrchestrationV2ContextHandoff) => boolean {
-  const boundary =
-    runs.findLast((source) => source.freshContext === true && source.ordinal <= run.ordinal)
-      ?.ordinal ?? 0;
+  const boundary = voiceHistoryBoundaryRun(run, runs, turnItems)?.ordinal ?? 0;
   const eligibleRunIds = new Set(
     runs.filter((source) => source.ordinal > boundary).map((source) => source.id),
   );
   return (handoff) =>
-    !handoff.id.startsWith("context-handoff:voice:") || eligibleRunIds.has(handoff.targetRunId);
+    !handoff.id.startsWith("context-handoff:voice:") ||
+    (run.freshContext !== true && eligibleRunIds.has(handoff.targetRunId));
 }
 
 /** Shares voice boundaries across normal, retry and recovery paths without changing nonvoice history. */
 export function voiceHistoryItemFilter(
   run: OrchestrationV2Run,
   runs: ReadonlyArray<OrchestrationV2Run>,
+  turnItems: ReadonlyArray<OrchestrationV2TurnItem>,
 ): (item: OrchestrationV2TurnItem) => boolean {
   const cutoff = run.voiceHistoryCutoffOrdinal;
-  const boundary = voiceHistoryBoundaryOrdinal(run, runs);
+  const boundary = voiceHistoryBoundaryOrdinal(run, runs, turnItems);
   const rolledBack = new Set(
     runs.filter((source) => source.status === "rolled_back").map((source) => source.id),
   );
@@ -85,12 +97,13 @@ export function voiceHistoryHandoff(input: {
   readonly run: OrchestrationV2Run;
   readonly providerThread: OrchestrationV2ProviderThread;
   readonly items: ReadonlyArray<OrchestrationV2TurnItem>;
+  readonly turnItems: ReadonlyArray<OrchestrationV2TurnItem>;
   readonly runs: ReadonlyArray<OrchestrationV2Run>;
   readonly alreadyDeliveredItemIds?: ReadonlySet<string>;
   readonly nativeInputRunIds?: ReadonlySet<string>;
 }): OrchestrationV2ContextHandoff | null {
   const { run, providerThread } = input;
-  const eligible = voiceHistoryItemFilter(run, input.runs);
+  const eligible = voiceHistoryItemFilter(run, input.runs, input.turnItems);
   const runStatuses = new Map(input.runs.map((source) => [source.id, source.status]));
   const messages = input.items
     .filter(eligible)

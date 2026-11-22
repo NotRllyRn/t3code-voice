@@ -12,7 +12,7 @@ const history = Effect.gen(function* () {
   return rows.map((row) => [row.migration_id, row.name] as const);
 });
 
-it.effect.each([67, 81, 88])("preserves saved conversation data at migration %s", (id) =>
+it.effect.each([67, 81, 88, 97])("preserves saved conversation data at migration %s", (id) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     yield* runMigrations({ toMigrationInclusive: id });
@@ -55,6 +55,14 @@ it.effect.each([67, 81, 88])("preserves saved conversation data at migration %s"
     }
     assert.deepStrictEqual((yield* history).slice(0, beforeHistory.length), beforeHistory);
     assert.deepStrictEqual(yield* runMigrations(), []);
+    const issueTables = yield* sql<{ name: string }>`
+      SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'issue_tracker_bindings'
+    `;
+    assert.deepStrictEqual(issueTables, [{ name: "issue_tracker_bindings" }]);
+    const generationColumns = yield* sql<{ name: string }>`
+      SELECT name FROM pragma_table_info('scheduled_tasks') WHERE name = 'task_generation'
+    `;
+    assert.deepStrictEqual(generationColumns, [{ name: "task_generation" }]);
     const columns = yield* sql<{ name: string }>`
         SELECT name FROM pragma_table_info('projection_projects')
       `;

@@ -1,7 +1,9 @@
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Path from "effect/Path";
 import * as Redacted from "effect/Redacted";
 import { makeCodexLiveConnection } from "./CodexLiveConnection.ts";
+import { codexHomeLaunchArgs } from "./Drivers/CodexHomeLayout.ts";
 import sessionConfig from "./testFixtures/codex-0.166.0-live-config.json" with { type: "json" };
 import normalizedConfig from "./testFixtures/codex-0.169.0-live-config.json" with { type: "json" };
 
@@ -121,6 +123,64 @@ it.effect("binds owner destination args to effective config and selected-home cr
       .pipe(Effect.result);
     expect(missing._tag).toBe("Failure");
     if (missing._tag === "Failure") expect(missing.failure.reason).toBe("auth-required");
+  }),
+);
+
+it.effect("accepts only the generated selected-home marketplace override", () =>
+  Effect.gen(function* () {
+    const path = yield* Path.Path.pipe(Effect.provide(Path.layer));
+    const marketplace = {
+      "openai-bundled": { source: "/fixture/shadow/.tmp/bundled-marketplaces/openai-bundled" },
+    };
+    for (const launchArgs of ["", ownerArgs]) {
+      const original = launchArgs ? ownerConfig() : sessionConfig;
+      const generatedArgs = codexHomeLaunchArgs(
+        path,
+        {
+          mode: "authOverlay",
+          sharedHomePath: "/fixture/shared",
+          effectiveHomePath: "/fixture/shadow",
+          continuationKey: "codex:home:/fixture/shared",
+        },
+        launchArgs,
+      );
+      const config = {
+        ...original,
+        config: { ...original.config, marketplaces: marketplace },
+        origins: {
+          ...original.origins,
+          "marketplaces.openai-bundled.source": sessionConfig.origins.thread_unload_delay_secs,
+        },
+        layers: [
+          {
+            ...original.layers[0],
+            config: { ...original.layers[0]!.config, marketplaces: marketplace },
+          },
+          ...original.layers.slice(1),
+        ],
+      };
+      for (const args of [
+        generatedArgs,
+        generatedArgs.replace("/fixture/shadow/.tmp/", "/fixture/other/.tmp/"),
+        `${generatedArgs} -c env.SELECTED_KEY=poison`,
+        `${generatedArgs} -c 'marketplaces.openai-bundled.source="/poison"'`,
+      ]) {
+        const result = yield* (yield* makeCodexLiveConnection({
+          homePath: "/fixture/shadow",
+          launchArgs: args,
+          environment: { SELECTED_KEY: "fictional-owner-key" },
+          readConfig: Effect.succeed(Redacted.make(config)),
+        }))
+          .resolveLiveConnection()
+          .pipe(Effect.result);
+        expect(result._tag).toBe(args === generatedArgs ? "Success" : "Failure");
+        if (result._tag === "Success") {
+          expect(result.success.createUrl).toBe("https://relay.example.test/prefix/v1/live");
+        } else {
+          expect(result.failure.reason).toBe("unsupported-provider");
+        }
+      }
+    }
   }),
 );
 

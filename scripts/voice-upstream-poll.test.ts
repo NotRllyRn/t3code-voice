@@ -1,3 +1,4 @@
+// @effect-diagnostics globalDate:off - Poll fixtures use the sender protocol’s native Date boundary.
 // @effect-diagnostics nodeBuiltinImport:off -- Runs the real Node CLI and bundle in isolated filesystem and subprocess fixtures.
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";

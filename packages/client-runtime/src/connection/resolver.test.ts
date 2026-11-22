@@ -108,6 +108,8 @@ const makeDependencies = Effect.fn("TestConnectionResolver.makeDependencies")((o
           },
         })),
     authorizeDpopHttp: () => Effect.die("unused"),
+    authorizeDirectDpop: () => Effect.die("unused"),
+    authorizeDirectDpopHttp: () => Effect.die("unused"),
     rememberCheckedDescriptor: () => Effect.void,
     renewDpopBeforeExpiry: () => Effect.die("unused"),
   });
@@ -213,7 +215,7 @@ describe("ConnectionResolver", () => {
           platform: { os: "linux", arch: "x64" },
           serverVersion: "0.0.0-test",
           orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
-          capabilities: { repositoryIdentity: true },
+          capabilities: { repositoryIdentity: true, voiceHistoryV1: true },
         },
       });
     }),

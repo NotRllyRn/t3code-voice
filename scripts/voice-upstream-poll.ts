@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// @effect-diagnostics nodeBuiltinImport:off globalConsole:off - Standalone sender uses native files and stdout without an Effect runtime.
 
 import * as NodeFSP from "node:fs/promises";
 import { FORK_RELEASE } from "../packages/shared/src/forkIdentity.ts";

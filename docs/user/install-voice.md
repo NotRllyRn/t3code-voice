@@ -112,11 +112,14 @@ keep backups containing secrets private.
 
 Keep the previous release untouched. Migrate a copy of the stopped backup into
 a separate private state directory using the new release; never share a state
-directory between two running servers. Migration head is **97**. Synthetic
-**67→97**, **81→97** and **88→97** checks preserve saved conversation payloads;
+directory between two running servers. Migration head is **103**. Synthetic
+**67→103**, **81→103**, **88→103** and **97→103** checks preserve saved conversation payloads;
 these do not prove every production data shape or safe downgrades. Compare the
 installed migration IDs/names and schema with the source at its recorded head
-before cutover; the head number alone does not prove compatibility. Before
+before cutover; the head number alone does not prove compatibility. Voice.8
+keeps `97_ScheduledTaskGeneration`; upstream issue-tracker bindings run at
+`103_IssueTrackerBindings`. Stock upstream databases are not an in-place
+Voice upgrade path. Before
 cutover, confirm history, provider paths and first paired connection with the
 intended service account; fresh pairing may be needed for a new isolated profile.
 For rollback, stop the new server, restore the **matching pre-upgrade state,
