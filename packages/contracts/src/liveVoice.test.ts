@@ -20,6 +20,8 @@ describe("Live control boundary", () => {
     { type: "live.stop" },
     { type: "live.mute", muted: true },
     { type: "live.heartbeat" },
+    { type: "live.preferences", notifications: "terminal" },
+    { type: "live.preferences", notifications: "progress" },
   ])("decodes the bounded control $type", (event) => {
     expect(decodeLiveVoiceClientEvent(JSON.stringify(event))).toEqual(event);
   });
@@ -33,6 +35,10 @@ describe("Live control boundary", () => {
     { type: "live.peer", attemptId: "attempt-1", state: "connected", delegationId: "task-1" },
     { type: "delegation.created", item: {} },
     { type: "live.mute", muted: "true" },
+    { type: "live.preferences" },
+    { type: "live.preferences", notifications: "all" },
+    { type: "live.preferences", notifications: "progress", voice: "cove" },
+    { type: "live.preferences", notifications: "terminal", microphoneId: "other" },
     { type: "live.stop", session: { headers: { authorization: "fictional-poison-key" } } },
     { type: "live.start", attemptId: "../bad", offerSdp },
     { type: "live.start", attemptId: "attempt-1", offerSdp: "not SDP" },

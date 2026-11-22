@@ -148,6 +148,10 @@ export const LiveVoiceClientEvent = Schema.Union([
   Schema.Struct({ type: Schema.Literal("live.stop") }),
   Schema.Struct({ type: Schema.Literal("live.mute"), muted: Schema.Boolean }),
   Schema.Struct({ type: Schema.Literal("live.heartbeat") }),
+  Schema.Struct({
+    type: Schema.Literal("live.preferences"),
+    notifications: LiveVoicePreferences.fields.notifications,
+  }),
 ]);
 export type LiveVoiceClientEvent = typeof LiveVoiceClientEvent.Type;
 

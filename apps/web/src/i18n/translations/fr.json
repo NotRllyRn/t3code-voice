@@ -8757,7 +8757,7 @@
   "e6403036195bac15": "Utilisé pour les nouvelles sessions en direct. Les paramètres de dictée sont distincts.",
   "e21b730fdb820984": "Voix en direct",
   "4f1e4339f5b9884c": "Lire la progression à voix haute",
-  "5cc8d9b17c246a49": "Lit les mises à jour écrites pendant les nouvelles sessions en direct. Les tâches terminées ou bloquées et les demandes d’attention restent annoncées lorsque cette option est désactivée.",
+  "75a532d6f4c5734d": "Lit les mises à jour écrites pendant les sessions en direct. Les modifications s’appliquent immédiatement. Les tâches terminées ou bloquées et les demandes d’attention restent annoncées lorsque cette option est désactivée.",
   "a4a22c20ff4c20e1": "Microphone en direct",
   "e35bb5831b46c6c8": "La session conserve ce microphone lors de la navigation et des reconnexions. Les noms des appareils apparaissent une fois l’accès au microphone autorisé.",
   "5eb0aa61b4817a74": "Haut-parleur en direct",

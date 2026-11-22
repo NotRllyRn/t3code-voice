@@ -805,3 +805,40 @@ test("keeps ownership until a cancelled microphone acquisition has released its 
   await second.controller.start();
   expect(second.urls).toHaveLength(1);
 });
+
+test("keeps latest notification policy through authorization, active updates and recovery", async () => {
+  vi.useFakeTimers();
+  try {
+    using h = harness();
+    h.controller.setNotifications("terminal");
+    await h.controller.start();
+    h.controller.setNotifications("progress");
+    h.controller.setNotifications("terminal");
+    expect(h.socket.sent).toEqual([]);
+    h.authorize();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.socket.sent[0]).toEqual({ type: "live.preferences", notifications: "terminal" });
+    h.answer();
+    h.attempts[0]!.options.peer("connected");
+    h.connected();
+    await vi.advanceTimersByTimeAsync(0);
+    h.controller.setNotifications("progress");
+    h.controller.setNotifications("progress");
+    expect(h.socket.sent.filter((event) => event.type === "live.preferences")).toEqual([
+      { type: "live.preferences", notifications: "terminal" },
+      { type: "live.preferences", notifications: "progress" },
+    ]);
+    h.socket.close();
+    h.controller.setNotifications("terminal");
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(h.socket.sent).toEqual([]);
+    h.authorize();
+    expect(h.socket.sent[0]).toEqual({ type: "live.preferences", notifications: "terminal" });
+    h.controller.stop();
+    const sent = h.socket.sent.length;
+    h.controller.setNotifications("progress");
+    expect(h.socket.sent).toHaveLength(sent);
+  } finally {
+    vi.useRealTimers();
+  }
+});

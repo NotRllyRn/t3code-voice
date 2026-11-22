@@ -99,7 +99,7 @@ export function LiveVoiceSettingsSection() {
       <SettingsRow
         title={gt("Read progress aloud")}
         description={gt(
-          "Read written progress during new Live sessions. Completed or blocked tasks and requests for attention are still announced when this is off.",
+          "Read written progress during Live sessions. Changes apply immediately. Completed or blocked tasks and requests for attention are still announced when this is off.",
         )}
         control={
           <Switch

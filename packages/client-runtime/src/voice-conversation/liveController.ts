@@ -13,6 +13,7 @@ import {
   type LiveVoiceCleanupResult,
   type LiveVoiceClientEvent,
   type LiveVoicePhase,
+  type LiveVoicePreferences,
   type LiveVoiceReason,
   type LiveVoiceServerEvent,
   ThreadId,
@@ -127,6 +128,7 @@ export class LiveVoiceController {
     else release();
   }
   private wantedMuted = false;
+  private wantedNotifications: LiveVoicePreferences["notifications"] | undefined;
   private recoveryAttempt = 0;
   private recoveryDeadline = 0;
   private recoveryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -389,6 +391,13 @@ export class LiveVoiceController {
       if (!session.sessionId) {
         if (event.type !== "live.status") throw Error("Missing authorization");
         session.sessionId = event.sessionId;
+        if (
+          !session.stopping &&
+          this.wantedNotifications !== undefined &&
+          (event.phase === "connecting" || event.phase === "refresh_wait")
+        ) {
+          this.send(session, { type: "live.preferences", notifications: this.wantedNotifications });
+        }
         if (event.phase === "connecting" && this.state.muted) {
           this.send(session, { type: "live.mute", muted: true });
         }
@@ -590,6 +599,17 @@ export class LiveVoiceController {
       }
     } catch {
       if (this.alive(session, attempt)) this.end("playback-blocked");
+    }
+  }
+  setNotifications(notifications: LiveVoicePreferences["notifications"]) {
+    if (this.disposed || this.wantedNotifications === notifications) return;
+    this.wantedNotifications = notifications;
+    const session = this.session;
+    if (!session || !this.alive(session) || !session.sessionId) return;
+    try {
+      this.send(session, { type: "live.preferences", notifications });
+    } catch {
+      this.end("disconnected");
     }
   }
   mute() {
