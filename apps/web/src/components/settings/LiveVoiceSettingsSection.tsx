@@ -97,13 +97,13 @@ export function LiveVoiceSettingsSection() {
         }
       />
       <SettingsRow
-        title={gt("Progress updates")}
+        title={gt("Read progress aloud")}
         description={gt(
-          "Announce completed or blocked tasks and requests for attention. Enable to also hear written progress.",
+          "Read written progress during new Live sessions. Completed or blocked tasks and requests for attention are still announced when this is off.",
         )}
         control={
           <Switch
-            aria-label={gt("Live voice progress updates")}
+            aria-label={gt("Read progress aloud")}
             checked={settings.notifications === "progress"}
             onCheckedChange={(checked) =>
               useLiveVoiceSettings.setState({ notifications: checked ? "progress" : "terminal" })

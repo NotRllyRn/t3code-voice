@@ -34,6 +34,8 @@ import {
   ComposerLiveVoiceControls,
   ComposerLiveVoiceFeedback,
   useComposerLiveVoice,
+  useLiveVoiceTargetActive,
+  useLiveVoiceDraftSendGuard,
 } from "./VoicePanel";
 
 async function renderVoice(ui: ReactNode, options?: RenderOptions) {
@@ -122,6 +124,7 @@ function VoiceComposer({
   environment = "env_voice",
   scratch = false,
   attachment = false,
+  onTypedSend,
   ...actions
 }: Partial<ComponentProps<typeof ComposerPrimaryActions>> & {
   owner?: string;
@@ -131,8 +134,10 @@ function VoiceComposer({
   environment?: string;
   scratch?: boolean;
   attachment?: boolean;
+  onTypedSend?: (threadId: string) => void;
 }) {
   const [text, setText] = useState("");
+  const blocksDraftSend = useLiveVoiceDraftSendGuard();
   const modelSelection = { instanceId: ProviderInstanceId.make("custom-instance"), model };
   const live = useComposerLiveVoice({
     environmentId: EnvironmentId.make(environment),
@@ -141,6 +146,7 @@ function VoiceComposer({
     threadId: scratch ? undefined : ThreadId.make(owner),
     draft: scratch
       ? {
+          threadId: ThreadId.make(owner),
           modelSelection,
           runtimeMode: DEFAULT_RUNTIME_MODE,
           interactionMode: DEFAULT_INTERACTION_MODE,
@@ -148,11 +154,22 @@ function VoiceComposer({
       : undefined,
     disabled: disabled || provider !== "codex",
   });
+  const targetActive = useLiveVoiceTargetActive({
+    environmentId: EnvironmentId.make(environment),
+    threadId: scratch ? undefined : ThreadId.make(owner),
+    draftId: scratch ? "draft_voice" : undefined,
+  });
   const active = live.voice.phase !== "idle" && live.voice.phase !== "error";
   return (
     <form
+      data-live-target-active={targetActive}
       className="m-4 max-w-120 rounded-2xl border border-border bg-background p-3 text-foreground"
-      onSubmit={(event) => event.preventDefault()}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (blocksDraftSend?.(EnvironmentId.make(environment), scratch ? "draft_voice" : null))
+          return;
+        onTypedSend?.(owner);
+      }}
     >
       <button type="button" disabled={live.sessionActive} aria-label="Dictation test control">
         Dictate
@@ -434,89 +451,126 @@ function RoutedVoiceComposer() {
   return target ? <ThreadRouteView target={target} /> : null;
 }
 
-it.each(["link", "sidebar", "redirect"] as const)(
-  "preserves the actual keyed route owner on draft promotion via %s",
-  async (navigation) => {
-    using h = setup();
-    const draftId = DraftId.make("draft_voice");
-    const store = useComposerDraftStore.getState();
-    store.setProjectDraftThreadId(
-      {
-        environmentId: EnvironmentId.make("env_voice"),
-        projectId: ProjectId.make("project_voice"),
-      },
-      draftId,
-      { threadId: ThreadId.make("local_draft_thread") },
-    );
-    store.setPrompt(draftId, "Keep unsent text");
-    await using screen = await renderVoice(<RoutedVoiceComposer />, {
-      router: "/draft/draft_voice",
-    });
-    const navigateThread = (threadId: string) =>
-      act(() =>
-        screen.router!.navigate({
-          to: "/$environmentId/$threadId",
-          params: { environmentId: "env_voice", threadId },
-        }),
-      );
-    await userEvent.click(screen.getByRole("button", { name: "Start live voice" }));
-    await h.connect();
-    const url = new URL(String(h.socketFactory.mock.calls[0]![0]));
-    expect(url.pathname).toBe("/api/voice/live");
-    expect(url.searchParams.has("continuous")).toBe(false);
-    expect(JSON.parse(url.searchParams.get("draft")!).modelSelection.model).toBe("custom-model");
-    await act(() =>
-      h.sockets[0]!.event({ type: "live.bound", threadId: ThreadId.make("created_thread") }),
-    );
-    await expect
-      .element(screen.getByRole("link", { name: "Open chat (keeps voice)" }))
-      .toHaveAttribute("href", "/env_voice/created_thread");
-    if (navigation === "link")
-      await userEvent.click(screen.getByRole("link", { name: "Open chat (keeps voice)" }));
-    else if (navigation === "sidebar") await navigateThread("created_thread");
-    else {
-      routeState.shellReady = true;
-      await act(() => store.finalizePromotedDraftThread(draftId));
-    }
-    await expect.element(screen.getByRole("button", { name: "Stop live voice" })).toBeVisible();
-    expect(h.attempts[0]!.value.dispose).not.toHaveBeenCalled();
-    expect(h.audio).toHaveBeenCalledTimes(1);
-    expect(h.sockets[0]!.close).not.toHaveBeenCalled();
-    const ref = {
+it("opens the bound Live thread before its first message and preserves unsent text", async () => {
+  using h = setup();
+  const draftId = DraftId.make("draft_voice");
+  const store = useComposerDraftStore.getState();
+  store.setProjectDraftThreadId(
+    { environmentId: EnvironmentId.make("env_voice"), projectId: ProjectId.make("project_voice") },
+    draftId,
+    { threadId: ThreadId.make("local_draft_thread") },
+  );
+  store.setPrompt(draftId, "Keep unsent text");
+  await using screen = await renderVoice(<RoutedVoiceComposer />, { router: "/draft/draft_voice" });
+  await userEvent.click(screen.getByRole("button", { name: "Start live voice" }));
+  await h.connect();
+  expect(
+    JSON.parse(new URL(String(h.socketFactory.mock.calls[0]![0])).searchParams.get("draft")!)
+      .threadId,
+  ).toBe("local_draft_thread");
+  await act(() =>
+    h.sockets[0]!.event({ type: "live.bound", threadId: ThreadId.make("created_thread") }),
+  );
+  await expect.element(screen.getByRole("textbox")).toBeEnabled();
+  await expect.element(screen.getByRole("button", { name: "Stop live voice" })).toBeVisible();
+  expect(screen.router!.state.location.pathname).toBe("/draft/draft_voice");
+  expect(store.getDraftSession(draftId)).not.toBeNull();
+  routeState.shellReady = true;
+  await screen.rerender(<RoutedVoiceComposer />);
+  await vi.waitFor(() =>
+    expect(screen.router!.state.location.pathname).toBe("/env_voice/created_thread"),
+  );
+  expect(store.getDraftSession(draftId)).toBeNull();
+  expect(
+    store.getComposerDraft({
       environmentId: EnvironmentId.make("env_voice"),
       threadId: ThreadId.make("created_thread"),
-    };
-    expect(store.getDraftIdByRef(ref)).toBe(navigation === "redirect" ? null : draftId);
-    expect(store.getComposerDraft(ref)?.prompt).toBe("Keep unsent text");
-    routeState.shellReady = true;
-    await act(() => store.finalizePromotedDraftThread(draftId));
-    expect(h.attempts[0]!.value.dispose).not.toHaveBeenCalled();
-    expect(store.getComposerDraft(ref)?.prompt).toBe("Keep unsent text");
-    await navigateThread("unrelated_thread");
-    expect(h.attempts[0]!.value.stopAudio).not.toHaveBeenCalled();
-    await expect.element(screen.getByRole("button", { name: "Start live voice" })).toBeDisabled();
-    await navigateThread("created_thread");
-    await expect.element(screen.getByRole("button", { name: "Stop live voice" })).toBeVisible();
-    await userEvent.click(screen.getByRole("button", { name: "Stop live voice" }));
-    await act(() =>
-      h.sockets[0]!.event({ type: "live.cleanup", sessionId: "session_1", result: "acknowledged" }),
+    })?.prompt,
+  ).toBe("Keep unsent text");
+  await expect.element(screen.getByRole("textbox")).toBeEnabled();
+  expect(h.audio).toHaveBeenCalledTimes(1);
+  expect(h.attempts[0]!.value.dispose).not.toHaveBeenCalled();
+});
+
+it("preserves the route owner and voice session through binding and navigation", async () => {
+  using h = setup();
+  const draftId = DraftId.make("draft_voice");
+  const store = useComposerDraftStore.getState();
+  store.setProjectDraftThreadId(
+    {
+      environmentId: EnvironmentId.make("env_voice"),
+      projectId: ProjectId.make("project_voice"),
+    },
+    draftId,
+    { threadId: ThreadId.make("local_draft_thread") },
+  );
+  store.setPrompt(draftId, "Keep unsent text");
+  await using screen = await renderVoice(<RoutedVoiceComposer />, {
+    router: "/draft/draft_voice",
+  });
+  const navigateThread = (threadId: string) =>
+    act(() =>
+      screen.router!.navigate({
+        to: "/$environmentId/$threadId",
+        params: { environmentId: "env_voice", threadId },
+      }),
     );
-    expect(h.attempts[0]!.value.dispose).toHaveBeenCalledTimes(1);
-    await userEvent.click(screen.getByRole("button", { name: "Start live voice" }));
-    await vi.waitFor(() => expect(h.sockets).toHaveLength(2));
-    expect(new URL(String(h.socketFactory.mock.calls[1]![0])).searchParams.get("threadId")).toBe(
-      "created_thread",
-    );
-    await h.connect();
-    await screen.unmount();
-    expect(h.attempts[1]!.value.stopAudio).toHaveBeenCalledTimes(1);
-    await act(() =>
-      h.sockets[1]!.event({ type: "live.cleanup", sessionId: "session_1", result: "acknowledged" }),
-    );
-    expect(h.attempts[1]!.value.dispose).toHaveBeenCalledTimes(1);
-    expect(h.sockets[1]!.close).toHaveBeenCalledTimes(1);
-  },
-);
+  expect(screen.container.querySelector("form")?.dataset.liveTargetActive).toBe("false");
+  await userEvent.click(screen.getByRole("button", { name: "Start live voice" }));
+  await h.connect();
+  expect(screen.container.querySelector("form")?.dataset.liveTargetActive).toBe("true");
+  await expect.element(screen.getByRole("textbox")).toBeEnabled();
+  const url = new URL(String(h.socketFactory.mock.calls[0]![0]));
+  expect(url.pathname).toBe("/api/voice/live");
+  expect(url.searchParams.has("continuous")).toBe(false);
+  expect(JSON.parse(url.searchParams.get("draft")!).modelSelection.model).toBe("custom-model");
+  routeState.shellReady = true;
+  await act(() =>
+    h.sockets[0]!.event({ type: "live.bound", threadId: ThreadId.make("created_thread") }),
+  );
+  await vi.waitFor(() =>
+    expect(screen.router!.state.location.pathname).toBe("/env_voice/created_thread"),
+  );
+  await expect.element(screen.getByRole("button", { name: "Stop live voice" })).toBeVisible();
+  expect(screen.container.querySelector("form")?.dataset.liveTargetActive).toBe("true");
+  expect(h.attempts[0]!.value.dispose).not.toHaveBeenCalled();
+  expect(h.audio).toHaveBeenCalledTimes(1);
+  expect(h.sockets[0]!.close).not.toHaveBeenCalled();
+  const ref = {
+    environmentId: EnvironmentId.make("env_voice"),
+    threadId: ThreadId.make("created_thread"),
+  };
+  expect(store.getDraftIdByRef(ref)).toBeNull();
+  expect(store.getComposerDraft(ref)?.prompt).toBe("Keep unsent text");
+  routeState.shellReady = true;
+  await act(() => store.finalizePromotedDraftThread(draftId));
+  expect(h.attempts[0]!.value.dispose).not.toHaveBeenCalled();
+  expect(store.getComposerDraft(ref)?.prompt).toBe("Keep unsent text");
+  await navigateThread("unrelated_thread");
+  expect(screen.container.querySelector("form")?.dataset.liveTargetActive).toBe("false");
+  expect(h.attempts[0]!.value.stopAudio).not.toHaveBeenCalled();
+  await expect.element(screen.getByRole("button", { name: "Start live voice" })).toBeDisabled();
+  await navigateThread("created_thread");
+  await expect.element(screen.getByRole("button", { name: "Stop live voice" })).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "Stop live voice" }));
+  await act(() =>
+    h.sockets[0]!.event({ type: "live.cleanup", sessionId: "session_1", result: "acknowledged" }),
+  );
+  expect(h.attempts[0]!.value.dispose).toHaveBeenCalledTimes(1);
+  await userEvent.click(screen.getByRole("button", { name: "Start live voice" }));
+  await vi.waitFor(() => expect(h.sockets).toHaveLength(2));
+  expect(new URL(String(h.socketFactory.mock.calls[1]![0])).searchParams.get("threadId")).toBe(
+    "created_thread",
+  );
+  await h.connect();
+  await screen.unmount();
+  expect(h.attempts[1]!.value.stopAudio).toHaveBeenCalledTimes(1);
+  await act(() =>
+    h.sockets[1]!.event({ type: "live.cleanup", sessionId: "session_1", result: "acknowledged" }),
+  );
+  expect(h.attempts[1]!.value.dispose).toHaveBeenCalledTimes(1);
+  expect(h.sockets[1]!.close).toHaveBeenCalledTimes(1);
+});
 
 it.each(["ready", "muted", "blocked"] as const)(
   "announces local readiness only after answer, peer and playback are %s",
@@ -774,8 +828,28 @@ it("keeps the original muted session across navigation and backgrounding", async
   await screen.rerender(<LiveVoiceSessionControls />);
   await expect.element(screen.getByRole("region", { name: "Live voice session" })).toBeVisible();
   await expect
-    .element(screen.getByRole("link", { name: "Live voice · Open chat" }))
+    .element(screen.getByRole("link", { name: "Open chat", exact: true }))
     .toHaveAttribute("href", "/env_voice/thread_1");
+  await act(() =>
+    screen.router!.navigate({
+      to: "/$environmentId/$threadId",
+      params: { environmentId: "env_voice", threadId: "thread_1" },
+    }),
+  );
+  await expect.element(screen.getByRole("button", { name: "Stop live voice" })).toBeVisible();
+  routeState.shellReady = true;
+  await screen.rerender(<LiveVoiceSessionControls />);
+  expect(screen.getByRole("region", { name: "Live voice session" }).query()).toBeNull();
+  await act(() =>
+    screen.router!.navigate({
+      to: "/$environmentId/$threadId",
+      params: { environmentId: "env_other", threadId: "thread_1" },
+    }),
+  );
+  await expect.element(screen.getByRole("region", { name: "Live voice session" })).toBeVisible();
+  await expect
+    .element(screen.getByRole("button", { name: "Unmute live microphone" }))
+    .toBeVisible();
   await userEvent.click(screen.getByRole("button", { name: "Stop live voice" }));
   expect(h.attempts[1]!.value.stopAudio).toHaveBeenCalledTimes(1);
   await act(() =>
@@ -783,3 +857,54 @@ it("keeps the original muted session across navigation and backgrounding", async
   );
   expect(screen.getByRole("region", { name: "Live voice session" }).query()).toBeNull();
 });
+
+it.each(["bound", "stop-before-bind"] as const)(
+  "keeps typed draft sends on one owner through %s",
+  async (finish) => {
+    using h = setup();
+    const sent = vi.fn();
+    const composer = (environment = "env_voice") => (
+      <VoiceComposer scratch owner="reserved_thread" environment={environment} onTypedSend={sent} />
+    );
+    await using screen = await renderVoice(composer());
+    await userEvent.click(screen.getByRole("button", { name: "Start live voice" }));
+    await userEvent.type(screen.getByRole("textbox"), "Keep this{Enter}");
+    expect(sent).not.toHaveBeenCalled();
+    await expect.element(screen.getByRole("textbox")).toHaveValue("Keep this");
+    await expect.element(screen.getByRole("button", { name: "Stop live voice" })).toBeVisible();
+    await h.connect();
+    expect(
+      JSON.parse(new URL(String(h.socketFactory.mock.calls[0]![0])).searchParams.get("draft")!)
+        .threadId,
+    ).toBe("reserved_thread");
+    if (finish === "bound") {
+      await act(() =>
+        h.sockets[0]!.event({ type: "live.bound", threadId: ThreadId.make("reserved_thread") }),
+      );
+      await userEvent.type(screen.getByRole("textbox"), "{Enter}");
+      expect(sent).not.toHaveBeenCalled();
+      await screen.rerender(composer("other_environment"));
+      await userEvent.type(screen.getByRole("textbox"), "{Enter}");
+      expect(sent).toHaveBeenCalledExactlyOnceWith("reserved_thread");
+    } else {
+      await userEvent.click(screen.getByRole("button", { name: "Stop live voice" }));
+      await userEvent.type(screen.getByRole("textbox"), "{Enter}");
+      expect(sent).not.toHaveBeenCalled();
+      await act(() =>
+        h.sockets[0]!.event({
+          type: "live.cleanup",
+          sessionId: "session_1",
+          result: "acknowledged",
+        }),
+      );
+      await userEvent.type(screen.getByRole("textbox"), "{Enter}");
+      expect(sent).toHaveBeenCalledExactlyOnceWith("reserved_thread");
+      await act(() =>
+        h.sockets[0]!.event({ type: "live.bound", threadId: ThreadId.make("reserved_thread") }),
+      );
+      expect(screen.getByRole("button", { name: "Stop live voice" }).query()).toBeNull();
+      await expect.element(screen.getByRole("textbox")).toHaveValue("Keep this");
+      expect(h.attempts[0]!.value.dispose).toHaveBeenCalledTimes(1);
+    }
+  },
+);

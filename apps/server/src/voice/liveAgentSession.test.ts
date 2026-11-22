@@ -1,7 +1,9 @@
 import { expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
+import { LiveConnectionError } from "@t3tools/provider-core/server/liveConnection";
 import {
   CommandId,
+  ProjectId,
   EventId,
   OrchestrationV2RunJson,
   OrchestrationV2RunAttemptJson,
@@ -31,6 +33,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
@@ -43,6 +46,18 @@ import {
   type NativeLiveAppend,
 } from "./liveProtocol.ts";
 
+const pendingCards = (count: number): OrchestrationV2RuntimeRequest[] =>
+  Array.from({ length: count }, (_, index) => ({
+    id: RuntimeRequestId.make(`pending-card-${index}-${"x".repeat(96)}`),
+    nodeId: NodeId.make("unrelated-node"),
+    providerTurnId: null,
+    nativeRequestRef: null,
+    kind: "user_input",
+    status: "pending",
+    responseCapability: { type: "message" },
+    createdAt: DateTime.makeUnsafe(0),
+    resolvedAt: null,
+  }));
 const escapedText = '"C:\\x"\n';
 import parentCapture from "./fixtures/live-native/parent-association.json" with { type: "json" };
 import stallCapture from "./fixtures/live-native/handoff-stall.json" with { type: "json" };
@@ -245,9 +260,10 @@ it.live(
               replay.push(event);
             }),
         });
-        yield* replacement.seed;
-        expect(replay[0]?.text).toContain("The kite is blue, not red. Do not change files.");
-        expect(replay[0]?.text).toContain("T3_bound_history");
+        const hydrated = yield* replacement.seed;
+        expect(hydrated).toContain("The kite is blue, not red. Do not change files.");
+        expect(hydrated).toContain("T3_bound_history");
+        expect(replay).toHaveLength(0);
         expect((yield* threads.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(1);
       }),
     ).pipe(Effect.provide(services)),
@@ -361,7 +377,11 @@ it.live("Stop/disconnect freezes pending concurrent caption windows but never su
   }).pipe(Effect.provide(services)),
 );
 
-it.live("a derived spoken yes cannot bypass pending T3 permissions or questions", () =>
+it.live.each([
+  { kind: "command", count: 1 },
+  { kind: "user_input", count: 1 },
+  { kind: "user_input", count: 256 },
+] as const)("a derived spoken choice cannot bypass pending T3 cards: %s", ({ kind, count }) =>
   Effect.scoped(
     Effect.gen(function* () {
       const threadId = ThreadId.make("thread:live-permission-test");
@@ -372,7 +392,7 @@ it.live("a derived spoken yes cannot bypass pending T3 permissions or questions"
         nodeId: NodeId.make("fictional-node"),
         providerTurnId: null,
         nativeRequestRef: null,
-        kind: "command",
+        kind,
         status: "pending",
         responseCapability: { type: "message" },
         createdAt: DateTime.makeUnsafe("2026-01-01T00:00:00Z"),
@@ -390,15 +410,19 @@ it.live("a derived spoken yes cannot bypass pending T3 permissions or questions"
           }),
         append: (event) =>
           Effect.sync(() => {
+            encodeNativeLiveAppend(event);
             notices.push(event);
           }),
       }).pipe(
         Effect.provideService(ThreadManagement.ThreadManagementService, {
           ...threads,
           getThreadRecords: (...args) =>
-            threads
-              .getThreadRecords(...args)
-              .pipe(Effect.map((records) => ({ ...records, runtimeRequests: [pending] }))),
+            threads.getThreadRecords(...args).pipe(
+              Effect.map((records) => ({
+                ...records,
+                runtimeRequests: count === 1 ? [pending] : pendingCards(count),
+              })),
+            ),
         }),
       );
       yield* agent.receive({
@@ -421,17 +445,28 @@ it.live("a derived spoken yes cannot bypass pending T3 permissions or questions"
         events.some((event) => event.type === "live.agent" && event.status === "waiting"),
       ).toBe(true);
       expect(notices.some((notice) => notice.text.includes("Voice cannot approve"))).toBe(true);
+      expect(notices.map((notice) => JSON.parse(notice.text))).toContainEqual(
+        expect.objectContaining({
+          status: "waiting_for_user_in_T3",
+          submission: "not_submitted",
+          ...(count === 1
+            ? { pendingRequests: [{ id: pending.id, kind, status: "pending" }] }
+            : { pendingRequestCount: count, pendingRequestDetailsOmitted: true }),
+        }),
+      );
+      expect(notices.every((notice) => Buffer.byteLength(notice.text) <= 8192)).toBe(true);
     }),
   ).pipe(Effect.provide(services)),
 );
 
 it.live.each([
-  ["short", "Inspected the fictional configuration. No files were changed.", false],
-  ["escaped within budget", escapedText.repeat(700), false],
-  ["escaped over budget", escapedText.repeat(800), true],
+  ["short", "Inspected the fictional configuration. No files were changed.", false, false],
+  ["escaped within budget", escapedText.repeat(600), false, false],
+  ["escaped over budget", escapedText.repeat(800), true, false],
+  ["oversized pending metadata", "Short result", true, true],
 ] as const)(
   "speakable completion is grounded and serialized-budget bounded: %s",
-  ([_name, resultText, fallback]) =>
+  ([_name, resultText, fallback, manyPending]) =>
     Effect.scoped(
       Effect.gen(function* () {
         const threadId = ThreadId.make("thread:live-grounded-result");
@@ -461,6 +496,7 @@ it.live.each([
                     : {
                         ...records,
                         runs: [{ ...sent.run, status: "completed" as const }],
+                        runtimeRequests: manyPending ? pendingCards(256) : [],
                         messages: [
                           sent.message,
                           final!,
@@ -522,6 +558,12 @@ it.live.each([
         yield* agent.poll;
         const results = appends.filter((event) => JSON.parse(event.text).status === "completed");
         expect(results).toHaveLength(1);
+        if (manyPending)
+          expect(JSON.parse(results[0]!.text)).toMatchObject({
+            pendingRequestCount: 256,
+            pendingRequestDetailsOmitted: true,
+            sourceRevisionsOmitted: true,
+          });
         expect(Buffer.byteLength(results[0]!.text, "utf8")).toBeLessThanOrEqual(8192);
         const result = JSON.parse(results[0]!.text);
         if (fallback) {
@@ -900,11 +942,10 @@ it.effect("assistant previews stay provisional across admission and idle, then p
             reconnectHistory.push(event);
           }),
       });
-      yield* reconnected.seed;
-      yield* reconnected.seed;
-      expect(
-        reconnectHistory.filter((e) => e.text.includes("I'll get some recommendations for you.")),
-      ).toHaveLength(1);
+      const hydrated = yield* reconnected.seed;
+      expect(yield* reconnected.seed).toBe(hydrated);
+      expect(hydrated).toContain("I'll get some recommendations for you.");
+      expect(reconnectHistory).toHaveLength(0);
     }),
   ).pipe(Effect.provide(services)),
 );
@@ -1995,18 +2036,20 @@ it.effect.each([1, 4])("result snapshots stay constant per poll with %s tracked 
           .filter((event) => event.text.includes("actualAgentResult"))
           .map((event) => JSON.parse(event.text)),
       ).toEqual(
-        entries.map((entry) =>
-          expect.objectContaining({
-            runId: entry.run.id,
-            status: "completed",
-            actualAgentResult: entry.message.text,
-            sourceMessageIds: [entry.message.id],
-          }),
+        expect.arrayContaining(
+          entries.map((entry) =>
+            expect.objectContaining({
+              runId: entry.run.id,
+              status: "completed",
+              actualAgentResult: entry.message.text,
+              sourceMessageIds: [entry.message.id],
+            }),
+          ),
         ),
       );
       lookups.mockClear();
       yield* agent.poll;
-      expect(lookups).toHaveBeenCalledTimes(1);
+      expect(lookups).toHaveBeenCalledTimes(2);
       expect(appends.filter((event) => event.text.includes("actualAgentResult"))).toHaveLength(
         count,
       );
@@ -2090,6 +2133,710 @@ it.effect(
         const rejected = yield* invalid.seed.pipe(Effect.result);
         expect(rejected._tag).toBe("Failure");
         expect(appends.filter((event) => event.text.includes("actualAgentResult"))).toHaveLength(1);
+      }),
+    ).pipe(Effect.provide(services)),
+);
+
+it.effect.each([false, true])(
+  "task context follows revisions during user and assistant speech without authorizing speech (conflict: %s)",
+  (conflict) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const captured = decodeCapturedResult(resultCapture);
+        const item = captured.typedFinal;
+        if (item.type !== "assistant_message") throw new Error("Expected assistant item");
+        const threadId = captured.run.threadId;
+        yield* VoiceFixture.create(threadId);
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const base = {
+          id: EventId.make("duplex-context"),
+          threadId,
+          occurredAt: captured.finalMessage.updatedAt,
+        };
+        const update = (
+          text: string,
+          streaming: boolean,
+          status: "running" | "completed",
+          at: number,
+          itemAt = at,
+        ) =>
+          Effect.gen(function* () {
+            yield* store.apply({
+              ...base,
+              type: "run.updated",
+              payload: { ...captured.run, status },
+            });
+            yield* store.apply({ ...base, type: "run-attempt.updated", payload: captured.attempt });
+            yield* store.apply({
+              ...base,
+              type: "provider-turn.updated",
+              payload: captured.providerTurn,
+            });
+            yield* store.apply({
+              ...base,
+              type: "message.updated",
+              payload: {
+                ...captured.finalMessage,
+                text,
+                streaming,
+                updatedAt: DateTime.makeUnsafe(at),
+              },
+            });
+            yield* store.apply({
+              ...base,
+              type: "turn-item.updated",
+              payload: {
+                ...item,
+                text,
+                streaming,
+                updatedAt: DateTime.makeUnsafe(itemAt),
+              },
+            });
+          });
+        yield* update("Initial output", false, "running", 1000);
+        const appends: NativeLiveAppend[] = [];
+        const agent = yield* makeLiveAgentSession({
+          binding: { threadId },
+          sessionId: "duplex-context",
+          onBound: () => {},
+          send: () => Effect.void,
+          append: (event) =>
+            Effect.sync(() => {
+              appends.push(event);
+            }),
+        });
+        yield* agent.seed;
+        yield* agent.receive({
+          type: "turn_created",
+          role: "user",
+          turnId: "answer",
+          text: "I can see",
+        });
+        yield* update("Which branch?", true, "running", 2000, 5000);
+        yield* agent.poll;
+        yield* agent.poll;
+        const context = () =>
+          appends.filter((e) => JSON.parse(e.text).source === "T3_task_context");
+        expect(context()).toHaveLength(1);
+        expect(context()[0]?.channel).toBe("quiet");
+        expect(context()[0]?.text).toContain("Which branch?");
+        yield* update("Which branch should I use?", false, "running", 3000, 5000);
+        yield* agent.poll;
+        expect(context()).toHaveLength(2);
+        // The item clock stays newer while message revisions reorder independently.
+        yield* update("Which branch?", true, "running", 2000, 5000);
+        yield* agent.poll;
+        expect(context()).toHaveLength(2);
+        yield* update("An unordered equal-clock replacement", false, "running", 3000, 6000);
+        yield* agent.poll;
+        expect(context()).toHaveLength(2);
+        yield* update("A newer message with an older item", true, "running", 4000, 4000);
+        yield* agent.poll;
+        expect(context()).toHaveLength(2);
+        yield* agent.receive({
+          type: "turn_done",
+          role: "user",
+          turnId: "answer",
+          text: "Use the feature branch.",
+        });
+        yield* agent.receive({
+          type: "turn_created",
+          role: "assistant",
+          turnId: "reply",
+          text: "Understood",
+        });
+        yield* update(
+          conflict ? "Conflicting final B" : "Done on the feature branch.",
+          false,
+          "completed",
+          conflict ? 3000 : 4000,
+          6000,
+        );
+        yield* agent.poll;
+        expect(context()).toHaveLength(conflict ? 2 : 3);
+        expect(appends.filter((e) => e.channel === "speakable")).toHaveLength(0);
+        yield* agent.receive({
+          type: "turn_done",
+          role: "assistant",
+          turnId: "reply",
+          text: "Understood.",
+        });
+        yield* agent.poll;
+        yield* agent.poll;
+        const offers = appends.filter((e) => e.channel === "speakable");
+        expect(offers).toHaveLength(1);
+        const offered = JSON.parse(offers[0]!.text);
+        expect(offered.resultId).toBe(JSON.parse(context()[0]!.text).resultId);
+        if (conflict) {
+          expect(offered.actualAgentResult).toBeUndefined();
+          expect(offered.resultUnavailableReason).toBe("conflicting_revisions");
+          expect(offered.note).toContain("written T3 result");
+        } else {
+          expect(offered.sourceRevisions).toEqual(
+            JSON.parse(context().at(-1)!.text).sourceRevisions,
+          );
+        }
+        yield* agent.poll;
+        expect(appends.filter((event) => event.channel === "speakable")).toHaveLength(1);
+        yield* agent.stop;
+        yield* update("Late callback", false, "completed", 5000);
+        yield* agent.poll;
+        expect(context()).toHaveLength(conflict ? 2 : 3);
+      }),
+    ).pipe(Effect.provide(services)),
+);
+
+it.effect(
+  "history hydration is returned for bootstrap and never appended as a fresh speech event",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("thread:bootstrap-history");
+        yield* VoiceFixture.create(threadId);
+        const appends: NativeLiveAppend[] = [];
+        const agent = yield* makeLiveAgentSession({
+          binding: { threadId },
+          sessionId: "bootstrap-history",
+          onBound: () => {},
+          send: () => Effect.void,
+          append: (event) =>
+            Effect.sync(() => {
+              appends.push(event);
+            }),
+        });
+        const history = yield* agent.seed;
+        expect(history).toContain("T3_bound_history");
+        yield* agent.seed;
+        yield* agent.poll;
+        expect(appends).toHaveLength(0);
+      }),
+    ).pipe(Effect.provide(services)),
+);
+
+it.effect.each([false, true])(
+  "reconnect result offers stay bounded after ambiguous write: %s",
+  (ambiguous) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { run, attempt, providerTurn, typedFinal, finalMessage } =
+          decodeCapturedResult(resultCapture);
+        const threadId = run.threadId;
+        yield* VoiceFixture.create(threadId);
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const base = {
+          id: EventId.make("bounded-recovery"),
+          threadId,
+          occurredAt: finalMessage.updatedAt,
+        };
+        yield* store.apply({ ...base, type: "run.updated", payload: run });
+        yield* store.apply({ ...base, type: "run-attempt.updated", payload: attempt });
+        yield* store.apply({ ...base, type: "provider-turn.updated", payload: providerTurn });
+        yield* store.apply({ ...base, type: "message.updated", payload: finalMessage });
+        yield* store.apply({ ...base, type: "turn-item.updated", payload: typedFinal });
+        const offers = new Map<string, import("./liveAgentSession.ts").LiveResultOffer>();
+        let writes = 0;
+        for (let index = 0; index < 4; index++) {
+          const agent = yield* makeLiveAgentSession({
+            binding: { threadId, resumeRunIds: [run.id] },
+            sessionId: `recovery-${index}`,
+            resultOffers: offers,
+            onBound: () => {},
+            send: () => Effect.void,
+            append: (event) =>
+              Effect.gen(function* () {
+                if (event.channel !== "speakable") return;
+                writes++;
+                if (ambiguous) return yield* new LiveConnectionError({ reason: "disconnected" });
+              }),
+          });
+          yield* agent.seed;
+          yield* agent.poll.pipe(Effect.result);
+          yield* agent.stop;
+        }
+        expect(writes).toBe(ambiguous ? 2 : 1);
+        // Another authenticated listener has independent announcement authority.
+        const listener = yield* makeLiveAgentSession({
+          binding: { threadId, resumeRunIds: [run.id] },
+          sessionId: "other-listener",
+          resultOffers: new Map(),
+          onBound: () => {},
+          send: () => Effect.void,
+          append: (event) =>
+            Effect.sync(() => {
+              if (event.channel === "speakable") writes++;
+            }),
+        });
+        yield* listener.seed;
+        yield* listener.poll;
+        expect(writes).toBe(ambiguous ? 3 : 2);
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        expect((yield* threads.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(1);
+      }),
+    ).pipe(Effect.provide(services)),
+);
+
+it.effect(
+  "quiet streaming context is bounded and yields between batches without losing revisions",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const captured = decodeCapturedResult(resultCapture);
+        const threadId = captured.run.threadId;
+        yield* VoiceFixture.create(threadId);
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const base = {
+          id: EventId.make("context-batch"),
+          threadId,
+          occurredAt: captured.finalMessage.updatedAt,
+        };
+        yield* store.apply({
+          ...base,
+          type: "run.updated",
+          payload: { ...captured.run, status: "running" },
+        });
+        // Legacy root messages need no provider turn; each still has canonical thread/run/node ownership.
+        const update = (index: number, text: string, at: number, streaming = true) =>
+          store.apply({
+            ...base,
+            type: "message.updated",
+            payload: {
+              ...captured.finalMessage,
+              id: MessageId.make(`batch-${index}`),
+              nodeId: captured.run.rootNodeId,
+              text,
+              streaming,
+              updatedAt: DateTime.makeUnsafe(at),
+            },
+          });
+        const otherRun = {
+          ...captured.run,
+          id: RunId.make("fair-other-run"),
+          ordinal: 2,
+          rootNodeId: NodeId.make("fair-other-root"),
+          status: "running" as const,
+        };
+        yield* store.apply({ ...base, type: "run.updated", payload: otherRun });
+        yield* store.apply({
+          ...base,
+          type: "message.updated",
+          payload: {
+            ...captured.finalMessage,
+            id: MessageId.make("fair-other-question"),
+            runId: otherRun.id,
+            nodeId: otherRun.rootNodeId,
+            text: "Which environment?",
+            streaming: true,
+            updatedAt: DateTime.makeUnsafe(1000),
+          },
+        });
+        const appends: NativeLiveAppend[] = [];
+        const events: LiveVoiceServerEvent[] = [];
+        const agent = yield* makeLiveAgentSession({
+          binding: { threadId },
+          sessionId: "context-batch",
+          onBound: () => {},
+          send: (event) =>
+            Effect.sync(() => {
+              events.push(event);
+            }),
+          append: (event) =>
+            Effect.sync(() => {
+              encodeNativeLiveAppend(event);
+              appends.push(event);
+            }),
+        });
+        yield* agent.seed;
+        for (let index = 0; index < 12; index++)
+          yield* update(index, index === 11 ? "界".repeat(20000) : "Which", 1000);
+        const context = () =>
+          appends.filter((e) => JSON.parse(e.text).source === "T3_task_context");
+        yield* agent.poll;
+        expect(context()).toHaveLength(8);
+        yield* agent.receive({
+          type: "turn_created",
+          role: "user",
+          turnId: "batch-answer",
+          text: "Use blue",
+        });
+        expect(events.some((e) => e.type === "live.caption" && e.text === "Use blue")).toBe(true);
+        for (let index = 0; index < 8; index++) yield* update(index, "Which changed?", 1500);
+        yield* agent.poll;
+        expect(
+          context().some((event) => JSON.parse(event.text).messageId === "fair-other-question"),
+        ).toBe(true);
+        expect(context().some((event) => JSON.parse(event.text).messageId === "batch-9")).toBe(
+          true,
+        );
+        yield* agent.poll;
+        expect(context().some((event) => JSON.parse(event.text).messageId === "batch-11")).toBe(
+          true,
+        );
+        expect(
+          context().every((e) => e.channel === "quiet" && Buffer.byteLength(e.text) <= 4096),
+        ).toBe(true);
+        const oversized = context()
+          .map((event) => JSON.parse(event.text))
+          .find((event) => event.messageId === "batch-11");
+        expect(oversized.actualAgentOutput).toBeUndefined();
+        expect(oversized.actualAgentExcerpt).toBe("界".repeat(256));
+        const predecessor = context()
+          .map((event) => JSON.parse(event.text))
+          .findLast((event) => event.messageId === "batch-0");
+        yield* update(0, "Which changed? branch?", 2000);
+        yield* agent.poll;
+        expect(JSON.parse(context().at(-1)!.text)).toMatchObject({
+          operation: "append",
+          outputDelta: " branch?",
+          fromVersion: predecessor.version,
+        });
+        const delivered = JSON.parse(context().at(-1)!.text);
+        yield* update(0, "Which changed? branch? Again", 2000);
+        yield* agent.poll;
+        expect(JSON.parse(context().at(-1)!.text)).toMatchObject({
+          fromVersion: delivered.version,
+          version: delivered.version + 1,
+          outputDelta: " Again",
+        });
+        const beforeAmbiguous = context().length;
+        yield* update(0, "An unordered replacement at the same timestamp", 2000);
+        yield* agent.poll;
+        expect(context()).toHaveLength(beforeAmbiguous);
+        yield* update(0, "Corrected final text", 2000, false);
+        yield* agent.poll;
+        expect(JSON.parse(context().at(-1)!.text)).toMatchObject({
+          operation: "replace",
+          actualAgentOutput: "Corrected final text",
+          streaming: false,
+        });
+        const beforeReplay = context().length;
+        yield* update(0, "Corrected final text plus stale streaming", 2000);
+        yield* agent.poll;
+        expect(context()).toHaveLength(beforeReplay);
+        const deliveredCount = context().length;
+        yield* agent.poll;
+        expect(context()).toHaveLength(deliveredCount);
+        expect(appends.filter((e) => e.channel === "speakable")).toHaveLength(0);
+        yield* store.apply({
+          ...base,
+          type: "message.updated",
+          payload: {
+            ...captured.finalMessage,
+            id: MessageId.make("fair-other-question"),
+            runId: otherRun.id,
+            nodeId: otherRun.rootNodeId,
+            text: "Which environment?",
+            streaming: false,
+            updatedAt: DateTime.makeUnsafe(3000),
+          },
+        });
+        yield* store.apply({
+          ...base,
+          type: "run.updated",
+          payload: { ...otherRun, status: "completed" },
+        });
+        for (let poll = 0; poll < 2; poll++) {
+          for (let index = 0; index < 8; index++)
+            yield* update(index, `Hot output ${poll}`, 4000 + poll);
+          yield* agent.poll;
+        }
+        expect(appends.filter((event) => event.channel === "speakable")).toHaveLength(0);
+        yield* agent.receive({
+          type: "turn_done",
+          role: "user",
+          turnId: "batch-answer",
+          text: "Use blue",
+        });
+        yield* agent.receive({
+          type: "turn_created",
+          role: "assistant",
+          turnId: "batch-reply",
+          text: "Understood",
+        });
+        yield* agent.poll;
+        expect(appends.filter((event) => event.channel === "speakable")).toHaveLength(0);
+        yield* agent.receive({
+          type: "turn_done",
+          role: "assistant",
+          turnId: "batch-reply",
+          text: "Understood.",
+        });
+        yield* agent.poll;
+        expect(
+          appends
+            .filter((event) => event.channel === "speakable")
+            .map((event) => JSON.parse(event.text)),
+        ).toEqual([
+          expect.objectContaining({ runId: otherRun.id, actualAgentResult: "Which environment?" }),
+        ]);
+      }),
+    ).pipe(Effect.provide(services)),
+);
+
+it.effect.each([false, true])(
+  "attention survives reconnect before an offer and clears after run retirement (ambiguous: %s)",
+  (ambiguous) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const captured = decodeCapturedResult(resultCapture);
+        const rootNodeId = captured.run.rootNodeId;
+        if (!rootNodeId) throw new Error("Expected root node");
+        const threadId = captured.run.threadId;
+        yield* VoiceFixture.create(threadId);
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const base = {
+          id: EventId.make("attention-recovery"),
+          threadId,
+          occurredAt: captured.finalMessage.updatedAt,
+        };
+        yield* store.apply({
+          ...base,
+          type: "run.updated",
+          payload: { ...captured.run, status: "running" },
+        });
+        const request: OrchestrationV2RuntimeRequest = {
+          id: RuntimeRequestId.make("new-attention"),
+          nodeId: rootNodeId,
+          providerTurnId: null,
+          nativeRequestRef: null,
+          kind: "command",
+          status: "pending",
+          responseCapability: { type: "message" },
+          createdAt: DateTime.makeUnsafe(0),
+          resolvedAt: null,
+        };
+        const offers = new Map<string, import("./liveAgentSession.ts").LiveResultOffer>();
+        const appends: NativeLiveAppend[] = [];
+        const first = yield* makeLiveAgentSession({
+          binding: { threadId },
+          sessionId: "attention-before-disconnect",
+          resultOffers: offers,
+          onBound: () => {},
+          send: () => Effect.void,
+          append: (event) =>
+            Effect.gen(function* () {
+              appends.push(event);
+              if (ambiguous && event.channel === "speakable")
+                return yield* new LiveConnectionError({ reason: "disconnected" });
+            }),
+        });
+        yield* first.seed;
+        yield* store.apply({ ...base, type: "runtime-request.updated", payload: request });
+        if (!ambiguous)
+          yield* first.receive({
+            type: "turn_created",
+            role: "user",
+            turnId: "busy-human",
+            text: "Wait",
+          });
+        yield* first.poll.pipe(Effect.result);
+        yield* first.stop;
+        const second = yield* makeLiveAgentSession({
+          binding: { threadId },
+          sessionId: "attention-after-disconnect",
+          resultOffers: offers,
+          onBound: () => {},
+          send: () => Effect.void,
+          append: (event) =>
+            Effect.sync(() => {
+              appends.push(event);
+            }),
+        });
+        yield* second.seed;
+        yield* second.poll;
+        yield* second.poll;
+        const essential = () =>
+          appends.filter(
+            (event) =>
+              event.channel === "speakable" &&
+              JSON.parse(event.text).status === "waiting_for_user_in_T3",
+          );
+        expect(essential()).toHaveLength(ambiguous ? 2 : 1);
+        yield* store.apply({ ...base, type: "run.updated", payload: captured.run });
+        yield* second.poll;
+        const terminalOffer = appends.find(
+          (event) => event.channel === "speakable" && JSON.parse(event.text).status === "completed",
+        );
+        expect(JSON.parse(terminalOffer!.text)).toMatchObject({
+          pendingRequests: [{ id: request.id, kind: request.kind, status: "pending" }],
+          pendingRequestCaveat: expect.stringContaining("not submitted"),
+        });
+        yield* second.receive({
+          type: "turn_created",
+          role: "user",
+          turnId: "resolving-human",
+          text: "I handled it",
+        });
+        yield* store.apply({
+          ...base,
+          type: "runtime-request.updated",
+          payload: { ...request, status: "resolved", resolvedAt: DateTime.makeUnsafe(2000) },
+        });
+        yield* second.poll;
+        expect(
+          appends
+            .filter((event) => JSON.parse(event.text).source === "T3_attention_context")
+            .map((event) => JSON.parse(event.text).pendingRequests)
+            .at(-1),
+        ).toEqual([]);
+        expect(essential()).toHaveLength(ambiguous ? 2 : 1);
+      }),
+    ).pipe(Effect.provide(services)),
+);
+
+it.effect.each(["empty", "nonempty", "wrong-project"] as const)(
+  "reserved draft cannot bypass launch validation: %s",
+  (mode) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const reserved = ThreadId.make("reserved-live-draft");
+        yield* VoiceFixture.create(reserved);
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const shell = (yield* threads.getThreadShell(reserved))!;
+        if (mode === "nonempty")
+          yield* threads.sendToThread({
+            projectId: VoiceFixture.projectId,
+            threadId: reserved,
+            commandId: CommandId.make("reserved-typed-wins"),
+            messageId: MessageId.make("reserved-typed-wins"),
+            text: "Typed input wins",
+            attachments: [],
+            mode: "queue",
+            createdBy: "user",
+            creationSource: "web",
+          });
+        const events: LiveVoiceServerEvent[] = [];
+        const calls: ThreadLaunch.ThreadLaunchInput[] = [];
+        const agent = yield* makeLiveAgentSession({
+          binding: {
+            draft: {
+              threadId: reserved,
+              projectId:
+                mode === "wrong-project"
+                  ? ProjectId.make("foreign-project")
+                  : VoiceFixture.projectId,
+              modelSelection: shell.modelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+            },
+          },
+          sessionId: `reserved-${mode}`,
+          onBound: () => {},
+          send: (event) =>
+            Effect.sync(() => {
+              events.push(event);
+            }),
+          append: () => Effect.void,
+        }).pipe(
+          Effect.provide(
+            Layer.mock(ThreadLaunch.ThreadLaunchService)({
+              launch: (input) =>
+                Effect.gen(function* () {
+                  calls.push(input);
+                  if (mode !== "empty")
+                    return yield* new ThreadLaunch.ThreadLaunchError({
+                      operation: "update-thread",
+                      commandId: input.commandId,
+                      projectId: input.projectId,
+                      cause: "Existing launch validation rejects this shell",
+                    });
+                  return {
+                    threadId: reserved,
+                    projection: yield* threads.getThreadProjection(reserved).pipe(Effect.orDie),
+                    resumed: true,
+                  };
+                }),
+            }),
+          ),
+        );
+        const result = yield* agent.bind.pipe(Effect.result);
+        expect(result._tag).toBe(mode === "empty" ? "Success" : "Failure");
+        expect(calls).toHaveLength(1);
+        expect(calls[0]).toMatchObject({
+          threadId: reserved,
+          projectId:
+            mode === "wrong-project" ? ProjectId.make("foreign-project") : VoiceFixture.projectId,
+          reuseExistingThread: true,
+        });
+        expect(events.filter((event) => event.type === "live.bound")).toHaveLength(
+          mode === "empty" ? 1 : 0,
+        );
+        expect(agent.getThreadId()).toBe(mode === "empty" ? reserved : undefined);
+      }),
+    ).pipe(Effect.provide(services)),
+);
+
+it.effect.each(["collision", "stop"] as const)(
+  "reserved draft retains one durable identity during %s",
+  (mode) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const reference = ThreadId.make("draft-model-reference");
+        const reserved = ThreadId.make("reserved-draft-race");
+        yield* VoiceFixture.create(reference);
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const modelSelection = (yield* threads.getThreadShell(reference))!.modelSelection;
+        const events: LiveVoiceServerEvent[] = [];
+        let calls = 0;
+        let stop = Effect.void;
+        const agent = yield* makeLiveAgentSession({
+          binding: {
+            draft: {
+              threadId: reserved,
+              projectId: VoiceFixture.projectId,
+              modelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+            },
+          },
+          sessionId: `reserved-race-${mode}`,
+          onBound: () => {},
+          send: (event) =>
+            Effect.sync(() => {
+              events.push(event);
+            }),
+          append: () => Effect.void,
+        }).pipe(
+          Effect.provide(
+            Layer.mock(ThreadLaunch.ThreadLaunchService)({
+              launch: (input) =>
+                Effect.gen(function* () {
+                  calls++;
+                  expect(input.threadId).toBe(reserved);
+                  if (calls === 1) {
+                    yield* VoiceFixture.create(reserved).pipe(
+                      Effect.provideService(Orchestrator.OrchestratorV2, orchestrator),
+                      Effect.orDie,
+                    );
+                    if (mode === "collision")
+                      return yield* new ThreadLaunch.ThreadLaunchError({
+                        operation: "create-thread",
+                        commandId: input.commandId,
+                        projectId: input.projectId,
+                        cause: "Typed shell won create race",
+                      });
+                    yield* stop;
+                  } else expect(input.reuseExistingThread).toBe(true);
+                  return {
+                    threadId: reserved,
+                    projection: yield* threads.getThreadProjection(reserved).pipe(Effect.orDie),
+                    resumed: calls > 1,
+                  };
+                }),
+            }),
+          ),
+        );
+        stop = agent.stop;
+        yield* agent.bind;
+        expect(calls).toBe(mode === "collision" ? 2 : 1);
+        expect(agent.getThreadId()).toBe(reserved);
+        expect(events.filter((event) => event.type === "live.bound")).toHaveLength(
+          mode === "collision" ? 1 : 0,
+        );
+        const records = yield* threads.getThreadRecords(reserved, ["runs", "messages"]);
+        expect(records.thread.id).toBe(reserved);
+        expect(records.runs).toHaveLength(0);
+        expect(records.messages).toHaveLength(0);
       }),
     ).pipe(Effect.provide(services)),
 );

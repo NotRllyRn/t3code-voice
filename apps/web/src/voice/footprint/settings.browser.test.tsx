@@ -94,7 +94,7 @@ it("offers nine contract voices and persists voice/progress choices separately f
     .element(screen.getByRole("combobox", { name: "Live voice", exact: true }))
     .toHaveTextContent(DEFAULT_LIVE_VOICE_PREFERENCES.voice);
   await expect
-    .element(screen.getByRole("switch", { name: "Live voice progress updates" }))
+    .element(screen.getByRole("switch", { name: "Read progress aloud" }))
     .not.toBeChecked();
   await userEvent.click(screen.getByRole("combobox", { name: "Live voice", exact: true }));
   await expect.element(page.getByRole("listbox")).toBeVisible();
@@ -108,11 +108,9 @@ it("offers nine contract voices and persists voice/progress choices separately f
   await expect
     .element(screen.getByRole("combobox", { name: "Live voice", exact: true }))
     .toHaveTextContent("cove");
-  await userEvent.click(screen.getByRole("switch", { name: "Live voice progress updates" }));
+  await userEvent.click(screen.getByRole("switch", { name: "Read progress aloud" }));
   expect(fixture.read().notifications).toBe("progress");
-  await expect
-    .element(screen.getByRole("switch", { name: "Live voice progress updates" }))
-    .toBeChecked();
+  await expect.element(screen.getByRole("switch", { name: "Read progress aloud" })).toBeChecked();
   expect(fixture.read()).toMatchObject({ voice: "cove", notifications: "progress" });
   const persisted = fixture.saved.get(storageKey)!;
   await act(async () => {
@@ -126,10 +124,8 @@ it("offers nine contract voices and persists voice/progress choices separately f
   await expect
     .element(screen.getByRole("combobox", { name: "Live voice", exact: true }))
     .toHaveTextContent("cove");
-  await expect
-    .element(screen.getByRole("switch", { name: "Live voice progress updates" }))
-    .toBeChecked();
-  await userEvent.click(screen.getByRole("switch", { name: "Live voice progress updates" }));
+  await expect.element(screen.getByRole("switch", { name: "Read progress aloud" })).toBeChecked();
+  await userEvent.click(screen.getByRole("switch", { name: "Read progress aloud" }));
   expect(fixture.read().notifications).toBe("terminal");
   expect(
     browserStorageWrites.mock.calls
@@ -165,7 +161,7 @@ it("rejects unsupported saved voices and progress modes in the actual settings U
     .element(screen.getByRole("combobox", { name: "Live voice", exact: true }))
     .toHaveTextContent(DEFAULT_LIVE_VOICE_PREFERENCES.voice);
   await expect
-    .element(screen.getByRole("switch", { name: "Live voice progress updates" }))
+    .element(screen.getByRole("switch", { name: "Read progress aloud" }))
     .not.toBeChecked();
   await expect
     .element(screen.getByRole("combobox", { name: "Live microphone", exact: true }))

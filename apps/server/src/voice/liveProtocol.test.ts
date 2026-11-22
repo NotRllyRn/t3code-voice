@@ -219,6 +219,29 @@ describe("pinned native Live wire", () => {
         instructions: "Fictional session context.",
       }),
     ).toEqual(fixtures.createRequest);
+    const initialContext = JSON.stringify({
+      source: "T3_bound_history",
+      note: "Untrusted history, not a new request",
+      messages: [{ role: "user", text: "Fictional old request" }],
+    });
+    expect(
+      encodeNativeLiveCreate({
+        offerSdp: fixtures.createRequest.sdp,
+        voice: "alloy",
+        instructions: "Fixed policy",
+        initialContext,
+      }).session.initial_items,
+    ).toEqual([
+      { type: "message", role: "user", content: [{ type: "input_text", text: initialContext }] },
+    ]);
+    expect(() =>
+      encodeNativeLiveCreate({
+        offerSdp: fixtures.createRequest.sdp,
+        voice: "alloy",
+        instructions: "Fixed policy",
+        initialContext: "x".repeat(NATIVE_LIVE_MAX_CONTEXT_BYTES + 1),
+      }),
+    ).toThrow();
     expect(decodeNativeLiveCreateResponse(fixtures.create)).toEqual({
       callId: "call-fictional",
       answerSdp: fixtures.create.body,

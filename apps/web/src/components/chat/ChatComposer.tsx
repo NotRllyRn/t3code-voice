@@ -1926,6 +1926,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       routeKind === "draft"
         ? {
             ...(activeProjectId ? { projectId: activeProjectId } : {}),
+            ...(activeThreadId ? { threadId: activeThreadId } : {}),
             modelSelection: selectedModelSelection,
             runtimeMode: compatibleRuntimeMode,
             interactionMode: DEFAULT_INTERACTION_MODE,
@@ -1947,21 +1948,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // A compact footer gives the dictation capsule the whole row beside the send button.
   const dictationTakesFooter = isComposerFooterCompact && speechInput.state.phase !== "idle";
   const submissionTarget = activePendingProgress ? "pending-user-input" : "provider-turn";
-  const submissionBlocked = isComposerSubmissionBlocked({
-    submissionTarget,
-    noProviderAvailable,
-    sendDisabledReason,
-    attachmentBlockReason,
-    environmentUnavailable: environmentUnavailable !== null,
-  });
+  const submissionBlocked =
+    liveVoice.draftSubmissionBlocked ||
+    isComposerSubmissionBlocked({
+      submissionTarget,
+      noProviderAvailable,
+      sendDisabledReason,
+      attachmentBlockReason,
+      environmentUnavailable: environmentUnavailable !== null,
+    });
   const submitAfterPreparingImages = useSubmitAfterPreparingImages(
     attachmentTargetKey,
     submissionBlocked,
   );
   // The pending Submit button follows the answer's own blockers, matching submitComposer.
-  const primaryActionSendDisabledReason =
-    (activePendingProgress ? attachmentBlockReason : sendDisabledReason) ??
-    (speechInput.preparing ? gt("Preparing voice input") : null);
+  const primaryActionSendDisabledReason = liveVoice.draftSubmissionBlocked
+    ? gt("Connecting voice…")
+    : ((activePendingProgress ? attachmentBlockReason : sendDisabledReason) ??
+      (speechInput.preparing ? gt("Preparing voice input") : null));
   const primaryActionEnvironmentUnavailable =
     environmentUnavailable !== null ||
     (!activePendingProgress && (noProviderAvailable || projectSelectionRequired));

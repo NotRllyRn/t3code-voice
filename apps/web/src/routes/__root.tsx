@@ -1,4 +1,4 @@
-import { LiveVoiceProvider, LiveVoiceSessionControls } from "../voice/VoicePanel";
+import { LiveVoiceProvider } from "../voice/VoicePanel";
 import { type ServerLifecycleWelcomePayload } from "@t3tools/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
 import {
@@ -145,7 +145,6 @@ function RootRouteView() {
       <AnchoredToastProvider>
         <LiveVoiceProvider>
           <RootRouteBranch />
-          <LiveVoiceSessionControls />
         </LiveVoiceProvider>
       </AnchoredToastProvider>
     </ToastProvider>

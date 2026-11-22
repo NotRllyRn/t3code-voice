@@ -112,6 +112,7 @@ const setup = Effect.fn("LiveIntegration.setup")(function* (
   const owners = new Set<string>();
   const requests: string[] = [];
   const offers: string[] = [];
+  const bootstraps: unknown[] = [];
   let allocations = 0;
   let native: NodeWS.WebSocket | undefined;
   const up = yield* Effect.acquireRelease(
@@ -133,6 +134,7 @@ const setup = Effect.fn("LiveIntegration.setup")(function* (
             Queue.offerUnsafe(hangups, undefined);
           } else {
             offers.push(JSON.parse(body).sdp);
+            bootstraps.push(JSON.parse(body).session);
             if (
               mode === "create-late" ||
               mode === "create-timeout" ||
@@ -444,6 +446,7 @@ const setup = Effect.fn("LiveIntegration.setup")(function* (
     hangups,
     hangupStatuses,
     offers,
+    bootstraps,
     requests,
     media,
     management,
@@ -492,11 +495,12 @@ it.effect.each([false, true])(
         yield* take(f.browserEvents, (event) => event.type === "live.answer");
         expect(f.offers).toHaveLength(2);
         expect(f.offers[0]).not.toBe(f.offers[1]);
+        expect(JSON.stringify(f.bootstraps.at(-1))).toContain("initial_items");
+        expect(JSON.stringify(f.bootstraps.at(-1))).toContain("T3_bound_history");
         expect(f.allocationCount()).toBe(1);
         expect(f.controller.state.phase).toBe("connecting");
         expect(f.media[1]?.mic).toBe(false);
         f.native({ type: "session.started", session: { id: "fictional-native-session" } });
-        yield* take(f.nativeFrames, (frame) => frame.type === "session.context.append");
         expect(f.controller.state.phase).toBe("connecting");
         f.media[1]!.options.peer("connected");
         yield* take(
@@ -653,9 +657,31 @@ it.effect.each([false, true])(
           f.browserEvents,
           (event) => event.type === "live.agent" && event.status === "completed",
         );
-        const result = yield* take(f.nativeFrames, (frame) =>
-          JSON.stringify(frame).includes(escaped ? "too long for voice" : "actualAgentResult"),
-        );
+        let result: unknown;
+        let resultText = "";
+        for (let chunk = 0; chunk < 32; chunk++) {
+          const frame = yield* take(f.nativeFrames, (frame) => frame.channel === "speakable");
+          if (!Array.isArray(frame.content)) throw new Error("Missing native content");
+          for (const part of frame.content) {
+            if (
+              typeof part !== "object" ||
+              part === null ||
+              !("text" in part) ||
+              typeof part.text !== "string"
+            )
+              throw new Error("Missing native text");
+            resultText += part.text;
+          }
+          const decoded = yield* Effect.try({
+            try: () => JSON.parse(resultText) as unknown,
+            catch: () => new LiveConnectionError({ reason: "incompatible-protocol" }),
+          }).pipe(Effect.result);
+          if (decoded._tag === "Success") {
+            result = decoded.success;
+            break;
+          }
+        }
+        expect(result).toBeDefined();
         expect(JSON.stringify(result)).toContain(escaped ? "read the written T3 result" : final);
         expect(f.controller.state.phase).toBe("connected");
         expect(yield* Queue.size(f.hangups)).toBe(0);
@@ -684,7 +710,6 @@ it.effect.each(["cleanup", "cleanup-failed", "cleanup-stalled"] as const)(
         yield* Effect.promise(() => f.controller.start());
         yield* take(f.browserEvents, (event) => event.type === "live.answer");
         f.native({ type: "session.started", session: { id: "fictional-native-session" } });
-        yield* take(f.nativeFrames, (frame) => frame.type === "session.context.append");
         f.media[0]!.options.peer("connected");
         yield* take(
           f.browserEvents,
@@ -866,7 +891,6 @@ it.effect.each([
       yield* Effect.promise(() => f.controller.start());
       yield* take(f.browserEvents, (event) => event.type === "live.answer");
       f.native({ type: "session.started", session: { id: "owner-admission" } });
-      yield* take(f.nativeFrames, (frame) => frame.type === "session.context.append");
       f.native({
         type: pending ? "turn.created" : "turn.done",
         turn: { id: "fictional-user-turn", role: "user", transcript: original },
@@ -976,7 +1000,7 @@ it.effect.each([false, true])(
           acknowledgmentIds: acknowledgments.map(
             (event) => event.type === "live.agent" && event.runId,
           ),
-          terminalIds: terminal.map((event) => event.type === "live.agent" && event.runId),
+          terminalIds: terminal.map((event) => event.type === "live.agent" && event.runId).sort(),
           quietAcknowledgments: appends.filter(
             (append) =>
               append.channel === "quiet" && append.text.includes("T3 accepted the typed request"),
@@ -988,8 +1012,11 @@ it.effect.each([false, true])(
           ).length,
         }).toEqual({
           acknowledgmentIds: joinExisting ? [] : accepted.map((sent) => sent.run.id),
-          terminalIds: accepted.slice(1).map((sent) => sent.run.id),
-          quietAcknowledgments: joinExisting ? 0 : 9,
+          terminalIds: accepted
+            .slice(1)
+            .map((sent) => sent.run.id)
+            .sort(),
+          quietAcknowledgments: 0,
           speakableAcknowledgments: 0,
         });
       }),

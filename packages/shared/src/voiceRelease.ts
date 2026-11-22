@@ -22,12 +22,12 @@ export function parseVoiceVersion(
 export function nextVoiceVersion(upstreamVersion: string, previous?: string): string | null {
   const upstream = BASE_VERSION.exec(upstreamVersion);
   if (!upstream || !safeNumbers(upstream.slice(1))) return null;
-  if (previous === undefined) return `${upstreamVersion}-voice.${FORK_RELEASE.voiceRevision}`;
+  if (previous === undefined) return `${upstreamVersion}-voice.1`;
   const prior = parseVoiceVersion(previous);
   if (!prior) return null;
   const comparison = compareSemverVersions(upstreamVersion, prior.upstreamVersion);
   if (comparison < 0) return null;
-  if (comparison > 0) return `${upstreamVersion}-voice.${FORK_RELEASE.voiceRevision}`;
+  if (comparison > 0) return `${upstreamVersion}-voice.1`;
   return prior.revision < Number.MAX_SAFE_INTEGER
     ? `${upstreamVersion}-voice.${prior.revision + 1}`
     : null;

@@ -10,6 +10,7 @@ import {
 } from "react";
 import { useLocation, useRouter, type AnyRouter } from "@tanstack/react-router";
 
+import { LiveVoiceSessionControls } from "../voice/VoicePanel";
 import { moveWorkspaceFocus, workspaceAreaProps } from "../lib/workspaceFocus";
 import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { isElectron } from "../env";
@@ -499,7 +500,10 @@ export function AppSidebarLayout({
             </Sidebar>
           </>
         ) : null}
-        {children}
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          {children}
+          {!isAppModalPage(pathname) ? <LiveVoiceSessionControls /> : null}
+        </div>
         <BackgroundThreadAnnouncer />
         <SidebarControl showSidebar={showSidebar} />
         {isElectron ? <HistorySwipeNavigation /> : null}

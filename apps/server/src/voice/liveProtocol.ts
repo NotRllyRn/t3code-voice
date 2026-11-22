@@ -223,6 +223,7 @@ export function encodeNativeLiveCreate(input: {
   readonly offerSdp: string;
   readonly voice: string;
   readonly instructions: string;
+  readonly initialContext?: string;
 }) {
   try {
     return {
@@ -232,6 +233,22 @@ export function encodeNativeLiveCreate(input: {
         instructions: text(input.instructions, NATIVE_LIVE_MAX_CONTEXT_BYTES),
         audio: { output: { voice: id(input.voice) } },
         delegation: { type: "client" },
+        ...(input.initialContext
+          ? {
+              initial_items: [
+                {
+                  type: "message",
+                  role: "user",
+                  content: [
+                    {
+                      type: "input_text",
+                      text: text(input.initialContext, NATIVE_LIVE_MAX_CONTEXT_BYTES),
+                    },
+                  ],
+                },
+              ],
+            }
+          : {}),
       },
     } as const;
   } catch {
