@@ -1,3 +1,4 @@
+import { useLiveVoiceDraftSendGuard } from "../../voice/VoicePanel";
 import { msg } from "gt-react";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { m } from "~/i18n/messages";
@@ -296,6 +297,7 @@ interface ComposerSendInput {
  * when it fails.
  */
 export function useComposerSend(input: ComposerSendInput) {
+  const blocksLiveDraftSend = useLiveVoiceDraftSendGuard();
   const {
     environmentId,
     routeThreadKey,
@@ -417,6 +419,7 @@ export function useComposerSend(input: ComposerSendInput) {
     },
   ) => {
     e?.preventDefault();
+    if (blocksLiveDraftSend?.(environmentId, draftId)) return;
     // What the user pressed send on; uploads below can take a while, and a redirect must not
     // decline approvals for a draft that changed meanwhile.
     const promptAtSend = promptRef.current;
@@ -1694,6 +1697,7 @@ export function useComposerSend(input: ComposerSendInput) {
   const onSendLatest = useStableCallback(onSend);
   const onSendWithRouting = async (...args: Parameters<typeof onSend>) => {
     args[0]?.preventDefault();
+    if (blocksLiveDraftSend?.(environmentId, draftId)) return;
     const refresh =
       args[3] || sendInFlightRef.current || readPendingEnvironmentChange() !== null
         ? null

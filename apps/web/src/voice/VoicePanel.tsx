@@ -25,6 +25,7 @@ import {
   useEnvironmentScope,
   usePreparedConnection,
 } from "../state/session";
+import { useQuietThreadShell } from "../state/entities";
 import { serverEnvironment } from "../state/server";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { runEnvironmentSpeech } from "../speech/runEnvironmentSpeech";
@@ -33,6 +34,7 @@ import {
   LoaderCircleIcon,
   MicOffIcon,
   XIcon,
+  SquareIcon,
   AudioLinesIcon,
   CircleAlertIcon,
   MessageSquareIcon,
@@ -82,6 +84,7 @@ const LiveVoiceContext = createContext<{
   snapshot: Snapshot;
   start(target: Target): void;
   dismiss(): void;
+  blocksDraftSend(environmentId: EnvironmentId, draftId: string | null): boolean;
 } | null>(null);
 const isActive = (voice: LiveVoiceState) => voice.phase !== "idle" && voice.phase !== "error";
 
@@ -91,6 +94,34 @@ export function LiveVoiceProvider({ children }: { children: ReactNode }) {
     owner: null,
     voice: INITIAL_LIVE_VOICE_STATE,
   });
+  const boundTarget = snapshot.owner?.target;
+  const boundEnvironmentId = boundTarget?.environmentId;
+  const boundThreadId = boundTarget?.threadId;
+  const boundDraftId = boundTarget?.draftId;
+  const boundShell = useQuietThreadShell(
+    boundEnvironmentId && boundThreadId
+      ? { environmentId: boundEnvironmentId, threadId: boundThreadId }
+      : null,
+  );
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Hand off the external Live binding only once its server shell can render the composer.
+  useEffect(() => {
+    if (
+      !boundDraftId ||
+      !boundEnvironmentId ||
+      !boundThreadId ||
+      !boundShell ||
+      boundShell.deletedAt != null
+    )
+      return;
+    const store = useComposerDraftStore.getState();
+    const id = DraftId.make(boundDraftId);
+    if (store.getDraftSession(id)?.environmentId !== boundEnvironmentId) return;
+    store.markDraftThreadPromoting(id, {
+      environmentId: boundEnvironmentId,
+      threadId: boundThreadId,
+    });
+    store.finalizePromotedDraftThread(id);
+  }, [boundDraftId, boundEnvironmentId, boundThreadId, boundShell]);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Only app teardown releases the external session; route and visibility changes do not.
   useEffect(() => {
     const stop = () => owner.current?.controller.stop();
@@ -148,8 +179,9 @@ export function LiveVoiceProvider({ children }: { children: ReactNode }) {
             if (!threadId && draftId) {
               const store = useComposerDraftStore.getState();
               const id = DraftId.make(draftId);
-              if (store.getDraftSession(id)?.environmentId === environmentId)
+              if (store.getDraftSession(id)?.environmentId === environmentId) {
                 store.markDraftThreadPromoting(id, { environmentId, threadId: event.threadId });
+              }
             }
           }
         },
@@ -177,7 +209,26 @@ export function LiveVoiceProvider({ children }: { children: ReactNode }) {
     owner.current = null;
     setSnapshot({ owner: null, voice: INITIAL_LIVE_VOICE_STATE });
   };
-  return <LiveVoiceContext value={{ snapshot, start, dismiss }}>{children}</LiveVoiceContext>;
+  const blocksDraftSend = (environmentId: EnvironmentId, draftId: string | null) => {
+    const current = owner.current;
+    return (
+      !!current &&
+      !!draftId &&
+      current.target.environmentId === environmentId &&
+      current.target.draftId === draftId &&
+      (isActive(current.controller.state) || !!current.target.threadId)
+    );
+  };
+  return (
+    <LiveVoiceContext value={{ snapshot, start, dismiss, blocksDraftSend }}>
+      {children}
+    </LiveVoiceContext>
+  );
+}
+
+// Read the owner at send time too: keyboard and deferred sends can outlive a render.
+export function useLiveVoiceDraftSendGuard() {
+  return useContext(LiveVoiceContext)?.blocksDraftSend;
 }
 
 export function useLiveVoiceSessionActive() {
@@ -265,6 +316,7 @@ export function useComposerLiveVoice({ environmentId, threadId, draftId, draft, 
     unavailableReason,
     environmentId,
     threadId,
+    draftSubmissionBlocked: app?.blocksDraftSend(environmentId, draftId ?? null) ?? false,
     sessionActive: !!app && isActive(app.snapshot.voice),
   };
 }
@@ -273,10 +325,21 @@ export function LiveVoiceSessionControls() {
   const gt = useGT();
   const app = useContext(LiveVoiceContext);
   const pathname = useLocation({ select: (location) => location.pathname });
+  const targetRef = app?.snapshot.owner?.target;
+  const visibleThreadId = app?.snapshot.voice.threadId ?? targetRef?.threadId;
+  const targetShell = useQuietThreadShell(
+    targetRef && visibleThreadId
+      ? { environmentId: targetRef.environmentId, threadId: visibleThreadId }
+      : null,
+  );
   if (!app?.snapshot.owner || (!isActive(app.snapshot.voice) && !app.snapshot.voice.error))
     return null;
   const { target, controller } = app.snapshot.owner;
-  if (liveVoiceTargetIsViewed(target, app.snapshot.voice, pathname)) return null;
+  if (
+    liveVoiceTargetIsViewed(target, app.snapshot.voice, pathname) &&
+    (pathname.startsWith("/draft/") || targetShell !== null)
+  )
+    return null;
   const threadId = app.snapshot.voice.threadId ?? target.threadId;
   const live = {
     controller: {
@@ -284,6 +347,7 @@ export function LiveVoiceSessionControls() {
       stop: () => controller.stop(),
       mute: () => controller.mute(),
     },
+    draftSubmissionBlocked: false,
     sessionActive: isActive(app.snapshot.voice),
     voice: app.snapshot.voice,
     allowed: true,
@@ -294,10 +358,10 @@ export function LiveVoiceSessionControls() {
   return (
     <section
       aria-label={gt("Live voice session")}
-      className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-t bg-background px-3 py-1.5 text-xs [-webkit-app-region:no-drag] sm:px-4"
+      className="flex shrink-0 flex-wrap items-center justify-end gap-x-2 gap-y-1 border-t bg-background px-3 py-1.5 text-xs [-webkit-app-region:no-drag] sm:px-4"
     >
       <AudioLinesIcon aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
-      <span className="min-w-0 flex-1 truncate text-muted-foreground" role="status">
+      <span className="min-w-0 truncate text-muted-foreground" role="status">
         <T>Live</T> · {liveVoiceStatus(live.voice, gt)}
       </span>
       <div className="flex shrink-0 items-center gap-1">
@@ -403,7 +467,7 @@ export function ComposerLiveVoiceControls({
         {compact ? (
           <Button
             type="button"
-            variant={props.muted ? "destructive-outline" : "ghost"}
+            variant={props.muted ? "outline" : "ghost"}
             size="icon-sm"
             aria-label={label}
             aria-pressed={props.pressed}
@@ -492,7 +556,7 @@ export function ComposerLiveVoiceControls({
       {button(
         voice.phase === "stopping" ? gt("Stopping live voice") : gt("Stop live voice"),
         () => void controller?.stop(),
-        voice.phase === "stopping" ? busyIcon : <XIcon aria-hidden="true" />,
+        voice.phase === "stopping" ? busyIcon : <SquareIcon aria-hidden="true" />,
         {
           disabled: voice.phase === "stopping",
           busy: voice.phase === "stopping",
