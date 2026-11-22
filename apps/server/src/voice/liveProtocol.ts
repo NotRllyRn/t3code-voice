@@ -54,7 +54,7 @@ export type NativeLiveAppend = {
   readonly text: string;
 };
 export type NativeLiveAppendMessage = {
-  readonly channel: "commentary" | "speakable";
+  readonly channel: "speakable";
   readonly content: readonly [{ readonly type: "input_text"; readonly text: string }];
 } & (
   | { readonly type: "session.context.append" }
@@ -196,6 +196,8 @@ export function encodeNativeLiveAppend(
   );
   if (!value.trim()) throw invalid();
   const delegationId = input.delegationId === undefined ? undefined : id(input.delegationId);
+  // Frameless commentary can speak; passive context stays local until an explicit offer.
+  if (input.channel === "quiet") return [];
   const chunks: string[] = [];
   let chunk = "";
   let bytes = 0;
@@ -214,7 +216,7 @@ export function encodeNativeLiveAppend(
     ...(delegationId === undefined
       ? { type: "session.context.append" }
       : { type: "delegation.context.append", delegation_item_id: delegationId }),
-    channel: input.channel === "quiet" ? "commentary" : "speakable",
+    channel: "speakable",
     content: [{ type: "input_text", text: chunk }],
   }));
 }

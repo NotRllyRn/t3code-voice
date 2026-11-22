@@ -1188,7 +1188,45 @@ it.effect.each([
           expect(JSON.parse(progress[0]!.text).actualAgentCommentary).toBeUndefined();
           expect(progress[0]!.text).toContain("Read the written T3 result");
         }
+        // Settings change within this call; disabled commentary never replays on re-enable.
+        yield* agent.setNotifications("terminal");
         yield* TestClock.adjust("20 seconds");
+        timestamp = DateTime.makeUnsafe(45000);
+        yield* agent.poll;
+        const progressCount = notifications === "progress" ? 1 : 0;
+        expect(
+          notices.filter((notice) => JSON.parse(notice.text).status === "progress"),
+        ).toHaveLength(progressCount);
+        yield* agent.setNotifications("progress");
+        yield* agent.poll;
+        expect(
+          notices.filter((notice) => JSON.parse(notice.text).status === "progress"),
+        ).toHaveLength(progressCount);
+        yield* TestClock.adjust("1 second");
+        timestamp = DateTime.makeUnsafe(46000);
+        yield* TestClock.adjust("1 second");
+        yield* agent.setMuted(true);
+        yield* agent.receive({
+          type: "turn_done",
+          role: "user",
+          turnId: "muted-noise",
+          text: "Noise",
+        });
+        yield* agent.setMuted(false);
+        yield* agent.poll;
+        expect(
+          notices.filter((notice) => JSON.parse(notice.text).status === "progress"),
+        ).toHaveLength(progressCount + 1);
+        yield* agent.setNotifications("terminal");
+        yield* TestClock.adjust("20 seconds");
+        timestamp = DateTime.makeUnsafe(66000);
+        yield* agent.poll;
+        expect(
+          notices.filter((notice) => JSON.parse(notice.text).status === "progress"),
+        ).toHaveLength(progressCount + 1);
+        yield* agent.setNotifications("progress");
+        yield* TestClock.adjust("2 seconds");
+        timestamp = DateTime.makeUnsafe(68000);
         yield* agent.receive({
           type: "turn_done",
           role: "user",
@@ -1198,7 +1236,7 @@ it.effect.each([
         yield* agent.poll;
         expect(
           notices.filter((notice) => notice.text.includes('"status":"progress"')),
-        ).toHaveLength(notifications === "progress" ? 1 : 0);
+        ).toHaveLength((notifications === "progress" ? 1 : 0) + 1);
         yield* agent.receive({
           type: "turn_created",
           role: "user",
@@ -1365,12 +1403,18 @@ it.live.each([
             return yield* threads.sendToThread(input);
           }),
       };
+      const notices: NativeLiveAppend[] = [];
+      let canAnnounce = false;
       const agent = yield* makeLiveAgentSession({
         binding: { threadId },
         sessionId: "typed-race",
+        canAnnounce: () => canAnnounce,
         onBound: () => {},
         send: () => Effect.void,
-        append: () => Effect.void,
+        append: (notice) =>
+          Effect.sync(() => {
+            notices.push(notice);
+          }),
       });
       yield* agent.seed;
       const final = {
@@ -1400,6 +1444,22 @@ it.live.each([
           .receive(delegation)
           .pipe(Effect.provideService(ThreadManagement.ThreadManagementService, guarded));
       }
+      expect(notices.flatMap(encodeNativeLiveAppend)).toHaveLength(0);
+      yield* agent.poll;
+      expect(notices.flatMap(encodeNativeLiveAppend)).toHaveLength(0);
+      canAnnounce = true;
+      yield* agent.poll;
+      const rejected = notices
+        .flatMap(encodeNativeLiveAppend)
+        .filter((notice) => notice.content[0].text.includes('"status":"not_submitted"'));
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]?.content[0].text).toContain("canonical_input_changed");
+      yield* agent.poll;
+      expect(
+        notices
+          .flatMap(encodeNativeLiveAppend)
+          .filter((notice) => notice.content[0].text.includes('"status":"not_submitted"')),
+      ).toHaveLength(1);
       const admitted = yield* threads.getThreadRecords(threadId, ["runs", "messages"]);
       expect(admitted.runs).toHaveLength(1);
       expect(admitted.runs[0]?.userMessageId).toBe(MessageId.make("typed-race"));
@@ -1563,6 +1623,7 @@ it.effect.each(["reordered", "interleaved", "unassociated", "handoff-replay"] as
             "Corrected final. Keep blue only; do not edit.",
           );
         }
+        expect(notices.flatMap(encodeNativeLiveAppend)).toHaveLength(0);
         if (scenario === "unassociated")
           for (const reason of ["missing_parent", "unknown_parent", "superseded_parent"])
             expect(notices.some((notice) => notice.text.includes(reason))).toBe(true);
@@ -1570,7 +1631,7 @@ it.effect.each(["reordered", "interleaved", "unassociated", "handoff-replay"] as
     ).pipe(Effect.provide(services)),
 );
 
-it.effect.each(["timeout", "stop", "disconnect", "capacity"] as const)(
+it.effect.each(["timeout", "timeout-superseded", "stop", "disconnect", "capacity"] as const)(
   "%s drops bounded pending native work without creating task authority",
   (scenario) =>
     Effect.gen(function* () {
@@ -1612,9 +1673,10 @@ it.effect.each(["timeout", "stop", "disconnect", "capacity"] as const)(
             );
           }
           expect((yield* threads.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(0);
-          if (scenario === "timeout") {
+          if (scenario === "timeout" || scenario === "timeout-superseded") {
             yield* TestClock.adjust("30 seconds");
-            // Expiry is checked on completion too, even without a timer poll.
+            yield* agent.poll;
+            expect(notices.flatMap(encodeNativeLiveAppend)).toHaveLength(0);
             yield* agent.receive({
               type: "turn_done",
               role: "user",
@@ -1628,7 +1690,22 @@ it.effect.each(["timeout", "stop", "disconnect", "capacity"] as const)(
               instructions: "Inspect blue.",
               provenance: "native_live_delegation",
             });
-            expect(notices.some((notice) => notice.text.includes("parent_timeout"))).toBe(true);
+            if (scenario === "timeout-superseded")
+              yield* agent.receive({
+                type: "turn_done",
+                role: "user",
+                turnId: "newer",
+                text: "Hello.",
+              });
+            yield* agent.poll;
+            const rejection = notices.flatMap(encodeNativeLiveAppend);
+            expect(rejection).toHaveLength(scenario === "timeout" ? 1 : 0);
+            if (scenario === "timeout")
+              expect(rejection[0]?.content[0].text).toContain("parent_timeout");
+            yield* agent.poll;
+            expect(notices.flatMap(encodeNativeLiveAppend)).toHaveLength(
+              scenario === "timeout" ? 1 : 0,
+            );
           }
           if (scenario === "stop") {
             yield* agent.stop;
@@ -1650,13 +1727,12 @@ it.effect.each(["timeout", "stop", "disconnect", "capacity"] as const)(
       });
       const records = yield* threads.getThreadRecords(threadId, ["runs", "messages"]);
       expect(records.runs).toHaveLength(0);
-      expect(records.messages).toHaveLength(scenario === "capacity" ? 33 : 1);
-      expect(records.messages.every((message) => message.voice?.itemId.startsWith("parent_"))).toBe(
-        true,
+      expect(records.messages).toHaveLength(
+        scenario === "capacity" ? 33 : scenario === "timeout-superseded" ? 2 : 1,
       );
-      expect(records.messages.every((message) => message.text === "Retain this correction.")).toBe(
-        true,
-      );
+      const parents = records.messages.filter((message) => message.voice?.itemId !== "newer");
+      expect(parents.every((message) => message.voice?.itemId.startsWith("parent_"))).toBe(true);
+      expect(parents.every((message) => message.text === "Retain this correction.")).toBe(true);
     }).pipe(Effect.provide(services)),
 );
 
@@ -2839,4 +2915,152 @@ it.effect.each(["collision", "stop"] as const)(
         expect(records.messages).toHaveLength(0);
       }),
     ).pipe(Effect.provide(services)),
+);
+
+it.effect("mute rejects new identities across unmute without disturbing known parents", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("thread:mute-identity");
+    yield* VoiceFixture.create(threadId);
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const events: LiveVoiceServerEvent[] = [];
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const agent = yield* makeLiveAgentSession({
+          binding: { threadId },
+          sessionId: "mute-identity",
+          onBound: () => {},
+          send: (event) =>
+            Effect.sync(() => {
+              events.push(event);
+            }),
+          append: () => Effect.void,
+        });
+        const done = (turnId: string, text: string) =>
+          agent.receive({ type: "turn_done", role: "user", turnId, text });
+        const delegate = (delegationId: string, userTurnId: string) =>
+          agent.receive({
+            type: "delegation",
+            delegationId,
+            userTurnId,
+            instructions: "Inspect the fictional setting.",
+            provenance: "native_live_delegation",
+          });
+        yield* agent.receive({
+          type: "turn_created",
+          role: "user",
+          turnId: "known",
+          text: "Inspect red",
+        });
+        yield* delegate("known-work", "known");
+        yield* agent.setMuted(true);
+        yield* agent.setMuted(true);
+        const before = events.length;
+        yield* agent.receive({
+          type: "turn_created",
+          role: "user",
+          turnId: "rejected",
+          text: "Phantom",
+        });
+        yield* done("final-only-rejected", "Another");
+        yield* agent.receive({ type: "turn_delta", turnId: "delta-rejected", text: "Noise" });
+        yield* agent.receive({
+          type: "transcript",
+          role: "user",
+          itemId: "muted-preview",
+          text: "Echo",
+        });
+        yield* delegate("rejected-work", "rejected");
+        yield* delegate("delegation-first", "delegation-rejected");
+        expect(events).toHaveLength(before);
+        expect(
+          (yield* threads.getThreadRecords(threadId, ["messages", "runs"])).messages,
+        ).toHaveLength(0);
+        yield* done("known", "Inspect blue only.");
+        yield* done("known", "Replayed correction");
+        expect((yield* threads.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(1);
+        yield* agent.setMuted(false);
+        yield* agent.setMuted(false);
+        const after = events.length;
+        for (const id of [
+          "rejected",
+          "final-only-rejected",
+          "delta-rejected",
+          "delegation-rejected",
+        ]) {
+          yield* agent.receive({ type: "turn_created", role: "user", turnId: id, text: "Delayed" });
+          yield* done(id, "Delayed final");
+          yield* delegate(`delayed-${id}`, id);
+        }
+        expect(events).toHaveLength(after);
+        yield* done("fresh", "Yes");
+        yield* delegate("fresh-work", "fresh");
+        yield* agent.setMuted(true);
+        yield* agent.setMuted(true);
+        yield* agent.stop;
+        yield* agent.setMuted(false);
+        yield* done("after-stop", "No");
+      }),
+    );
+    const records = yield* threads.getThreadRecords(threadId, ["messages", "runs"]);
+    expect(records.runs).toHaveLength(2);
+    expect(records.messages.map((message) => message.text)).toEqual(["Inspect blue only.", "Yes"]);
+  }).pipe(Effect.provide(services)),
+);
+
+it.effect.each(["completed", "mute-preview", "known-window"] as const)(
+  "Stop preserves real windows but discards orphan input: %s",
+  (scenario) =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make(`thread:orphan-${scenario}`);
+      yield* VoiceFixture.create(threadId);
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const events: LiveVoiceServerEvent[] = [];
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const agent = yield* makeLiveAgentSession({
+            binding: { threadId },
+            sessionId: `orphan-${scenario}`,
+            onBound: () => {},
+            send: (event) =>
+              Effect.sync(() => {
+                events.push(event);
+              }),
+            append: () => Effect.void,
+          });
+          if (scenario !== "mute-preview")
+            yield* agent.receive({
+              type: scenario === "completed" ? "turn_done" : "turn_created",
+              role: "user",
+              turnId: "real",
+              text: "Real request",
+            });
+          if (scenario === "mute-preview")
+            yield* agent.receive({ type: "transcript", role: "user", text: "Unassociated" });
+          if (scenario !== "completed") yield* agent.setMuted(true);
+          const before = events.length;
+          yield* agent.receive({
+            type: "transcript",
+            role: "user",
+            text: "Late alternate transcript",
+          });
+          yield* agent.receive({ type: "turn_done", role: "user", text: "Late alternate final" });
+          expect(events).toHaveLength(before);
+          if (scenario === "completed") {
+            yield* agent.receive({
+              type: "delegation",
+              delegationId: "real-work",
+              userTurnId: "real",
+              instructions: "Inspect.",
+              provenance: "native_live_delegation",
+            });
+          }
+          yield* agent.stop;
+        }),
+      );
+      const records = yield* threads.getThreadRecords(threadId, ["messages", "runs"]);
+      expect(records.messages.map((message) => message.text)).toEqual(
+        scenario === "mute-preview" ? [] : ["Real request"],
+      );
+      expect(records.runs).toHaveLength(scenario === "completed" ? 1 : 0);
+    }).pipe(Effect.provide(services)),
 );

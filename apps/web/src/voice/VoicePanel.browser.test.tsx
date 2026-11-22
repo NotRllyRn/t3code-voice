@@ -814,10 +814,16 @@ it("keeps the original muted session across navigation and backgrounding", async
     microphoneId: "other-microphone",
     speakerId: "other-speaker",
   });
+  expect(h.sockets[0]!.send).toHaveBeenCalledWith(
+    JSON.stringify({ type: "live.preferences", notifications: "progress" }),
+  );
   await act(() => h.sockets[0]!.dispatchEvent(new Event("close")));
   await act(() => vi.advanceTimersByTimeAsync(2000));
   await h.connect(true);
   expect(h.sockets).toHaveLength(2);
+  expect(h.sockets[1]!.send).toHaveBeenCalledWith(
+    JSON.stringify({ type: "live.preferences", notifications: "progress" }),
+  );
   const recoveredUrl = new URL(String(h.socketFactory.mock.calls[1]![0]));
   expect(recoveredUrl.searchParams.get("threadId")).toBe("thread_1");
   expect(JSON.parse(recoveredUrl.searchParams.get("preferences")!)).toEqual(

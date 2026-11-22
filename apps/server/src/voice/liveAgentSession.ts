@@ -139,6 +139,9 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
   let sequence = 0;
   let count = 0;
   let stopped = false;
+  let muted = false;
+  let notifications = input.preferences?.notifications ?? "terminal";
+  const rejectedUserTurns = new Set<string>();
   const segments = new Map<"user" | "assistant", Segment>();
   const userTurns = new Map<string, Segment>();
   const assistantTurns = new Map<string, Segment>();
@@ -329,11 +332,17 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       status: "not_submitted",
       reason,
     });
+  let rejection: { event: Delegation; human: Segment; reason: string } | undefined;
+  const rejectCurrent = (event: Delegation, human: Segment, reason: string) =>
+    Effect.sync(() => {
+      if (segments.get("user") === human) rejection = { event, human, reason };
+    });
   const expirePending = Effect.fn("LiveAgent.expirePending")(function* (now: number) {
     for (const [parent, work] of pending) {
       if (now < work.expiresAt) continue;
       pending.delete(parent);
-      yield* reject(work.event, "parent_timeout");
+      const human = userTurns.get(parent);
+      if (human) yield* rejectCurrent(work.event, human, "parent_timeout");
     }
   });
   const newSegment = Effect.fn("LiveAgent.newSegment")(function* (
@@ -385,10 +394,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       runtimeRequestStatuses: ["pending"],
     });
     if (state.messages.filter((message) => !message.voice).length !== human.inputCount) {
-      yield* append(event.delegationId, "quiet", {
-        status: "not_submitted",
-        reason: "canonical_input_changed",
-      });
+      yield* rejectCurrent(event, human, "canonical_input_changed");
       return;
     }
     if (state.runtimeRequests.length) {
@@ -431,10 +437,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       expectedModelSelection,
     }).pipe(Effect.catchTags({ OrchestratorInputChangedError: () => Effect.undefined }));
     if (!sent) {
-      yield* append(event.delegationId, "quiet", {
-        status: "not_submitted",
-        reason: "canonical_input_changed",
-      });
+      yield* rejectCurrent(event, human, "canonical_input_changed");
       return;
     }
     feedback.set(sent.run.id, {
@@ -460,6 +463,31 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
   });
   const receive = Effect.fn("LiveAgent.receive")(function* (event: NativeLiveEvent) {
     if (stopped) return;
+    // Arrival-time eligibility only: unseen pre-mute speech cannot be distinguished from
+    // new muted input. This guards app history/admission, not native audible replies.
+    const userTurnId =
+      event.type === "turn_delta" ||
+      ((event.type === "turn_created" || event.type === "turn_done") && event.role === "user")
+        ? event.turnId
+        : event.type === "delegation"
+          ? event.userTurnId
+          : undefined;
+    if (userTurnId) {
+      if (rejectedUserTurns.has(userTurnId)) return;
+      if (muted && !userTurns.has(userTurnId)) {
+        if (rejectedUserTurns.size >= 4096) return yield* fail();
+        rejectedUserTurns.add(userTurnId);
+        return;
+      }
+    }
+    if (
+      (event.type === "transcript" || (event.type === "turn_done" && !event.turnId)) &&
+      event.role === "user" &&
+      (muted || userTurns.size > 0)
+    )
+      // Input transcript items have no turn association. Once identified turns exist,
+      // only their canonical lifecycle may open/finalize user windows.
+      return;
     const now = yield* Clock.currentTimeMillis;
     yield* expirePending(now);
     if (event.type === "turn_created" && event.role === "assistant") {
@@ -583,6 +611,16 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
     if (stopped) return;
     const tick = yield* Clock.currentTimeMillis;
     yield* expirePending(tick);
+    if (rejection && segments.get("user") !== rejection.human) rejection = undefined;
+    if (rejection && !speechBlocked()) {
+      const offer = rejection;
+      rejection = undefined;
+      yield* append(offer.event.delegationId, "speakable", {
+        status: "not_submitted",
+        reason: offer.reason,
+        note: "The spoken task was not submitted. Tell the user; do not promise execution.",
+      });
+    }
     if (!threadId || !seeded) return;
     const updates = yield* threads.getThreadRecords(threadId, ["runs", "messages"], {
       messageRoles: ["user"],
@@ -1027,7 +1065,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       }
       const now = yield* Clock.currentTimeMillis;
       if (
-        input.preferences?.notifications !== "progress" ||
+        notifications !== "progress" ||
         speechBlocked() ||
         current.progress >= 3 ||
         now - progressAt < PROGRESS_FRESH_MS
@@ -1093,6 +1131,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       const windows = new Set([...userTurns.values(), ...segments.values()]);
       for (const segment of windows) {
         const role = segment === segments.get("assistant") ? "assistant" : "user";
+        if (role === "user" && !segment.turnId && (muted || userTurns.size > 0)) continue;
         yield* freeze(role, segment);
       }
     }).pipe(
@@ -1101,6 +1140,23 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
     ),
   );
   return {
+    // The owner runs these effects in the same serialized queue as receive.
+    setMuted: (next: boolean) =>
+      Effect.sync(() => {
+        if (stopped || muted === next) return;
+        muted = next;
+        // Orphan previews have no identity to preserve across a mute boundary.
+        // Real ID-bearing windows remain eligible, including teardown finalization.
+        if (muted && !segments.get("user")?.turnId) segments.delete("user");
+      }),
+    setNotifications: Effect.fn("LiveAgent.setNotifications")(function* (
+      next: LiveVoicePreferences["notifications"],
+    ) {
+      if (stopped || notifications === next) return;
+      notifications = next;
+      progressSourceAt = Math.max(progressSourceAt, yield* Clock.currentTimeMillis);
+      narrationGeneration++;
+    }),
     stop,
     receive: (event: NativeLiveEvent) =>
       receive(event).pipe(

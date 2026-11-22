@@ -135,6 +135,15 @@ export function LiveVoiceProvider({ children }: { children: ReactNode }) {
       }
     };
   }, []);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- The session owner forwards notification changes even when its composer is not mounted.
+  useEffect(
+    () =>
+      useLiveVoiceSettings.subscribe((settings, previous) => {
+        if (settings.notifications !== previous.notifications)
+          owner.current?.controller.setNotifications(settings.notifications);
+      }),
+    [],
+  );
   const start = (target: Target) => {
     if (owner.current && isActive(owner.current.controller.state)) return;
     if (owner.current) {
@@ -200,6 +209,7 @@ export function LiveVoiceProvider({ children }: { children: ReactNode }) {
       },
     );
     owner.current = { target, controller, token };
+    controller.setNotifications(settings.notifications);
     void controller.start();
   };
   const dismiss = () => {

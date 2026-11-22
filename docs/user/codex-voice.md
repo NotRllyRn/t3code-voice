@@ -46,6 +46,11 @@ required; credentials and upstream destinations are never supplied by the browse
 4. Mute to turn off microphone input, or Stop to end voice capture and playback.
    Stop does not cancel a coding task. Use the normal coding Stop for that.
 
+Muting stops new microphone capture locally. An already identified spoken turn
+can still finish transcription and receive its reply. The relay does not provide
+a shared audio/mute cutoff: a turn first reported after mute may be dropped,
+and provider-generated extra audio cannot be ruled out. Use Stop to end playback.
+
 A draft is saved as a thread when native voice starts, before speech is admitted.
 Voice stays bound to that thread while you switch chats or put the app in the
 background. Other chats cannot start a second session. Typed messages, speech, coding progress
@@ -99,13 +104,17 @@ automatic permission bypass is used.
 ## Live Voice settings
 
 In **Settings → Live Voice**, choose a native voice and microphone/speaker where
-supported by your browser. Changes apply to the next session; recovery keeps the
-current session’s choices and mute state. Native Live does not expose supported
+supported by your browser. Voice and device changes apply to the next session;
+recovery keeps those choices and mute state. Native Live does not expose supported
 speed or tone controls here.
 
 By default, task feedback announces completion, blocked work, and requests for
 attention. Turn on **Read progress aloud** to also hear actual written coding-agent
-commentary. Private reasoning is never narrated. Task notifications wait while a
+commentary. This switch also updates an active session. With it off, routine
+written updates stay in the chat rather than being sent for voice narration.
+Ask the coding agent for fresh status between announcements; the voice model
+does not continuously receive silent task updates. Private reasoning is never
+narrated. Task notifications wait while a
 native human turn is active, then resume after its final transcript. There is a
 short detection boundary before the native service reports that turn; this is
 not a guarantee against every interruption.

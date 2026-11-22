@@ -229,16 +229,10 @@ it.effect(
             wire.push(...encodeNativeLiveAppend(event));
           }),
       });
-      yield* agent.seed;
-      const firstSize = wire.length;
-      yield* agent.seed;
-      expect(wire).toHaveLength(firstSize);
-      expect(
-        wire.every(
-          (frame) => frame.type === "session.context.append" && frame.channel === "commentary",
-        ),
-      ).toBe(true);
-      const seed = JSON.parse(wire.map((frame) => frame.content[0].text).join(""));
+      const initialContext = yield* agent.seed;
+      expect(yield* agent.seed).toBe(initialContext);
+      expect(wire).toEqual([]);
+      const seed = JSON.parse(initialContext ?? "null");
       expect(seed).toMatchObject({ source: "T3_bound_history", threadId, messages: expected });
       expect(seed.runs).toEqual([]);
       expect(yield* store.getThreadRecords(threadId, ["messages", "turnItems", "runs"])).toEqual(

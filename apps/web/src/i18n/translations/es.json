@@ -8755,7 +8755,7 @@
   "e6403036195bac15": "Se usa en las nuevas sesiones en directo. Los ajustes de dictado son independientes.",
   "e21b730fdb820984": "Voz en directo",
   "4f1e4339f5b9884c": "Leer el progreso en voz alta",
-  "5cc8d9b17c246a49": "Lee el progreso escrito durante las nuevas sesiones en directo. Las tareas completadas o bloqueadas y las solicitudes de atención se siguen anunciando aunque esta opción esté desactivada.",
+  "75a532d6f4c5734d": "Lee el progreso escrito durante las sesiones en directo. Los cambios se aplican de inmediato. Las tareas completadas o bloqueadas y las solicitudes de atención se siguen anunciando aunque esta opción esté desactivada.",
   "a4a22c20ff4c20e1": "Micrófono en directo",
   "e35bb5831b46c6c8": "La sesión mantiene este micrófono al navegar y reconectarse. Los nombres de los dispositivos aparecen tras conceder acceso al micrófono.",
   "5eb0aa61b4817a74": "Altavoz en directo",

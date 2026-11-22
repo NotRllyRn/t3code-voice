@@ -164,10 +164,15 @@ describe("pinned native Live wire", () => {
     }
   });
 
-  it("encodes only native append names, IDs and explicit channels", () => {
-    expect(encodeNativeLiveAppend({ channel: "quiet", text: "Fictional context." })).toEqual([
-      fixtures.quietAppend,
-    ]);
+  it("keeps passive context local and encodes only deliberate speech offers", () => {
+    expect(encodeNativeLiveAppend({ channel: "quiet", text: "Fictional context." })).toEqual([]);
+    expect(
+      encodeNativeLiveAppend({
+        delegationId: "active-task",
+        channel: "quiet",
+        text: "Still working.",
+      }),
+    ).toEqual([]);
     expect(
       encodeNativeLiveAppend({
         delegationId: "delegation-fictional",
@@ -197,7 +202,7 @@ describe("pinned native Live wire", () => {
   it.each(["a".repeat(499) + "🎙️" + "界".repeat(400), "🎙️界é".repeat(300)])(
     "chunks ordered Unicode at native 500-byte boundaries without changing the text %#",
     (text) => {
-      const messages = encodeNativeLiveAppend({ channel: "quiet", text });
+      const messages = encodeNativeLiveAppend({ channel: "speakable", text });
       expect(messages.length).toBeGreaterThan(1);
       expect(messages.map((message) => message.content[0].text).join("")).toBe(text);
       for (const message of messages) {
@@ -206,7 +211,7 @@ describe("pinned native Live wire", () => {
           NATIVE_LIVE_APPEND_CHUNK_BYTES,
         );
         expect(Buffer.from(chunk).toString("utf8")).toBe(chunk);
-        expect(message.channel).toBe("commentary");
+        expect(message.channel).toBe("speakable");
       }
     },
   );

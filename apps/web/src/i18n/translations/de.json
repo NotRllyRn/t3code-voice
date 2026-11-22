@@ -8757,7 +8757,7 @@
   "e6403036195bac15": "Wird für neue Live-Sitzungen verwendet. Die Diktiereinstellungen sind separat.",
   "e21b730fdb820984": "Live-Sprachmodus",
   "4f1e4339f5b9884c": "Fortschritt vorlesen",
-  "5cc8d9b17c246a49": "Liest schriftliche Fortschrittsmeldungen in neuen Live-Sitzungen vor. Abgeschlossene oder blockierte Aufgaben und Bitten um Aufmerksamkeit werden auch bei ausgeschalteter Option angesagt.",
+  "75a532d6f4c5734d": "Liest schriftliche Fortschrittsmeldungen in Live-Sitzungen vor. Änderungen gelten sofort. Abgeschlossene oder blockierte Aufgaben und Bitten um Aufmerksamkeit werden auch bei ausgeschalteter Option angesagt.",
   "a4a22c20ff4c20e1": "Live-Mikrofon",
   "e35bb5831b46c6c8": "Die Sitzung behält dieses Mikrofon beim Navigieren und erneuten Verbinden bei. Gerätenamen erscheinen, sobald der Mikrofonzugriff erlaubt wurde.",
   "5eb0aa61b4817a74": "Live-Lautsprecher",

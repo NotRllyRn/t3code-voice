@@ -257,6 +257,14 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
         }
         return;
       }
+      if (event.type === "live.mute") {
+        yield* agent.setMuted(event.muted);
+        return;
+      }
+      if (event.type === "live.preferences") {
+        yield* agent.setNotifications(event.notifications);
+        return;
+      }
       if (event.type !== "live.start") return;
       if (
         !awaitingOffer ||
