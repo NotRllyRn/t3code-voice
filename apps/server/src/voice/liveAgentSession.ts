@@ -332,11 +332,17 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       status: "not_submitted",
       reason,
     });
+  let rejection: { event: Delegation; human: Segment; reason: string } | undefined;
+  const rejectCurrent = (event: Delegation, human: Segment, reason: string) =>
+    Effect.sync(() => {
+      if (segments.get("user") === human) rejection = { event, human, reason };
+    });
   const expirePending = Effect.fn("LiveAgent.expirePending")(function* (now: number) {
     for (const [parent, work] of pending) {
       if (now < work.expiresAt) continue;
       pending.delete(parent);
-      yield* reject(work.event, "parent_timeout");
+      const human = userTurns.get(parent);
+      if (human) yield* rejectCurrent(work.event, human, "parent_timeout");
     }
   });
   const newSegment = Effect.fn("LiveAgent.newSegment")(function* (
@@ -388,10 +394,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       runtimeRequestStatuses: ["pending"],
     });
     if (state.messages.filter((message) => !message.voice).length !== human.inputCount) {
-      yield* append(event.delegationId, "quiet", {
-        status: "not_submitted",
-        reason: "canonical_input_changed",
-      });
+      yield* rejectCurrent(event, human, "canonical_input_changed");
       return;
     }
     if (state.runtimeRequests.length) {
@@ -434,10 +437,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       expectedModelSelection,
     }).pipe(Effect.catchTags({ OrchestratorInputChangedError: () => Effect.undefined }));
     if (!sent) {
-      yield* append(event.delegationId, "quiet", {
-        status: "not_submitted",
-        reason: "canonical_input_changed",
-      });
+      yield* rejectCurrent(event, human, "canonical_input_changed");
       return;
     }
     feedback.set(sent.run.id, {
@@ -611,6 +611,16 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
     if (stopped) return;
     const tick = yield* Clock.currentTimeMillis;
     yield* expirePending(tick);
+    if (rejection && segments.get("user") !== rejection.human) rejection = undefined;
+    if (rejection && !speechBlocked()) {
+      const offer = rejection;
+      rejection = undefined;
+      yield* append(offer.event.delegationId, "speakable", {
+        status: "not_submitted",
+        reason: offer.reason,
+        note: "The spoken task was not submitted. Tell the user; do not promise execution.",
+      });
+    }
     if (!threadId || !seeded) return;
     const updates = yield* threads.getThreadRecords(threadId, ["runs", "messages"], {
       messageRoles: ["user"],

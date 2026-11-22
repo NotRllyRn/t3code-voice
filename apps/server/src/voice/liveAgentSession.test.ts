@@ -1403,12 +1403,18 @@ it.live.each([
             return yield* threads.sendToThread(input);
           }),
       };
+      const notices: NativeLiveAppend[] = [];
+      let canAnnounce = false;
       const agent = yield* makeLiveAgentSession({
         binding: { threadId },
         sessionId: "typed-race",
+        canAnnounce: () => canAnnounce,
         onBound: () => {},
         send: () => Effect.void,
-        append: () => Effect.void,
+        append: (notice) =>
+          Effect.sync(() => {
+            notices.push(notice);
+          }),
       });
       yield* agent.seed;
       const final = {
@@ -1438,6 +1444,22 @@ it.live.each([
           .receive(delegation)
           .pipe(Effect.provideService(ThreadManagement.ThreadManagementService, guarded));
       }
+      expect(notices.flatMap(encodeNativeLiveAppend)).toHaveLength(0);
+      yield* agent.poll;
+      expect(notices.flatMap(encodeNativeLiveAppend)).toHaveLength(0);
+      canAnnounce = true;
+      yield* agent.poll;
+      const rejected = notices
+        .flatMap(encodeNativeLiveAppend)
+        .filter((notice) => notice.content[0].text.includes('"status":"not_submitted"'));
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]?.content[0].text).toContain("canonical_input_changed");
+      yield* agent.poll;
+      expect(
+        notices
+          .flatMap(encodeNativeLiveAppend)
+          .filter((notice) => notice.content[0].text.includes('"status":"not_submitted"')),
+      ).toHaveLength(1);
       const admitted = yield* threads.getThreadRecords(threadId, ["runs", "messages"]);
       expect(admitted.runs).toHaveLength(1);
       expect(admitted.runs[0]?.userMessageId).toBe(MessageId.make("typed-race"));
@@ -1601,6 +1623,7 @@ it.effect.each(["reordered", "interleaved", "unassociated", "handoff-replay"] as
             "Corrected final. Keep blue only; do not edit.",
           );
         }
+        expect(notices.flatMap(encodeNativeLiveAppend)).toHaveLength(0);
         if (scenario === "unassociated")
           for (const reason of ["missing_parent", "unknown_parent", "superseded_parent"])
             expect(notices.some((notice) => notice.text.includes(reason))).toBe(true);
@@ -1608,7 +1631,7 @@ it.effect.each(["reordered", "interleaved", "unassociated", "handoff-replay"] as
     ).pipe(Effect.provide(services)),
 );
 
-it.effect.each(["timeout", "stop", "disconnect", "capacity"] as const)(
+it.effect.each(["timeout", "timeout-superseded", "stop", "disconnect", "capacity"] as const)(
   "%s drops bounded pending native work without creating task authority",
   (scenario) =>
     Effect.gen(function* () {
@@ -1650,9 +1673,10 @@ it.effect.each(["timeout", "stop", "disconnect", "capacity"] as const)(
             );
           }
           expect((yield* threads.getThreadRecords(threadId, ["runs"])).runs).toHaveLength(0);
-          if (scenario === "timeout") {
+          if (scenario === "timeout" || scenario === "timeout-superseded") {
             yield* TestClock.adjust("30 seconds");
-            // Expiry is checked on completion too, even without a timer poll.
+            yield* agent.poll;
+            expect(notices.flatMap(encodeNativeLiveAppend)).toHaveLength(0);
             yield* agent.receive({
               type: "turn_done",
               role: "user",
@@ -1666,7 +1690,22 @@ it.effect.each(["timeout", "stop", "disconnect", "capacity"] as const)(
               instructions: "Inspect blue.",
               provenance: "native_live_delegation",
             });
-            expect(notices.some((notice) => notice.text.includes("parent_timeout"))).toBe(true);
+            if (scenario === "timeout-superseded")
+              yield* agent.receive({
+                type: "turn_done",
+                role: "user",
+                turnId: "newer",
+                text: "Hello.",
+              });
+            yield* agent.poll;
+            const rejection = notices.flatMap(encodeNativeLiveAppend);
+            expect(rejection).toHaveLength(scenario === "timeout" ? 1 : 0);
+            if (scenario === "timeout")
+              expect(rejection[0]?.content[0].text).toContain("parent_timeout");
+            yield* agent.poll;
+            expect(notices.flatMap(encodeNativeLiveAppend)).toHaveLength(
+              scenario === "timeout" ? 1 : 0,
+            );
           }
           if (scenario === "stop") {
             yield* agent.stop;
@@ -1688,13 +1727,12 @@ it.effect.each(["timeout", "stop", "disconnect", "capacity"] as const)(
       });
       const records = yield* threads.getThreadRecords(threadId, ["runs", "messages"]);
       expect(records.runs).toHaveLength(0);
-      expect(records.messages).toHaveLength(scenario === "capacity" ? 33 : 1);
-      expect(records.messages.every((message) => message.voice?.itemId.startsWith("parent_"))).toBe(
-        true,
+      expect(records.messages).toHaveLength(
+        scenario === "capacity" ? 33 : scenario === "timeout-superseded" ? 2 : 1,
       );
-      expect(records.messages.every((message) => message.text === "Retain this correction.")).toBe(
-        true,
-      );
+      const parents = records.messages.filter((message) => message.voice?.itemId !== "newer");
+      expect(parents.every((message) => message.voice?.itemId.startsWith("parent_"))).toBe(true);
+      expect(parents.every((message) => message.text === "Retain this correction.")).toBe(true);
     }).pipe(Effect.provide(services)),
 );
 
