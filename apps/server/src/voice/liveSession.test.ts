@@ -162,14 +162,12 @@ it.effect(
       const accepted = JSON.parse(yield* Queue.take(down.output));
       expect(accepted.type).toBe("live.agent");
       expect(["accepted", "queued"]).toContain(accepted.status);
-      // No TestClock advance: a committed task event wakes the context feed immediately.
-      const context = JSON.parse(yield* Queue.take(up.output));
-      expect(context.channel).toBe("commentary");
-      expect(context.content[0].text).toContain("T3_typed_request");
+      // A committed task updates the app without triggering native commentary.
       yield* Queue.offer(down.input, '{"type":"live.stop"}');
       yield* Fiber.join(fiber);
       expect(hangups).toBe(1);
       expect(releases).toBe(1);
+      expect(yield* Queue.size(up.output)).toBe(0);
       expect(JSON.parse(yield* Queue.take(down.output))).toMatchObject({
         type: "live.cleanup",
         result: "acknowledged",
