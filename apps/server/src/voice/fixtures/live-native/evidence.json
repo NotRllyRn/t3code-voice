@@ -1,0 +1,63 @@
+{
+  "fixtureKind": "Fictional source-derived examples, not captured sessions. IDs, transcripts, SDP, voice and domains are illustrative; no credentials or usable media.",
+  "dialect": "cpa-codex-live",
+  "requestedModel": "gpt-live-1.1-codex",
+  "effectiveModel": null,
+  "deploymentVersionCorrection": {
+    "broker": "0.5.4",
+    "core": "8.0.63",
+    "brokerCommit": "8066e5f35aca8f4bba9ea78eaea1c79ebd6f30b2"
+  },
+  "sources": [
+    {
+      "url": "https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/core/src/realtime_conversation.rs#L2186",
+      "proves": "Native OpenAI-Alpha: quicksilver=v2 header. Internal v3 conversation selector is not a public version request field."
+    },
+    {
+      "url": "https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_frameless_bidi.rs#L15-L95",
+      "sha256": "faa6826b1884ccceb564e8bb6bd60048f7900ffcc5b50fcacbd840b03a173515",
+      "proves": "Native started/updated, item.text transcripts, turn.role/transcript and delegation item.id/type/target/content. Parser does not read transcript times or delegation offset. Bounded public raw-source fetch performed for this seed."
+    },
+    {
+      "url": "https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_frameless_bidi_tests.rs#L7-L69",
+      "sha256": "c528a4a415713c0af91adce79deefe3cba51585daac788e2ba17c6dc15dec900",
+      "proves": "Native delegation example carries offset_ms=1000, but assertion checks concatenated delegation content only. Input item ID and user turn example. No transcript time/cutoff association is tested."
+    },
+    {
+      "url": "https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_common.rs#L33-L94",
+      "sha256": "a60dfc4759b36799057e08bbb0732e83c9e144d7fb7dd4dde8826bf8b96cb416",
+      "proves": "Started/updated session.id and native error message variants; errors deliberately mapped to a safe enum instead of copying private text."
+    },
+    {
+      "url": "https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_frameless_bidi.rs#L13-L126",
+      "sha256": "e678b750f9ebd12f0fb28f01029f094f7c2f0316641adb82a09dd84fde6b5a99",
+      "proves": "Client delegation; audio.output.voice; session/delegation context append with input_text content; 500-byte UTF-8 boundary-preserving chunks."
+    },
+    {
+      "url": "https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol.rs#L31-L105",
+      "sha256": "2de304fccbfeae2baec2879308cdc4988872a56435ca0e666ecde65ffee367ce",
+      "proves": "Native commentary/speakable channels and delegation_item_id, not public delegation_id."
+    },
+    {
+      "url": "https://github.com/router-for-me/CLIProxyAPI/blob/6db7d4b839d86c5b24e17bbe73bcd4db18ef1b1a/internal/client/codex/live/live.go#L182-L214",
+      "sha256": "6b9f9aeea2224dcb20820521868a30b7af97cf4830158089a2476ae6ddd56915",
+      "proves": "Core v8.0.63 create handler, JSON bootstrap; lines 387-455 retain call identity and media-relay SDP response. This source is not proof of deployed Broker state."
+    },
+    {
+      "url": "https://github.com/router-for-me/CLIProxyAPI/blob/6db7d4b839d86c5b24e17bbe73bcd4db18ef1b1a/internal/client/codex/live/sideband.go#L533-L582",
+      "sha256": "5c70a0ea2961da8c74138e25cb98fa7bf54f8d71bfaca09330957b3b303bba38",
+      "proves": "Native /live/<call_id> sideband path, call ID grammar and Location identity extraction. Location is never a request destination here."
+    },
+    {
+      "url": "https://github.com/router-for-me/CLIProxyAPI/blob/6db7d4b839d86c5b24e17bbe73bcd4db18ef1b1a/internal/api/server_routes.go",
+      "proves": "POST /v1/live, GET /v1/live/:call_id and POST /v1/realtime/calls/:call_id/hangup routes. POST hangup method is frozen; no response-body codec is assumed."
+    }
+  ],
+  "unproven": [
+    "Historical seed policy (superseded): no native delegation capture was available, so the seed rejected every generated delegation. Current code requires an observed exact user_bidi_turn_id, matching finalized user turn, one parent claim and normal T3 admission. Captured parent relations support this experimental adapter, not an upstream guarantee or proof of semantic faithfulness. The finalized human transcript controls conflicting derived instructions.",
+    "Native transcript timestamps are not inferred from current public session.* delta events. Native turn.done is not itself delegation authority. Unknown public dialect events cannot be treated as native equivalents.",
+    "Closed is synthesized by transport; session.closed is not claimed as an evidenced native event. Output item IDs are optional because parser requires only item.text.",
+    "201 transport, requested alias, sideband and hangup success from user handoff do not prove audible duplex, effective model, supported voice, final transcript accuracy or general entitlement.",
+    "Current retry policy allows only bounded, definitive no-call refresh failures: at most two creates within 180 seconds, with a 90-second minimum wait. This is UX policy, not a Broker guarantee. Arbitrary 503, auth, quota and ambiguous POST loss never authorize automatic retry."
+  ]
+}

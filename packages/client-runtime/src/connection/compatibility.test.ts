@@ -16,7 +16,7 @@ const descriptor = (orchestrationProtocolVersion?: number): ExecutionEnvironment
   platform: { os: "darwin", arch: "arm64" },
   serverVersion: "9.0.0",
   ...(orchestrationProtocolVersion === undefined ? {} : { orchestrationProtocolVersion }),
-  capabilities: { repositoryIdentity: true },
+  capabilities: { repositoryIdentity: true, voiceHistoryV1: true },
 });
 
 describe("orchestration protocol compatibility", () => {
@@ -31,7 +31,9 @@ describe("orchestration protocol compatibility", () => {
     expect(socketUrl.searchParams.get("orchestrationProtocol")).toBe(
       String(ORCHESTRATION_PROTOCOL_VERSION),
     );
-    expect(socketUrl.searchParams.get("clientCapabilities")).toBe("settingsSecretReferences");
+    expect(socketUrl.searchParams.get("clientCapabilities")).toBe(
+      "settingsSecretReferences,voiceHistoryV1",
+    );
     expect(socketUrl.searchParams.get("wsTicket")).toBe("secret");
     expect(socketUrl.searchParams.get("connectionMethod")).toBe("relay");
   });
@@ -57,7 +59,10 @@ describe("orchestration protocol compatibility", () => {
   it("offers a remote update only for an older host that can update itself", () => {
     const older = descriptor(ORCHESTRATION_PROTOCOL_VERSION - 1);
     const withCapabilities = (capabilities: ExecutionEnvironmentDescriptor["capabilities"]) =>
-      orchestrationProtocolCompatibilityError({ ...older, capabilities });
+      orchestrationProtocolCompatibilityError({
+        ...older,
+        capabilities: { ...capabilities, voiceHistoryV1: true },
+      });
 
     expect(
       withCapabilities({ repositoryIdentity: true, serverSelfUpdate: "boot-service" }),

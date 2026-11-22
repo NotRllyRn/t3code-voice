@@ -594,13 +594,17 @@ it.effect.each(queuedDeliveryCases)(
     Effect.gen(function* () {
       const gate = yield* Deferred.make<void>();
       const deliveryReleased = yield* Deferred.make<void>();
+      let remainingDeliveries = 2;
       const tracer = Tracer.make({
         span: (options) => {
           const span = new Tracer.NativeSpan(options);
           const end = span.end.bind(span);
           span.end = (...args) => {
             end(...args);
-            if (span.name === "ScheduledTaskService.releaseFailedDelivery") {
+            if (
+              span.name === "ScheduledTaskService.runWebhookDelivery" &&
+              --remainingDeliveries === 0
+            ) {
               Deferred.doneUnsafe(deliveryReleased, Effect.void);
             }
           };
@@ -608,7 +612,7 @@ it.effect.each(queuedDeliveryCases)(
         },
       });
       yield* withService(
-        ({ service, launches }) =>
+        ({ service, launches, sql }) =>
           Effect.gen(function* () {
             const { task } = yield* service.upsert(yield* webhookTaskInput());
             yield* service.triggerWebhook(requestFor(task));
@@ -625,6 +629,9 @@ it.effect.each(queuedDeliveryCases)(
             assert.equal(delivery.outcome, "dispatch_failed");
             assert.equal(delivery.error, reason);
             assert.equal(yield* Queue.size(launches), 0);
+            const [row] =
+              yield* sql`SELECT run_count FROM scheduled_tasks WHERE task_id = ${task.id}`;
+            assert.equal(row?.run_count, 1);
           }),
         { gate },
       ).pipe(Effect.withTracer(tracer));

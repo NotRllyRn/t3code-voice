@@ -2,6 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as TestClock from "effect/testing/TestClock";
 
@@ -117,6 +118,7 @@ describe("DesktopLifecycle", () => {
       const layerEnvironment = Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
         platform,
         isDevelopment: false,
+        appImagePath: Option.none(),
       } as DesktopEnvironment.DesktopEnvironment["Service"]);
 
       const layer = DesktopLifecycle.layer.pipe(
@@ -262,8 +264,8 @@ describe("DesktopLifecycle", () => {
         Effect.provideService(HostProcess.Arguments, [
           "/opt/T3 Code/t3code",
           "--no-sandbox",
-          "T3CODE://pair?token=spent",
-          "t3code://new?prompt=hello",
+          "T3CODE-VOICE://pair?token=spent",
+          "t3code-voice://new?prompt=hello",
         ]),
       );
 

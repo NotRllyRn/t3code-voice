@@ -4,6 +4,8 @@ import {
   type ServerNpmRelease,
 } from "@t3tools/contracts";
 import { npmReleaseDatabaseMigration } from "@t3tools/shared/cliRelease";
+import { parseVoiceVersion } from "@t3tools/shared/voiceRelease";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveCommandPath } from "@t3tools/shared/shell";
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
@@ -15,7 +17,11 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import { FetchHttpClient, HttpClient } from "effect/http";
 
+import packageJson from "../../package.json" with { type: "json" };
 import * as ProcessRunner from "../processRunner.ts";
+import { lookupVoiceRelease } from "./voiceReleaseLookup.ts";
+
+export { voiceReleaseTestIndexUrl } from "./voiceReleaseLookup.ts";
 
 const Version = Schema.String.check(Schema.isPattern(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/));
 const Manifest = Schema.Struct({ version: Version, t3code: Schema.optionalKey(Schema.Unknown) });
@@ -55,9 +61,12 @@ function toRelease(spec: string, json: string) {
   });
 }
 
-export const make = Effect.fn("NpmRelease.make")(function* () {
+export const make = Effect.fn("NpmRelease.make")(function* (runtimeVersion = packageJson.version) {
   const runner = yield* ProcessRunner.ProcessRunner;
   const http = yield* HttpClient.HttpClient;
+  const environment = yield* HostProcess.Environment;
+  const platform = yield* HostProcess.Platform;
+  const arch = yield* HostProcess.Architecture;
   const lookupPublic = Effect.fn("NpmRelease.lookupPublic")(function* (spec: string) {
     const unreachable = new ServerNpmReleaseError({
       reason: "npm is not installed and the public npm registry could not be reached.",
@@ -79,6 +88,9 @@ export const make = Effect.fn("NpmRelease.make")(function* () {
     capacity: 32,
     timeToLive: Duration.minutes(1),
     lookup: Effect.fn("NpmRelease.lookup")(function* (spec: string) {
+      if (spec === "voice") {
+        return yield* lookupVoiceRelease({ http, runtimeVersion, environment, platform, arch });
+      }
       // Without npm there is no configured registry to honor, so use the public one.
       const npmPath = yield* resolveCommandPath("npm");
       if (npmPath === null) return yield* lookupPublic(spec);
@@ -122,6 +134,13 @@ export const make = Effect.fn("NpmRelease.make")(function* () {
           () => new ServerNpmReleaseError({ reason: "Invalid release version or track." }),
         ),
       );
+      if (parseVoiceVersion(runtimeVersion) !== null || spec === "voice") {
+        if (parseVoiceVersion(runtimeVersion) === null || spec !== "voice") {
+          return yield* new ServerNpmReleaseError({
+            reason: "Voice servers check only the Voice release channel.",
+          });
+        }
+      }
       return yield* Cache.get(cache, spec);
     }),
   });

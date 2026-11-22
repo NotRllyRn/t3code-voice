@@ -1,8 +1,12 @@
+import { msg } from "gt-i18n";
+import { translatableMessage } from "../errors/translatable.ts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import {
+  CLIENT_CAPABILITIES_HEADER,
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+  VOICE_HISTORY_CAPABILITY,
 } from "@t3tools/contracts";
 import * as Result from "effect/Result";
 import * as SubscriptionRef from "effect/SubscriptionRef";
@@ -31,10 +35,12 @@ export function withOrchestrationProtocolHeader(
   headers: EnvironmentHttpAuthHeaders,
 ): EnvironmentHttpAuthHeaders & {
   readonly [ORCHESTRATION_PROTOCOL_HEADER]: typeof ORCHESTRATION_PROTOCOL_VERSION_TEXT;
+  readonly [CLIENT_CAPABILITIES_HEADER]: typeof VOICE_HISTORY_CAPABILITY;
 } {
   return {
     ...headers,
     [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+    [CLIENT_CAPABILITIES_HEADER]: VOICE_HISTORY_CAPABILITY,
   };
 }
 
@@ -71,7 +77,9 @@ const buildEnvironmentAuthHeaders = Effect.fn("environmentHttpAuth.buildEnvironm
     }
     if (Option.isNone(signer)) {
       return yield* new RemoteEnvironmentAuthFetchError({
-        message: "No DPoP signer is available to authorize the environment request.",
+        ...translatableMessage(
+          msg("No DPoP signer is available to authorize the environment request."),
+        ),
         cause: authorization._tag,
       });
     }
@@ -81,7 +89,9 @@ const buildEnvironmentAuthHeaders = Effect.fn("environmentHttpAuth.buildEnvironm
         Effect.mapError(
           (cause) =>
             new RemoteEnvironmentAuthFetchError({
-              message: "Could not create the environment request authorization proof.",
+              ...translatableMessage(
+                msg("Could not create the environment request authorization proof."),
+              ),
               cause,
             }),
         ),
@@ -123,7 +133,7 @@ export const executeConnectedEnvironmentHttpRequest = Effect.fn(
   const prepared = yield* SubscriptionRef.get(supervisor.prepared);
   if (Option.isNone(prepared)) {
     return yield* new RemoteEnvironmentAuthFetchError({
-      message: "The environment is not connected.",
+      ...translatableMessage(msg("The environment is not connected.")),
       cause: supervisor.target._tag,
     });
   }
@@ -186,29 +196,35 @@ const executeEnvironmentRequest = Effect.fnUntraced(function* <
         const remote = input.remoteAuthorization;
         if (remote === undefined || Option.isNone(remote)) {
           return yield* new RemoteEnvironmentAuthFetchError({
-            message: "No relay authorization service is available for the environment request.",
+            ...translatableMessage(
+              msg("No relay authorization service is available for the environment request."),
+            ),
             cause: input.prepared.target._tag,
           });
         }
-        const current = yield* remote.value
-          .authorizeDpopHttp({
-            expectedEnvironmentId: input.prepared.environmentId,
-            ...(rejectedAccessToken === undefined ? {} : { rejectedAccessToken }),
-          })
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new RemoteEnvironmentAuthFetchError({
-                  message: "Could not authorize the environment request.",
-                  cause,
-                }),
-            ),
-          );
-        // A learned direct route keeps its own origin; only the token renews.
-        if (input.prepared.target._tag === "RelayConnectionTarget") {
-          httpBaseUrl = current.httpBaseUrl;
+        const authFetchError = (cause: unknown) =>
+          new RemoteEnvironmentAuthFetchError({
+            ...translatableMessage(msg("Could not authorize the environment request.")),
+            cause,
+          });
+        const direct = authorization.directConnection;
+        if (direct !== undefined) {
+          authorization = yield* remote.value
+            .authorizeDirectDpopHttp(direct, rejectedAccessToken)
+            .pipe(Effect.mapError(authFetchError));
+        } else {
+          const current = yield* remote.value
+            .authorizeDpopHttp({
+              expectedEnvironmentId: input.prepared.environmentId,
+              ...(rejectedAccessToken === undefined ? {} : { rejectedAccessToken }),
+            })
+            .pipe(Effect.mapError(authFetchError));
+          // A learned direct route keeps its own origin; only the token renews.
+          if (input.prepared.target._tag === "RelayConnectionTarget") {
+            httpBaseUrl = current.httpBaseUrl;
+          }
+          authorization = current.httpAuthorization;
         }
-        authorization = current.httpAuthorization;
       }
 
       const requestUrl = requestUrlFor(httpBaseUrl);
@@ -251,7 +267,9 @@ const executeEnvironmentRequest = Effect.fnUntraced(function* <
           continue;
         }
         return yield* new RemoteEnvironmentAuthFetchError({
-          message: "The environment rejected the renewed session authorization.",
+          ...translatableMessage(
+            msg("The environment rejected the renewed session authorization."),
+          ),
           cause: result.success,
         });
       }

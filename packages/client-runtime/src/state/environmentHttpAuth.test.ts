@@ -1,8 +1,10 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
+  CLIENT_CAPABILITIES_HEADER,
   EnvironmentId,
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+  VOICE_HISTORY_CAPABILITY,
   ProjectId,
   ThreadId,
   type AuthSessionState,
@@ -12,6 +14,7 @@ import {
   OrchestrationV2ThreadTranscript,
   type OrchestrationV2ThreadHistoryPage,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -21,7 +24,9 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import type { HttpClient } from "effect/http";
+import { AsyncResult } from "effect/reactivity";
 
+import { getEnvironmentLiveVoiceUrl } from "../voice-conversation/environmentUrl.ts";
 import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
 import {
   ConnectionTransientError,
@@ -33,7 +38,7 @@ import * as ManagedRelay from "../relay/managedRelay.ts";
 import { type RemoteEnvironmentRequestError } from "../rpc/http.ts";
 import * as RpcHttp from "../rpc/http.ts";
 import * as PullRequestDiffLoader from "./pullRequestDiffHttp.ts";
-import { fetchEnvironmentSessionState } from "./session.ts";
+import { fetchEnvironmentSessionState, sessionDeniesScope } from "./session.ts";
 import { fetchEnvironmentShellSnapshot } from "./shellSnapshotHttp.ts";
 import * as ThreadSnapshotLoader from "./threadSnapshotHttp.ts";
 import { fetchEnvironmentThreadTranscript } from "./threadTranscriptHttp.ts";
@@ -131,6 +136,8 @@ function makeHarness(reply: (requestNumber: number) => Response | Promise<Respon
   const remoteAuthorization = RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization.of({
     authorizeBearer: () => Effect.die("Unexpected bearer connection preparation."),
     authorizeDpop: () => Effect.die("HTTP requests must not prepare a WebSocket connection."),
+    authorizeDirectDpop: () => Effect.die("HTTP requests must not prepare a WebSocket connection."),
+    authorizeDirectDpopHttp: () => Effect.die("Unexpected direct DPoP authorization."),
     authorizeDpopHttp: (input) =>
       Effect.sync(() => {
         authorizations.push(input);
@@ -223,7 +230,11 @@ const LOADERS: ReadonlyArray<{
     expected: SHELL,
     load: (input: HttpInput) =>
       fetchEnvironmentShellSnapshot(input).pipe(
-        Effect.map(({ loadPullRequests: _links, ...snapshot }) => snapshot),
+        Effect.map((answer) => {
+          if ("resumable" in answer) return answer;
+          const { loadPullRequests: _links, ...snapshot } = answer;
+          return snapshot;
+        }),
       ),
   },
   {
@@ -303,6 +314,9 @@ describe("authenticated environment HTTP requests", () => {
       if (loader.path.startsWith("/api/orchestration/")) {
         expect(new Headers(call.init.headers).get(ORCHESTRATION_PROTOCOL_HEADER)).toBe(
           ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+        );
+        expect(new Headers(call.init.headers).get(CLIENT_CAPABILITIES_HEADER)).toBe(
+          VOICE_HISTORY_CAPABILITY,
         );
       }
       expect(harness.authorizations).toEqual([{ expectedEnvironmentId: TARGET.environmentId }]);
@@ -592,6 +606,8 @@ describe("authenticated environment HTTP requests", () => {
         message: "The environment rejected the renewed session authorization.",
       });
       expect(harness.calls).toHaveLength(2);
+      const rejectedLookup = AsyncResult.failure<AuthSessionState, typeof error>(Cause.fail(error));
+      expect(sessionDeniesScope(rejectedLookup, "orchestration:read")).toBe(true);
     }),
   );
 
@@ -662,3 +678,90 @@ describe("authenticated environment HTTP requests", () => {
     }),
   );
 });
+
+it.effect.each([
+  "supported",
+  "revoked",
+  "unavailable",
+  "legacy",
+  "disabled",
+  "different-environment",
+  "legacy-different-environment",
+] as const)("Live media-ticket startup distinguishes %s without exposing credentials", (state) =>
+  Effect.gen(function* () {
+    const harness = makeHarness(() =>
+      state === "revoked"
+        ? credentialRejectedResponse()
+        : state === "unavailable"
+          ? Response.json({}, { status: 503 })
+          : Response.json({
+              ticket: "fictional-media-ticket",
+              expiresAt: "2099-01-01T00:00:00.000Z",
+            }),
+    );
+    const descriptor = {
+      environmentId:
+        state === "different-environment" || state === "legacy-different-environment"
+          ? EnvironmentId.make("other-environment")
+          : PREPARED.environmentId,
+      capabilities: {
+        repositoryIdentity: false,
+        ...(state === "legacy" || state === "legacy-different-environment"
+          ? {}
+          : { nativeLiveVoice: state !== "disabled" }),
+      },
+    };
+    const result = yield* getEnvironmentLiveVoiceUrl(PREPARED, descriptor).pipe(
+      Effect.provide(harness.httpLayer),
+      Effect.provideService(
+        ManagedRelay.ManagedRelayDpopSigner,
+        Option.getOrThrow(harness.input.signer),
+      ),
+      Effect.provideService(
+        RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization,
+        harness.remoteAuthorization,
+      ),
+      Effect.result,
+    );
+    if (state === "supported") {
+      expect(result._tag).toBe("Success");
+      if (result._tag === "Success")
+        expect(new URL(result.success).pathname).toBe("/api/voice/live");
+    } else {
+      expect(result).toMatchObject({
+        _tag: "Failure",
+        failure: {
+          _tag: "LiveVoiceStartupError",
+          reason:
+            state === "revoked"
+              ? "environment-auth-required"
+              : state === "legacy" || state === "disabled"
+                ? "unsupported-server"
+                : state === "different-environment" || state === "legacy-different-environment"
+                  ? "connection-changed"
+                  : "temporarily-unavailable",
+        },
+      });
+      expect(JSON.stringify(result)).not.toMatch(
+        /current-token|renewed-token|previous\.example|headers|Authorization/,
+      );
+    }
+    expect(harness.calls).toHaveLength(
+      state === "legacy" ||
+        state === "disabled" ||
+        state === "different-environment" ||
+        state === "legacy-different-environment"
+        ? 0
+        : state === "revoked"
+          ? 2
+          : 1,
+    );
+    expect(
+      harness.calls.every(
+        (call) =>
+          new URL(call.url).pathname === "/api/auth/websocket-ticket/media" &&
+          call.init.redirect === "error",
+      ),
+    ).toBe(true);
+  }),
+);

@@ -2,10 +2,11 @@ import { encodeSpeechPcmRequest } from "@t3tools/shared/speech";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
-import { CloudSpeechError, SPEECH_STREAM_PATH } from "@t3tools/contracts";
+import { CloudSpeechError, LIVE_VOICE_PATH, SPEECH_STREAM_PATH } from "@t3tools/contracts";
 import type {
   CloudSpeechModelId,
   CloudSpeechProvider,
+  EnvironmentSpeechModelDownload,
   SettingsSecretValue,
   SpeechAcceleration,
   SpeechModelUnloadTimeout,
@@ -159,7 +160,10 @@ export const transcribeCloudPcm = (
   );
 };
 
-export const getEnvironmentSpeechStreamUrl = (prepared: PreparedConnection) => {
+export const getEnvironmentMediaStreamUrl = (
+  prepared: PreparedConnection,
+  path: typeof SPEECH_STREAM_PATH | typeof LIVE_VOICE_PATH,
+) => {
   let endpoint = prepared.httpBaseUrl;
   return request({
     group: "auth",
@@ -172,13 +176,16 @@ export const getEnvironmentSpeechStreamUrl = (prepared: PreparedConnection) => {
     run: ({ client, headers }) => client.webSocketTicketFor({ headers, params: { use: "media" } }),
   }).pipe(
     Effect.map(({ ticket }) => {
-      const url = new URL(SPEECH_STREAM_PATH, endpoint);
+      const url = new URL(path, endpoint);
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       url.searchParams.set("wsTicket", Redacted.value(ticket));
       return url.toString();
     }),
   );
 };
+
+export const getEnvironmentSpeechStreamUrl = (prepared: PreparedConnection) =>
+  getEnvironmentMediaStreamUrl(prepared, SPEECH_STREAM_PATH);
 
 export const getEnvironmentSpeechModels = (
   prepared: PreparedConnection,
@@ -212,6 +219,25 @@ export const selectEnvironmentSpeechModel = (prepared: PreparedConnection, model
     path: (urls) => urls.selectModel(),
     run: ({ client, headers }) => client.selectModel({ headers, payload: { modelId } }),
   });
+
+export function getSpeechModelDownloadOutcome(
+  download: EnvironmentSpeechModelDownload,
+  modelId: string,
+) {
+  if (download.cancelled) return "incomplete";
+  const model = download.models.find(({ id }) => id === modelId);
+  if (model?.state !== "installed") return "incomplete";
+  return model.active ? "already-selected" : "needs-selection";
+}
+
+/** Downloads a model and makes it the environment's transcription model on completion. */
+export const installEnvironmentSpeechModel = Effect.fn(
+  "clientRuntime.voiceInput.installEnvironmentSpeechModel",
+)(function* (prepared: PreparedConnection, modelId: string) {
+  const downloaded = yield* downloadEnvironmentSpeechModel(prepared, modelId);
+  if (getSpeechModelDownloadOutcome(downloaded, modelId) !== "needs-selection") return downloaded;
+  return yield* selectEnvironmentSpeechModel(prepared, modelId);
+});
 
 export const cancelEnvironmentSpeechModelDownload = (
   prepared: PreparedConnection,

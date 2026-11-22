@@ -1,0 +1,123 @@
+import type {
+  CommandId,
+  OrchestrationV2ThreadProjection,
+  ProviderCleanStartConstraint,
+  RunId,
+  ThreadId,
+} from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
+
+import type { OrchestratorV2DispatchResult, OrchestratorV2Shape } from "./Orchestrator.ts";
+import type { ThreadLaunchError } from "./ThreadLaunchService.ts";
+
+type Refuse = (cause: unknown) => ThreadLaunchError;
+type ClaimReplay = {
+  readonly claimed: OrchestratorV2DispatchResult;
+  readonly hasLaunchReceipt: boolean;
+  readonly threadId: ThreadId;
+  readonly streamStoredEventsFrom: OrchestratorV2Shape["streamStoredEventsFrom"];
+  readonly readError: Refuse;
+  readonly refuse: Refuse;
+};
+
+const missingGuard = "The previous launch did not durably acknowledge the no-setup-scripts guard.";
+
+// These checks share the enclosing launch span, including its existing read/error boundaries.
+export const assertOrdinaryConstraint = Effect.fnUntraced(function* (
+  constraint: ProviderCleanStartConstraint | undefined,
+  refuse: Refuse,
+) {
+  if (constraint !== undefined) {
+    return yield* refuse(
+      "Clean-provider automation is retired. Start a new ordinary thread explicitly.",
+    );
+  }
+});
+
+export const assertOrdinaryClaim = Effect.fnUntraced(function* ({
+  claimed,
+  reuseExistingThread,
+  hasLaunchReceipt,
+  threadId,
+  streamStoredEventsFrom,
+  readError,
+  refuse,
+}: ClaimReplay & { readonly reuseExistingThread: boolean }) {
+  // A claim can survive a crash before its first run; replay must retain its constraint.
+  const createdClaim = claimed.storedEvents.find(
+    (stored) => stored.event.type === "thread.created",
+  );
+  const claim =
+    createdClaim !== undefined
+      ? Option.some(createdClaim)
+      : !reuseExistingThread && (claimed.replayed === true || hasLaunchReceipt)
+        ? yield* streamStoredEventsFrom({ threadId, eventType: "thread.created" }).pipe(
+            Stream.runHead,
+            Effect.mapError(readError),
+          )
+        : Option.none();
+  yield* assertOrdinaryConstraint(
+    Option.isSome(claim) && claim.value.event.type === "thread.created"
+      ? claim.value.event.payload.cleanProviderConstraint
+      : undefined,
+    refuse,
+  );
+});
+
+export const assertPriorGuard = Effect.fnUntraced(function* ({
+  enforceNoSetupScripts,
+  hasLaunchReceipt,
+  claimed,
+  hasMessageReceipt,
+  messageCommandId,
+  threadId,
+  streamStoredEventsFrom,
+  readError,
+  refuse,
+}: ClaimReplay & {
+  readonly enforceNoSetupScripts: boolean;
+  readonly hasMessageReceipt: boolean;
+  readonly messageCommandId: CommandId;
+}) {
+  if (
+    enforceNoSetupScripts &&
+    (hasLaunchReceipt || claimed.replayed === true || hasMessageReceipt)
+  ) {
+    const claimedRun = claimed.storedEvents.find((stored) => stored.event.type === "run.created");
+    const priorRun =
+      claimedRun !== undefined
+        ? Option.some(claimedRun)
+        : hasMessageReceipt
+          ? yield* streamStoredEventsFrom({ threadId, eventType: "run.created" }).pipe(
+              Stream.filter((stored) => stored.commandId === messageCommandId),
+              Stream.runHead,
+              Effect.mapError(readError),
+            )
+          : Option.none();
+    if (
+      Option.isNone(priorRun) ||
+      priorRun.value.event.type !== "run.created" ||
+      priorRun.value.event.payload.workspacePreparation?.enforceNoSetupScripts !== true
+    ) {
+      return yield* refuse(missingGuard);
+    }
+  }
+});
+
+export const assertPreparationGuard = Effect.fnUntraced(function* (
+  guardRequired: boolean,
+  runs: OrchestrationV2ThreadProjection["runs"],
+  runId: RunId | null,
+  refuse: Refuse,
+) {
+  if (
+    guardRequired &&
+    !runs.some(
+      (run) => run.id === runId && run.workspacePreparation?.enforceNoSetupScripts === true,
+    )
+  ) {
+    return yield* refuse(missingGuard);
+  }
+});

@@ -14,6 +14,7 @@ import type {
 import type * as Effect from "effect/Effect";
 import type * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
+import type * as Stream from "effect/Stream";
 
 import type * as ProviderAdapter from "./ProviderAdapter.ts";
 import type { ProviderAuthController } from "./auth.ts";
@@ -21,6 +22,7 @@ import type { ProviderDriverError } from "./errors.ts";
 import type { ManagedServerProvider } from "./snapshot.ts";
 import type { ProviderTextGeneration } from "./textGeneration.ts";
 import type { ProviderUsageReader } from "./usage.ts";
+import type { LiveConnectionResolver } from "./liveConnection.ts";
 
 export interface ProviderDriverMetadata {
   readonly displayName: string;
@@ -30,7 +32,12 @@ export interface ProviderDriverMetadata {
 }
 
 export type ProviderWorkspaceSnapshot = ServerProvider &
-  Pick<ServerProviderWorkspaceSnapshot, "slashCommandsPending" | "optionDescriptors">;
+  Pick<ServerProviderWorkspaceSnapshot, "slashCommandsPending" | "optionDescriptors"> & {
+    /** Set only when the directory's catalog differs from the machine snapshot's. */
+    readonly workspaceModels?: ServerProviderWorkspaceSnapshot["models"];
+    /** The directory's catalog could not be read, so keep the models found before. */
+    readonly workspaceModelsPending?: boolean;
+  };
 
 export interface ProviderInstance {
   readonly instanceId: ProviderInstanceId;
@@ -43,14 +50,22 @@ export interface ProviderInstance {
   readonly snapshotForCwd?: (
     cwd: string,
   ) => Effect.Effect<ProviderWorkspaceSnapshot, ProviderDriverError>;
+  /**
+   * Cwds whose workspace skills may have changed. The registry rescans only cwds already
+   * requested. The stream must end when the instance is torn down.
+   */
+  readonly workspaceRescans?: Stream.Stream<string>;
   readonly refreshModels?: () => Effect.Effect<void, ProviderDriverError>;
   readonly invalidateCaches?: Effect.Effect<void>;
+  /** Moves a long-lived service onto a newly updated binary before its version is read back. */
+  readonly afterUpdate?: Effect.Effect<void, ProviderDriverError>;
   readonly consumeResetCredit?: (
     creditId: string | undefined,
   ) => Effect.Effect<ProviderConsumeResetCreditOutcome, ProviderDriverError>;
   readonly orchestrationAdapter: ProviderAdapter.ProviderAdapterV2["Service"];
   readonly textGeneration: ProviderTextGeneration;
   readonly auth?: ProviderAuthController;
+  readonly liveConnection?: LiveConnectionResolver;
   readonly acpSessionManagement?: {
     readonly listSessions: (input: {
       readonly cwd: string;

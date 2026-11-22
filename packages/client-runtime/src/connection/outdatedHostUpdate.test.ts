@@ -36,7 +36,11 @@ const descriptor = (protocol: number | undefined, serverVersion: string) =>
     platform: { os: "darwin", arch: "arm64" },
     serverVersion,
     ...(protocol === undefined ? {} : { orchestrationProtocolVersion: protocol }),
-    capabilities: { repositoryIdentity: true, serverSelfUpdate: "boot-service" },
+    capabilities: {
+      repositoryIdentity: true,
+      serverSelfUpdate: "boot-service",
+      voiceHistoryV1: true,
+    },
   }) satisfies ExecutionEnvironmentDescriptor;
 
 const RpcRequest = Schema.TaggedStruct("Request", {
@@ -341,6 +345,7 @@ describe("updateOutdatedHost", () => {
           repositoryIdentity: true,
           serverSelfUpdate: "boot-service",
           serverSelfUpdateProgress: true,
+          voiceHistoryV1: true,
         },
       };
       const entries = yield* SubscriptionRef.make<

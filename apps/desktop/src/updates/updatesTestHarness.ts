@@ -6,6 +6,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as PlatformError from "effect/PlatformError";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import type { ChildProcessSpawner } from "effect/process";
 
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
@@ -13,6 +14,7 @@ import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as ElectronUpdater from "../electron/ElectronUpdater.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
+import * as DesktopSshEnvironment from "../ssh/DesktopSshEnvironment.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopUpdatePolicy from "./DesktopUpdatePolicy.ts";
 import * as DesktopUpdates from "./DesktopUpdates.ts";
@@ -27,15 +29,19 @@ export interface UpdatesHarnessOptions {
   readonly beforeSetUpdateChannel?: Effect.Effect<void>;
   readonly setUpdateChannelError?: DesktopAppSettings.DesktopSettingsWriteError;
   readonly setDisableDifferentialDownload?: Effect.Effect<void>;
-  readonly downloadUpdate?: Effect.Effect<void>;
+  readonly downloadUpdate?: Effect.Effect<void, ElectronUpdater.ElectronUpdaterDownloadUpdateError>;
   readonly quitAndInstall?: Effect.Effect<void, ElectronUpdater.ElectronUpdaterQuitAndInstallError>;
   readonly stopBackend?: Effect.Effect<void>;
   readonly startBackend?: Effect.Effect<void>;
   readonly backendDesiredRunning?: boolean;
   readonly backendInstances?: ReadonlyArray<DesktopBackendPool.DesktopBackendInstance>;
   readonly env?: Record<string, string | undefined>;
-  readonly platform?: NodeJS.Platform;
+  readonly platform?: NodeJS.Platform | undefined;
   readonly packageType?: string | undefined;
+  readonly packageJson?: string;
+  readonly isPackaged?: boolean | undefined;
+  readonly spawnerLayer?: Layer.Layer<ChildProcessSpawner.ChildProcessSpawner>;
+  readonly updaterOverrides?: Partial<ElectronUpdater.ElectronUpdater["Service"]>;
   readonly installRecord?: string | undefined;
   readonly policy?: DesktopUpdatePolicy.UpdatePolicy;
   readonly appVersion?: string;
@@ -115,6 +121,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
             removeListener(eventName, listener as unknown as (...args: readonly unknown[]) => void);
           }),
       ).pipe(Effect.asVoid),
+    ...options.updaterOverrides,
   } satisfies ElectronUpdater.ElectronUpdater["Service"]);
 
   const layerWindow = Layer.succeed(ElectronWindow.ElectronWindow, {
@@ -135,6 +142,12 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     }),
     syncAllAppearance: () => Effect.void,
   } satisfies ElectronWindow.ElectronWindow["Service"]);
+
+  const layerSshEnvironment = Layer.mock(DesktopSshEnvironment.DesktopSshEnvironment, {
+    closeAllTunnels: Effect.sync(() => {
+      installSteps.push("closeSshTunnels");
+    }),
+  });
 
   let backendDesiredRunning = options.backendDesiredRunning ?? true;
   const stubBackendInstance: DesktopBackendPool.DesktopBackendInstance = {
@@ -179,7 +192,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     processArch: "x64",
     appVersion: options.appVersion ?? "1.2.3",
     appPath: "/repo",
-    isPackaged: true,
+    isPackaged: options.isPackaged ?? true,
     resourcesPath: "/missing/resources",
     runningUnderArm64Translation: false,
   }).pipe(
@@ -187,7 +200,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
       Layer.mergeAll(
         NodeServices.layer,
         DesktopConfig.layerTest({
-          T3CODE_HOME: `/tmp/t3-desktop-updates-test-${process.pid}`,
+          T3CODE_VOICE_HOME: `/tmp/t3-desktop-updates-test-${process.pid}`,
           T3CODE_DESKTOP_MOCK_UPDATES: "true",
           T3CODE_DESKTOP_MOCK_UPDATE_SERVER_PORT: "4141",
           ...options.env,
@@ -237,12 +250,15 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
       : DesktopAppSettings.layer;
 
   const updateRestartMarkers = new Set<string>();
+  const updateMarkerContents = new Map<string, string>();
   const installRecords = new Map<string, string>();
   let previousInstallRecord = options.installRecord;
   const isInstallRecord = (path: string) =>
     path.endsWith(DesktopUpdates.DESKTOP_UPDATE_INSTALL_RECORD_FILE);
   const layerFileSystem = FileSystem.layerNoop({
     readFileString: (path) => {
+      if (path === "/repo/package.json" && options.packageJson !== undefined)
+        return Effect.succeed(options.packageJson);
       const installRecord = isInstallRecord(path)
         ? (installRecords.get(path) ?? previousInstallRecord)
         : undefined;
@@ -262,27 +278,39 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     writeFileString: (path, data) =>
       Effect.sync(() => {
         if (isInstallRecord(path)) installRecords.set(path, data);
-        else updateRestartMarkers.add(path);
+        else {
+          if (path.endsWith("/desktop-update-restart")) updateRestartMarkers.add(path);
+          updateMarkerContents.set(path, data);
+        }
+      }),
+    rename: (from, to) =>
+      Effect.sync(() => {
+        const contents = updateMarkerContents.get(from);
+        if (contents !== undefined) updateMarkerContents.set(to, contents);
+        updateMarkerContents.delete(from);
       }),
     remove: (path) =>
       Effect.sync(() => {
         updateRestartMarkers.delete(path);
+        updateMarkerContents.delete(path);
         installRecords.delete(path);
         if (isInstallRecord(path)) previousInstallRecord = undefined;
       }),
   });
 
   const layer = DesktopUpdates.layer.pipe(
+    Layer.provide(options.spawnerLayer ?? Layer.empty),
     Layer.provide(layerFileSystem),
     Layer.provide(DesktopUpdatePolicy.layerTest(options.policy)),
     Layer.provideMerge(layerUpdater),
     Layer.provideMerge(layerWindow),
     Layer.provideMerge(layerBackend),
+    Layer.provideMerge(layerSshEnvironment),
     Layer.provideMerge(DesktopState.layer),
     Layer.provideMerge(layerSettings),
     Layer.provideMerge(
       DesktopConfig.layerTest({
-        T3CODE_HOME: `/tmp/t3-desktop-updates-test-${process.pid}`,
+        T3CODE_VOICE_HOME: `/tmp/t3-desktop-updates-test-${process.pid}`,
         T3CODE_DESKTOP_MOCK_UPDATES: "true",
         T3CODE_DESKTOP_MOCK_UPDATE_SERVER_PORT: "4141",
         ...options.env,
@@ -298,6 +326,8 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     quitAndInstalls: () => quitAndInstallCount,
     installSteps,
     updateRestartMarkers,
+    updateInProgressMarker: () =>
+      [...updateMarkerContents].find(([path]) => path.endsWith("/desktop-update-in-progress"))?.[1],
     installRecords,
     previousInstallRecord: () => previousInstallRecord,
     downloadCount: () => downloadCount,

@@ -17,6 +17,13 @@ import {
 
 import { fromYaml } from "@t3tools/shared/schemaYaml";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
+import { resolveVoiceMacUpdate, VoiceMacSigningError } from "./lib/voice-mac-signing.ts";
+import { encodeVoiceMacVersion } from "../apps/desktop/src/updates/voiceMacVersion.ts";
+import {
+  parseVoiceUpdateConfig,
+  type VoiceUpdateConfig,
+} from "../apps/desktop/src/updates/voiceUpdateConfig.ts";
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import rootPackageJson from "../package.json" with { type: "json" };
@@ -36,6 +43,8 @@ import {
   type WebAssetBrand,
 } from "./lib/brand-assets.ts";
 import { getDefaultBuildArch } from "./lib/build-target-arch.ts";
+import { DesktopBuildCommitError, resolveDesktopBuildCommit } from "./lib/voice-build-commit.ts";
+export { DesktopBuildCommitError, resolveDesktopBuildCommit } from "./lib/voice-build-commit.ts";
 import {
   findInlinedExternalPackages,
   selectCliRuntimeExternalDependencies,
@@ -43,6 +52,7 @@ import {
 import { loadRepoEnv } from "./lib/public-config.ts";
 import { selectDesktopRuntimeExternalDependencies } from "./lib/desktop-external-packages.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
+import { resolveTaggedSourceVersion } from "./lib/tagged-source-version.ts";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -62,7 +72,7 @@ import { Command, Flag } from "effect/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
-const DESKTOP_APP_ID = "com.t3tools.t3code";
+const DESKTOP_APP_ID = FORK_DESKTOP.appId;
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
@@ -861,29 +871,6 @@ const spawnAndCollectOutput = Effect.fn("spawnAndCollectOutput")(function* (
   );
 
   return { stdout, stderr, exitCode } as const;
-});
-
-const resolveGitCommitHash = Effect.fn("resolveGitCommitHash")(function* (repoRoot: string) {
-  const result = yield* spawnAndCollectOutput(
-    ChildProcess.make("git", ["rev-parse", "--short=12", "HEAD"], {
-      cwd: repoRoot,
-    }),
-  ).pipe(
-    Effect.orElseSucceed(() => ({
-      stdout: "",
-      stderr: "",
-      exitCode: 1,
-    })),
-  );
-
-  if (result.exitCode !== 0) {
-    return "unknown";
-  }
-  const hash = result.stdout.trim();
-  if (!/^[0-9a-f]{7,40}$/i.test(hash)) {
-    return "unknown";
-  }
-  return hash.toLowerCase();
 });
 
 const resolvePythonForNodeGyp = Effect.fn("resolvePythonForNodeGyp")(function* () {
@@ -2211,6 +2198,13 @@ export const copyDirectoryPreservingSymlinks = Effect.fn("copyDirectoryPreservin
 
 export const verifyPackagedBundleIsSelfContained = Effect.fn("verifyPackagedBundleIsSelfContained")(
   function* (input: { readonly asarPath: string; readonly verbose: boolean }) {
+    // A PR preview's bundle is untrusted and this job may hold signing secrets, so never run it.
+    if (yield* Config.Boolean("T3CODE_DESKTOP_UNTRUSTED_BUNDLE").pipe(Config.withDefault(false))) {
+      yield* Effect.log(
+        "[desktop-artifact] Skipped the bundle self-check for an untrusted bundle.",
+      );
+      return;
+    }
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
 
@@ -2688,32 +2682,6 @@ export function resolveDesktopRuntimeDependencies(
   );
 }
 
-export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig")(function* (
-  updateChannel: "latest" | "nightly",
-) {
-  const env = yield* Config.all({
-    updateRepository: Config.String("T3CODE_DESKTOP_UPDATE_REPOSITORY").pipe(Config.option),
-    githubRepository: Config.String("GITHUB_REPOSITORY").pipe(Config.option),
-  });
-  const rawRepo = (
-    Option.getOrUndefined(env.updateRepository)?.trim() ||
-    Option.getOrUndefined(env.githubRepository)?.trim() ||
-    ""
-  ).trim();
-  if (!rawRepo) return undefined;
-
-  const [owner, repo, ...rest] = rawRepo.split("/");
-  if (!owner || !repo || rest.length > 0) return undefined;
-
-  return {
-    provider: "github",
-    owner,
-    repo,
-    releaseType: updateChannel === "nightly" ? "prerelease" : "release",
-    ...(updateChannel === "nightly" ? { channel: "nightly" as const } : {}),
-  };
-});
-
 export function resolveDesktopUpdateChannel(version: string): "latest" | "nightly" {
   return /-nightly\.\d{8}\.\d+$/.test(version) ? "nightly" : "latest";
 }
@@ -2759,8 +2727,8 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
 
 export function resolveDesktopProductName(version: string): string {
   return resolveDesktopUpdateChannel(version) === "nightly"
-    ? "T3 Code (Nightly)"
-    : (desktopPackageJson.productName ?? "T3 Code");
+    ? `${FORK_DESKTOP.productName} (Nightly)`
+    : FORK_DESKTOP.productName;
 }
 
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
@@ -2768,8 +2736,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   target: string,
   version: string,
   signed: boolean,
-  mockUpdates: boolean,
-  mockUpdateServerPort: number | undefined,
+  _mockUpdates: boolean,
+  _mockUpdateServerPort: number | undefined,
   macPasskeySigning:
     | {
         readonly entitlementsPath: string;
@@ -2778,12 +2746,34 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     | undefined,
   wslRuntimeBundled = false,
   arch?: typeof BuildArch.Type,
+  voiceUpdate?: VoiceUpdateConfig,
 ) {
+  if (
+    voiceUpdate &&
+    (platform !== "mac" ||
+      !signed ||
+      !["dmg", "zip"].includes(target) ||
+      !parseVoiceUpdateConfig(voiceUpdate, version))
+  ) {
+    return yield* new VoiceMacSigningError({
+      message: "Invalid Voice self-update build configuration",
+    });
+  }
+  const nativeVoiceVersion = voiceUpdate
+    ? yield* Effect.try({
+        try: () => encodeVoiceMacVersion(version),
+        catch: () =>
+          new VoiceMacSigningError({ message: "Unsupported Voice native macOS version" }),
+      })
+    : undefined;
   const buildConfig: Record<string, unknown> = {
     afterPack: (yield* Path.Path).join(yield* RepoRoot, "scripts/prepare-server-compile-cache.cjs"),
     appId: DESKTOP_APP_ID,
-    productName: resolveDesktopProductName(version),
-    artifactName: "T3-Code-${version}-${arch}.${ext}",
+    productName:
+      voiceUpdate?.track === "voice-candidate"
+        ? "T3 Code Voice Candidate — Not Production"
+        : resolveDesktopProductName(version),
+    artifactName: "T3-Code-Voice-${version}-${arch}.${ext}",
     electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
     files: [
       ...DESKTOP_FILE_EXCLUSIONS,
@@ -2809,30 +2799,26 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     ],
   };
   const updateChannel = resolveDesktopUpdateChannel(version);
-  // Missing publish config infers a GitHub feed from tokens; staging has no repository, so manifest generation would crash.
-  buildConfig.publish = null;
-  if (!isDesktopPreviewVersion(version)) {
-    const publishConfig = yield* resolveGitHubPublishConfig(updateChannel);
-    if (publishConfig) {
-      buildConfig.publish = [publishConfig];
-    } else if (mockUpdates) {
-      buildConfig.publish = [
-        {
-          provider: "generic",
-          url: resolveMockUpdateServerUrl(mockUpdateServerPort),
-        },
-      ];
-    }
+  // Never infer an upstream feed from repository metadata, CI variables, or mock flags.
+  buildConfig.publish = voiceUpdate
+    ? { provider: "generic", url: voiceUpdate.feedUrl, channel: "latest" }
+    : null;
+  if (voiceUpdate) {
+    buildConfig.extraMetadata = { t3VoiceUpdate: voiceUpdate };
+    buildConfig.generateUpdatesFilesForAllChannels = false;
   }
 
   if (platform === "mac") {
     const path = yield* Path.Path;
     const repoRoot = yield* RepoRoot;
+    buildConfig.afterPack = path.join(repoRoot, "scripts/mac-after-pack.ts");
     buildConfig.mac = {
       target: target === "dmg" ? [target, "zip"] : [target],
       icon: "icon.icns",
       category: "public.app-category.developer-tools",
+      ...(voiceUpdate ? { bundleShortVersion: nativeVoiceVersion } : {}),
       extendInfo: {
+        ...(voiceUpdate ? { ElectronSquirrelPreventDowngrades: true } : {}),
         // macOS 26 offers Messages/Mail codes in every text field unless opted out.
         NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac: true,
         NSLocalNetworkUsageDescription:
@@ -2849,29 +2835,23 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
           "T3 Code lets commands run by terminals and coding agents use the camera.",
         NSMicrophoneUsageDescription:
           "T3 Code lets commands run by terminals and coding agents use the microphone.",
-        // macOS lists an app under Default web browser only when it opens web
-        // pages as documents as well as http and https links (see protocols).
-        CFBundleDocumentTypes: [
-          {
-            CFBundleTypeName: "Web page",
-            CFBundleTypeRole: "Viewer",
-            LSHandlerRank: "Alternate",
-            LSItemContentTypes: ["public.html", "public.xhtml"],
-          },
-        ],
       },
       protocols: [
         {
-          name: "T3 Code",
-          schemes: ["t3code", "t3code-dev"],
-        },
-        {
-          name: "Web site URL",
-          schemes: ["http", "https"],
-          role: "Viewer",
+          name: FORK_DESKTOP.productName,
+          schemes: [FORK_DESKTOP.scheme, FORK_DESKTOP.developmentScheme],
         },
       ],
-      ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
+      ...(signed
+        ? {
+            sign: path.join(
+              repoRoot,
+              voiceUpdate ? "scripts/sign-voice-macos.ts" : "scripts/sign-macos.ts",
+            ),
+          }
+        : {}),
+      // Builder needs a non-null identity to dispatch a custom signer without a keychain.
+      ...(voiceUpdate ? { identity: "-", notarize: false, hardenedRuntime: true } : {}),
       ...(macPasskeySigning
         ? {
             entitlements: macPasskeySigning.entitlementsPath,
@@ -2915,16 +2895,24 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       maintainer: "T3 Tools <hello@t3.codes>",
       protocols: [
         {
-          name: "T3 Code",
-          schemes: ["t3code", "t3code-dev"],
+          name: FORK_DESKTOP.productName,
+          schemes: [FORK_DESKTOP.scheme, FORK_DESKTOP.developmentScheme],
         },
       ],
       desktop: {
         entry: {
-          StartupWMClass: "t3code",
+          // Match Electron's WM_CLASS from setDesktopName so docks use this launcher.
+          StartupWMClass: "com.t3tools.T3Code",
         },
       },
     };
+    // electron-updater replaces an installed AppImage in place only when its name has no x.y.z version.
+    if (buildConfig.publish) {
+      buildConfig.appImage = {
+        artifactName:
+          updateChannel === "nightly" ? "T3-Code-Nightly-${arch}.${ext}" : "T3-Code-${arch}.${ext}",
+      };
+    }
     buildConfig.deb = {
       // FPM runs outside the staged app directory, so source paths must be absolute.
       fpm: [
@@ -3574,6 +3562,34 @@ export const validateMacPackagedPayload = Effect.fn("desktopArtifact.validateMac
   },
 );
 
+export class LinuxPackagedAppMissingError extends Schema.TaggedError<LinuxPackagedAppMissingError>()(
+  "LinuxPackagedAppMissingError",
+  { stageDistDir: Schema.String },
+) {
+  override get message(): string {
+    return `Expected electron-builder to leave resources/app.asar under ${this.stageDistDir}/linux*-unpacked.`;
+  }
+}
+
+export const validateLinuxPackagedPayload = Effect.fn(
+  "desktopArtifact.validateLinuxPackagedPayload",
+)(function* (input: { readonly stageDistDir: string; readonly verbose?: boolean }) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const asarPaths = (yield* fs.readDirectory(input.stageDistDir))
+    .filter((entry) => entry.startsWith("linux") && entry.endsWith("-unpacked"))
+    .map((entry) => path.join(input.stageDistDir, entry, "resources/app.asar"));
+  if (asarPaths.length === 0) {
+    return yield* new LinuxPackagedAppMissingError({ stageDistDir: input.stageDistDir });
+  }
+  for (const asarPath of asarPaths) {
+    yield* verifyPackagedBundleIsSelfContained({ asarPath, verbose: input.verbose ?? false });
+  }
+  yield* Effect.log(
+    `[desktop-artifact] Validated Linux payload (${String(asarPaths.length)} app bundle(s)).`,
+  );
+});
+
 const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(function* (
   options: ResolvedBuildOptions,
 ) {
@@ -3650,9 +3666,16 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
       }),
   });
 
-  const appVersion = options.version ?? serverPackageJson.version;
+  const appVersion =
+    options.version ?? resolveTaggedSourceVersion(repoRoot, serverPackageJson.version);
   const iconAssets = resolveDesktopBuildIconAssets(appVersion);
-  const commitHash = yield* resolveGitCommitHash(repoRoot);
+  if (options.skipBuild) {
+    return yield* new DesktopBuildCommitError({
+      reason:
+        "T3 Code Voice artifacts require a fresh build from the verified source snapshot; --skip-build is not supported.",
+    });
+  }
+  const commitHash = yield* resolveDesktopBuildCommit(repoRoot);
   const mkdir = options.keepStage ? fs.makeTempDirectory : fs.makeTempDirectoryScoped;
   const stageRoot = yield* mkdir({
     prefix: `t3code-desktop-${options.platform}-stage-`,
@@ -3667,10 +3690,8 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   };
   const bundledClientEntry = path.join(distDirs.serverDist, "client/index.html");
 
-  if (!options.skipBuild) {
-    yield* Effect.log("[desktop-artifact] Building desktop/server/web artifacts...");
-    yield* buildDesktopBundlesUnlocked(repoRoot, appVersion, options.verbose);
-  }
+  yield* Effect.log("[desktop-artifact] Building desktop/server/web artifacts...");
+  yield* buildDesktopBundlesUnlocked(repoRoot, appVersion, options.verbose);
 
   const requiredBuildInputs = [
     { artifact: "desktop-dist", artifactPath: distDirs.desktopDist },
@@ -3811,8 +3832,15 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   const stageProdResourcesDir = path.join(stageAppDir, "apps/desktop/prod-resources");
   yield* fs.copy(stageResourcesDir, stageProdResourcesDir);
 
+  const voiceUpdate = yield* resolveVoiceMacUpdate(process.env, {
+    platform: options.platform,
+    target: options.target,
+    version: appVersion,
+    signed: options.signed,
+    repoRoot,
+  });
   const configuredMacPasskeySigning =
-    options.platform === "mac" && options.signed
+    options.platform === "mac" && options.signed && !voiceUpdate
       ? yield* Effect.try({
           try: () => resolveMacPasskeySigningConfiguration(loadRepoEnv({ repoRoot })),
           catch: MacPasskeySigningConfigurationResolutionError.fromCause,
@@ -3869,7 +3897,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
       ? path.join(stageAppDir, WINDOWS_SERVER_RESOURCE_SOURCE_DIR, WINDOWS_SERVER_ASAR_RESOURCE)
       : undefined;
   const stagePackageJson: StagePackageJson = {
-    name: "t3code",
+    name: FORK_DESKTOP.packageName,
     version: appVersion,
     buildVersion: appVersion,
     t3codeCommitHash: commitHash,
@@ -3898,6 +3926,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
         : undefined,
       bundlesWslRuntime({ platform: options.platform, runtimeArchivePath: options.wslRuntime }),
       options.arch,
+      voiceUpdate,
     ),
     dependencies: stageDependencies,
     devDependencies: {
@@ -4069,6 +4098,14 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
       verbose: options.verbose,
     });
   }
+  // The probe runs on the host Node, so a cross-arch build skips it.
+  if (
+    options.platform === "linux" &&
+    hostPlatform === "linux" &&
+    options.arch === (yield* HostProcess.Architecture)
+  ) {
+    yield* validateLinuxPackagedPayload({ stageDistDir, verbose: options.verbose });
+  }
   // x64 builds on arm64 runners; the arm64 check covers the shared JS bundle.
   if (options.platform === "mac" && options.arch === "arm64" && hostPlatform === "darwin") {
     yield* validateMacPackagedPayload({ stageDistDir, verbose: options.verbose });
@@ -4164,7 +4201,7 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
   ),
   skipBuild: Flag.Boolean("skip-build").pipe(
     Flag.withDescription(
-      "Skip `vp run build:desktop` and use existing dist artifacts (env: T3CODE_DESKTOP_SKIP_BUILD).",
+      "Unsupported for T3 Code Voice: artifacts must rebuild verified source (env: T3CODE_DESKTOP_SKIP_BUILD).",
     ),
     Flag.optional,
   ),

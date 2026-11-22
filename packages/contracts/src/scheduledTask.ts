@@ -157,6 +157,8 @@ const ScheduledTaskWebhookFilters = Schema.Array(ScheduledTaskWebhookFilter)
 
 const ScheduledTaskWebhookSchedule = Schema.Struct({
   type: Schema.Literal("webhook"),
+  // Refuse retired action tasks instead of decoding them as ordinary prompts.
+  action: Schema.optionalKey(Schema.Never),
   signature: Schema.NullOr(ScheduledTaskWebhookSignature),
   maxDeliveryAgeMinutes: Schema.optional(Schema.NullOr(WebhookMaxDeliveryAgeMinutes)),
   dedupe: Schema.optional(ScheduledTaskWebhookDedupe),
@@ -167,6 +169,8 @@ const ScheduledTaskWebhookSchedule = Schema.Struct({
 
 const ScheduledTaskUpsertWebhookSchedule = Schema.Struct({
   type: Schema.Literal("webhook"),
+  // Refuse retired action tasks instead of decoding them as ordinary prompts.
+  action: Schema.optionalKey(Schema.Never),
   signature: Schema.optional(
     Schema.NullOr(
       Schema.Struct({
@@ -240,6 +244,7 @@ export function scheduledTaskThreadMode(
 
 export const ScheduledTask = Schema.Struct({
   id: ScheduledTaskId,
+  generation: Schema.optionalKey(Schema.String),
   title: TrimmedNonEmptyString,
   prompt: TrimmedNonEmptyString,
   enabled: Schema.Boolean,
@@ -271,6 +276,8 @@ export type ScheduledTaskListInput = typeof ScheduledTaskListInput.Type;
 
 export const ScheduledTaskListResult = Schema.Struct({
   tasks: ForwardCompatibleArray(ScheduledTask),
+  /** The server's IANA zone for fixed-time schedules. Absent from older servers. */
+  timeZone: Schema.optional(TrimmedNonEmptyString),
 });
 export type ScheduledTaskListResult = typeof ScheduledTaskListResult.Type;
 

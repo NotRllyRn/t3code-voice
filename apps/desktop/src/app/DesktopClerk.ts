@@ -20,6 +20,7 @@ import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopUserData from "./DesktopUserData.ts";
+import { resolveForkUserDataPath } from "./forkUserData.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import { openClerkTokenStorage } from "./ClerkTokenStore.ts";
 import * as DesktopWebLinks from "./DesktopWebLinks.ts";
@@ -108,7 +109,7 @@ export const make = Effect.gen(function* () {
   const shell = yield* ElectronShell.ElectronShell;
 
   // Must not yield: the bridge registers a scheme Electron rejects once ready.
-  const userDataPath = yield* DesktopUserData.resolveUserDataPath(environment);
+  const userDataPath = yield* resolveForkUserDataPath(environment);
   yield* electronApp.setPath("userData", userDataPath);
 
   // Clerk skips the profile lock on macOS. Interrupt before runtime construction because quit is asynchronous.
@@ -178,11 +179,12 @@ export const make = Effect.gen(function* () {
           Effect.gen(function* () {
             yield* electronApp.whenReady;
             yield* Effect.tryPromise({
-              try: () =>
+              try: (signal) =>
                 receiveCodexAuthCallback(
                   request.authorizationUrl,
                   (url) => runPromise(shell.openExternal(url)),
                   (callbackUrl) => codexAuthDeliveryUrl(request, callbackUrl),
+                  signal,
                 ),
               catch: () =>
                 new CodexAuthCallbackError({

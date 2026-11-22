@@ -43,9 +43,11 @@ const makeService = Effect.fnUntraced(function* (
   for (const name of ["npm", "npm.cmd"]) {
     yield* fs.writeFileString(path.join(npmBin, name), "", { mode: 0o755 });
   }
-  return yield* NpmRelease.make().pipe(
+  return yield* NpmRelease.make(version).pipe(
     Effect.provideService(ProcessRunner.ProcessRunner, { run }),
     Effect.provideService(HttpClient.HttpClient, publicRegistry),
+    Effect.provideService(HostProcess.Platform, "linux"),
+    Effect.provideService(HostProcess.Architecture, "x64"),
     Effect.provideService(HostProcess.Environment, {
       PATH: npmInstalled ? npmBin : "",
       PATHEXT: ".CMD",

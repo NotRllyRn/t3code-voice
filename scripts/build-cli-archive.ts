@@ -28,6 +28,9 @@ import {
   STAGE_INSTALL_ARGS,
 } from "./build-desktop-artifact.ts";
 import { assertLinuxArm64PageCompatibility } from "./lib/linux-arm64-sea.ts";
+import { linuxLibatomicHeader } from "./lib/voice-build-libatomic.ts";
+import { copyVerifiedRuntimeExternals } from "./lib/voice-build-runtime-externals.ts";
+export { linuxLibatomicHeader } from "./lib/voice-build-libatomic.ts";
 import { selectCliRuntimeExternalDependencies } from "./lib/cli-external-packages.ts";
 import { signWithJsign } from "./lib/windows-jsign.ts";
 import { windowsSystemTar } from "./lib/windows-tar.ts";
@@ -138,6 +141,7 @@ const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (inpu
   readonly platform: BuildPlatform;
   readonly arch: BuildArch;
   readonly version: string;
+  readonly runtimeExternalsDir: Option.Option<string>;
 }) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -193,16 +197,30 @@ const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (inpu
     yield* fs.copy(path.join(input.repoRoot, "patches"), path.join(input.stageDir, "patches"));
   }
 
-  const install = yield* resolveSpawnCommand("vp", [...STAGE_INSTALL_ARGS]);
-  yield* runCommand(
-    ChildProcess.make(install.command, install.args, {
-      cwd: input.stageDir,
-      shell: install.shell,
-      stdout: "inherit",
-      stderr: "inherit",
-    }),
-    "vp install --prod (cli archive runtime externals)",
-  );
+  if (Option.isSome(input.runtimeExternalsDir)) {
+    const missing = yield* copyVerifiedRuntimeExternals(
+      input.runtimeExternalsDir.value,
+      input.stageDir,
+      Object.keys(dependencies),
+    );
+    if (missing !== undefined) {
+      return yield* new CliArchiveInputMissingError({
+        inputPath: missing,
+        hint: "Supply a verified runtime node_modules directory with all target dependencies.",
+      });
+    }
+  } else {
+    const install = yield* resolveSpawnCommand("vp", [...STAGE_INSTALL_ARGS]);
+    yield* runCommand(
+      ChildProcess.make(install.command, install.args, {
+        cwd: input.stageDir,
+        shell: install.shell,
+        stdout: "inherit",
+        stderr: "inherit",
+      }),
+      "vp install --prod (cli archive runtime externals)",
+    );
+  }
 
   const platformKey = cliArchivePlatformKey(input.platform, input.arch);
   const prebuildsDir = path.join(input.stageDir, "node_modules/node-pty/prebuilds");
@@ -300,13 +318,21 @@ const bundleLinuxLibatomic = Effect.fn("bundleLinuxLibatomic")(function* (input:
   if (!pkg || !version || !sourcePackage || !sourceVersion) {
     return yield* new CliArchiveInputMissingError({
       inputPath: `dpkg package for ${source}`,
-      hint: "The archive copies libatomic's license and source reference from its Ubuntu package.",
+      hint: "The archive requires libatomic's installed Debian or Ubuntu package metadata.",
     });
   }
-  const header = [
-    `libatomic.so.1 is copied from the Ubuntu package ${pkg} ${version}.`,
-    `Source: https://launchpad.net/ubuntu/+source/${sourcePackage}/${sourceVersion}`,
-  ].join("\n");
+  const header = linuxLibatomicHeader(yield* fs.readFileString("/etc/os-release"), {
+    pkg,
+    version,
+    sourcePackage,
+    sourceVersion,
+  });
+  if (header === undefined) {
+    return yield* new CliArchiveInputMissingError({
+      inputPath: "/etc/os-release#ID",
+      hint: "Build Linux archives on Debian or Ubuntu to identify libatomic's source package.",
+    });
+  }
   // Vendored because CI runner images strip /usr/share/doc.
   const license = yield* fs.readFileString(
     path.join(input.repoRoot, "scripts/licenses/libatomic.LICENSE"),
@@ -590,6 +616,7 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
   readonly version: string;
   readonly outputDir: string;
   readonly resourceMonitorDir: Option.Option<string>;
+  readonly runtimeExternalsDir: Option.Option<string>;
   readonly notarySubmissionFile: Option.Option<string>;
 }) {
   const fs = yield* FileSystem.FileSystem;
@@ -642,6 +669,7 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
     platform: input.platform,
     arch: input.arch,
     version: input.version,
+    runtimeExternalsDir: input.runtimeExternalsDir,
   });
 
   const executablePath = path.join(contentDir, executableName);
@@ -722,6 +750,12 @@ const command = Command.make(
     resourceMonitorDir: Flag.String("resource-monitor-dir").pipe(
       Flag.withDescription(
         "Directory laid out like dist/resource-monitor (defaults to apps/server/dist/resource-monitor).",
+      ),
+      Flag.optional,
+    ),
+    runtimeExternalsDir: Flag.String("runtime-externals-dir").pipe(
+      Flag.withDescription(
+        "Preverified target node_modules directory; copy without installing dependencies.",
       ),
       Flag.optional,
     ),

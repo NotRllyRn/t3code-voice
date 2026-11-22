@@ -15,6 +15,9 @@ import * as Stream from "effect/Stream";
 import { Socket } from "effect/socket";
 import { RpcClient, RpcSerialization } from "effect/rpc";
 import {
+  CLIENT_CAPABILITIES_HEADER,
+  CLIENT_CAPABILITIES_QUERY_PARAM,
+  VOICE_HISTORY_CAPABILITY,
   ORCHESTRATION_PROTOCOL_VERSION,
   ORCHESTRATION_PROTOCOL_HEADER,
   CommandId,
@@ -264,6 +267,7 @@ try {
     Authorization: `Bearer ${token.access_token}`,
     "Content-Type": "application/json",
     [ORCHESTRATION_PROTOCOL_HEADER]: String(ORCHESTRATION_PROTOCOL_VERSION),
+    [CLIENT_CAPABILITIES_HEADER]: VOICE_HISTORY_CAPABILITY,
   };
   const projectId = ProjectId.make(NodeCrypto.randomUUID());
   const created = await fetch(`${origin}/api/projects/mutate`, {
@@ -287,7 +291,7 @@ try {
     await ticketResponse.json(),
   );
   const layerSocket = Socket.layerWebSocket(
-    `${origin.replace("http:", "ws:")}/ws?orchestrationProtocol=${ORCHESTRATION_PROTOCOL_VERSION}&wsTicket=${encodeURIComponent(ticket.ticket)}`,
+    `${origin.replace("http:", "ws:")}/ws?orchestrationProtocol=${ORCHESTRATION_PROTOCOL_VERSION}&${CLIENT_CAPABILITIES_QUERY_PARAM}=${VOICE_HISTORY_CAPABILITY}&wsTicket=${encodeURIComponent(ticket.ticket)}`,
   ).pipe(Layer.provide(Socket.layerWebSocketConstructorGlobal));
   const layerProtocol = RpcClient.layerProtocolSocket().pipe(
     Layer.provide(layerSocket),
