@@ -151,6 +151,21 @@ it("bounds reconnect hints and never accepts result content or draft hints", () 
   ).toThrow();
 });
 
+it("carries a reserved draft identity without granting thread reuse authority", () => {
+  const decode = Schema.decodeUnknownSync(LiveVoiceBinding, { onExcessProperty: "error" });
+  const draft = {
+    modelSelection: { instanceId: "codex", model: "model-fictional" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+  };
+  expect(decode({ draft })).toEqual({ draft });
+  expect(decode({ draft: { ...draft, threadId: "reserved-thread" } })).toEqual({
+    draft: { ...draft, threadId: "reserved-thread" },
+  });
+  expect(() => decode({ draft: { ...draft, threadId: "" } })).toThrow();
+  expect(() => decode({ draft: { ...draft, reuseExistingThread: true } })).toThrow();
+});
+
 it("negotiates only native voice and notification preferences", () => {
   const decode = Schema.decodeUnknownSync(LiveVoicePreferences, { onExcessProperty: "error" });
   for (const voice of LIVE_VOICE_VOICES)

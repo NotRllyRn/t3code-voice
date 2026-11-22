@@ -69,6 +69,7 @@ export const LiveVoiceSdp = boundedText(LIVE_VOICE_MAX_SDP_BYTES).check(
 
 // Binding is authorized separately on the control route, never inferred from peer/media events.
 export const LiveVoiceDraft = Schema.Struct({
+  threadId: Schema.optionalKey(ThreadId),
   projectId: Schema.optionalKey(ProjectId),
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
