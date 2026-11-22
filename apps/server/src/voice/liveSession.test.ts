@@ -1,5 +1,7 @@
 import { expect, it } from "@effect/vitest";
 import {
+  CommandId,
+  MessageId,
   EnvironmentId,
   ProviderInstanceId,
   ThreadId,
@@ -15,6 +17,7 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
@@ -54,6 +57,7 @@ it.effect(
     Effect.gen(function* () {
       const threadId = ThreadId.make("fixture-retry-thread");
       yield* VoiceFixture.create(threadId);
+      const threads = yield* ThreadManagement.ThreadManagementService;
       const down = yield* peer;
       const up = yield* peer;
       const creates: string[] = [];
@@ -62,6 +66,9 @@ it.effect(
       const fiber = yield* runLiveSession({
         socket: down.socket,
         binding: { threadId },
+        taskEvents: threads.streamDomainEvents.pipe(
+          Stream.filter((event) => event.threadId === threadId),
+        ),
         connection,
         capability,
         validateOwner: Effect.void,
@@ -141,6 +148,24 @@ it.effect(
       );
       const connected = JSON.parse(yield* Queue.take(down.output));
       expect(connected.phase).toBe("connected");
+      yield* threads.sendToThread({
+        projectId: VoiceFixture.projectId,
+        threadId,
+        commandId: CommandId.make("event-driven-task"),
+        messageId: MessageId.make("event-driven-task"),
+        text: "Immediate task context",
+        attachments: [],
+        mode: "queue",
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const accepted = JSON.parse(yield* Queue.take(down.output));
+      expect(accepted.type).toBe("live.agent");
+      expect(["accepted", "queued"]).toContain(accepted.status);
+      // No TestClock advance: a committed task event wakes the context feed immediately.
+      const context = JSON.parse(yield* Queue.take(up.output));
+      expect(context.channel).toBe("commentary");
+      expect(context.content[0].text).toContain("T3_typed_request");
       yield* Queue.offer(down.input, '{"type":"live.stop"}');
       yield* Fiber.join(fiber);
       expect(hangups).toBe(1);
@@ -385,7 +410,7 @@ it.effect.each(["ready", "binding"] as const)(
       let launches = 0;
       const fiber = yield* runLiveSession({
         socket: down.socket,
-        binding: { draft: { ...binding.draft, projectId: VoiceFixture.projectId } },
+        binding: { draft: { ...binding.draft, threadId, projectId: VoiceFixture.projectId } },
         connection,
         capability,
         validateOwner: Effect.void,
@@ -395,8 +420,9 @@ it.effect.each(["ready", "binding"] as const)(
           Layer.merge(
             agentAux,
             Layer.mock(ThreadLaunch.ThreadLaunchService)({
-              launch: () =>
+              launch: (input) =>
                 Effect.gen(function* () {
+                  expect(input.threadId).toBe(threadId);
                   launches++;
                   yield* VoiceFixture.create(threadId).pipe(
                     Effect.provideService(Orchestrator.OrchestratorV2, orchestrator),
@@ -486,9 +512,10 @@ it.effect.each(["ready", "binding"] as const)(
                 history.push(event.text);
               }),
           }).pipe(Effect.provide(agentAux));
-          yield* restarted.seed;
+          const hydrated = yield* restarted.seed;
           expect(restarted.getThreadId()).toBe(threadId);
-          expect(history[0]).toContain("Remember the violet kite.");
+          expect(hydrated).toContain("Remember the violet kite.");
+          expect(history).toHaveLength(0);
         }),
       );
       expect(launches).toBe(1);

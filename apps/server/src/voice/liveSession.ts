@@ -22,11 +22,12 @@ import * as Exit from "effect/Exit";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Socket from "effect/socket/Socket";
 import { decodeNativeLiveEvent, encodeNativeLiveAppend } from "./liveProtocol.ts";
 import { acquireLiveCall, liveRetryAt } from "./liveTransport.ts";
-import { makeLiveAgentSession } from "./liveAgentSession.ts";
+import { makeLiveAgentSession, type LiveResultOffer } from "./liveAgentSession.ts";
 
 const stringify = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const unavailable = () => new LiveConnectionError({ reason: "disconnected" });
@@ -51,7 +52,8 @@ type LifecycleStage =
 type Work =
   | { type: "client"; frame: string }
   | { type: "native"; frame: string }
-  | { type: "tick" };
+  | { type: "tick" }
+  | { type: "context" };
 
 export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
   readonly socket: Socket.Socket;
@@ -62,6 +64,8 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
   readonly modelSelection?: import("@t3tools/contracts").ModelSelection;
   readonly validateOwner: Effect.Effect<void, LiveConnectionError>;
   readonly onStopped?: () => void;
+  readonly resultOffers?: Map<string, LiveResultOffer>;
+  readonly taskEvents?: Stream.Stream<unknown, unknown>;
   readonly onBound: (id: import("@t3tools/contracts").ThreadId) => void;
 }) {
   const sessionId = SecureRandom.uuidV4Unsafe();
@@ -114,6 +118,8 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
     });
   const agent = yield* makeLiveAgentSession({
     binding: input.binding,
+    canAnnounce: () => peer && nativeStarted && alive,
+    ...(input.resultOffers ? { resultOffers: input.resultOffers } : {}),
     ...(input.preferences ? { preferences: input.preferences } : {}),
     sessionId,
     ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
@@ -122,14 +128,32 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
     onBound: input.onBound,
     append: Effect.fn("LiveSession.append")(function* (event) {
       if (!nativeWriter || !alive) return;
-      for (const message of encodeNativeLiveAppend(event))
+      for (const message of encodeNativeLiveAppend(event)) {
+        if (!alive) return;
         yield* nativeWriter.write(stringify(message)).pipe(
           Effect.tapError(() => diagnose("native-write", "unknown")),
           Effect.mapError(unavailable),
         );
+      }
     }),
   }).pipe(Effect.provideService(Scope.Scope, resources));
+  let contextQueued = false;
   const offer = (work: Work) => Queue.offer(queue, work).pipe(Effect.asVoid);
+  if (input.taskEvents)
+    yield* input.taskEvents.pipe(
+      Stream.runForEach(() =>
+        Effect.gen(function* () {
+          if (!alive || contextQueued) return;
+          contextQueued = true;
+          yield* offer({ type: "context" });
+        }),
+      ),
+      Effect.catchCause(() =>
+        Effect.logWarning("Live task context stream ended; polling continues."),
+      ),
+      Effect.forkScoped,
+      Effect.provideService(Scope.Scope, resources),
+    );
   const downstreamReader = yield* input.socket.reader;
   const read = Effect.forever(
     downstreamReader.pull.pipe(
@@ -164,6 +188,11 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
       const work = yield* Queue.take(queue);
       if (!alive) return;
       const now = yield* Clock.currentTimeMillis;
+      if (work.type === "context") {
+        contextQueued = false;
+        if (nativeStarted) yield* agent.poll;
+        return;
+      }
       if (work.type === "tick") {
         if (now - lastHeartbeat > LIVE_VOICE_HEARTBEAT_TIMEOUT_MS) {
           yield* diagnose("heartbeat-timeout", "local");
@@ -192,7 +221,7 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
           awaitingOffer = true;
           yield* status("connecting");
         }
-        yield* agent.poll;
+        if (nativeStarted) yield* agent.poll;
         return;
       }
       if (work.type === "native") {
@@ -207,6 +236,7 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
           nativeStarted = true;
           yield* agent.seed;
           if (peer) yield* status("connected");
+          yield* agent.poll;
         } else if (event.type === "error" || event.type === "closed") {
           yield* diagnose(event.type === "error" ? "native-error" : "native-closed", "upstream");
           return yield* unavailable();
@@ -221,7 +251,10 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
           return yield* unavailable();
         }
         peer = true;
-        if (nativeStarted) yield* status("connected");
+        if (nativeStarted) {
+          yield* status("connected");
+          yield* agent.poll;
+        }
         return;
       }
       if (event.type !== "live.start") return;
@@ -245,11 +278,14 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
         Effect.provideService(Scope.Scope, resources),
       );
       cleanup = { result: "unknown" };
+      const initialContext = yield* agent.seed;
+      if (!alive) return;
       const call = yield* acquireLiveCall(
         input.connection,
         event.offerSdp,
         cleanup,
         input.preferences,
+        initialContext,
       ).pipe(
         Effect.provideService(Scope.Scope, callScope),
         Effect.tapError(() => diagnose("call-acquire", "unknown")),

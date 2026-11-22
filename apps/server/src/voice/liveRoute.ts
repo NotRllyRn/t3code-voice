@@ -17,6 +17,7 @@ import * as DateTime from "effect/DateTime";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Clock from "effect/Clock";
 import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
@@ -27,6 +28,7 @@ import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import { claimVoiceUpgrade, boundedVoiceSocket } from "./transport.ts";
 import { VoiceOwners } from "./owner.ts";
+import type { LiveResultOffer } from "./liveAgentSession.ts";
 import { runLiveSession } from "./liveSession.ts";
 import { liveNetworkLayer } from "./liveTransport.ts";
 
@@ -71,6 +73,7 @@ export const liveVoiceRouteLayer = Layer.unwrap(
     const identity = yield* ServerEnvironment.ServerEnvironmentIdentity;
     const environmentId = yield* identity.getEnvironmentId;
     const active = yield* VoiceOwners;
+    const recovery = new Map<string, Map<string, LiveResultOffer>>();
     return HttpRouter.add(
       "GET",
       LIVE_VOICE_PATH,
@@ -187,9 +190,30 @@ export const liveVoiceRouteLayer = Layer.unwrap(
             (claim) => Effect.sync(claim.close),
           );
           const socket = boundedVoiceSocket(yield* request.upgrade, claim.wire);
+          let resultOffers = recovery.get(session.sessionId);
+          if (!resultOffers) {
+            if (recovery.size >= 128) {
+              const oldest = [...recovery.keys()].find((id) => !active.has(id));
+              if (oldest !== undefined) recovery.delete(oldest);
+            }
+            resultOffers = new Map<string, LiveResultOffer>();
+            if (recovery.size < 128) recovery.set(session.sessionId, resultOffers);
+          }
           yield* runLiveSession({
             socket,
             binding,
+            resultOffers,
+            taskEvents: threads.streamDomainEvents.pipe(
+              Stream.filter(
+                (event) =>
+                  event.threadId === threadId &&
+                  ((event.type === "message.updated" && !event.payload.voice) ||
+                    event.type === "run.updated" ||
+                    event.type === "runtime-request.updated" ||
+                    event.type === "turn-item.updated" ||
+                    event.type === "provider-turn.updated"),
+              ),
+            ),
             preferences: preferences.success,
             connection,
             modelSelection: selection,
