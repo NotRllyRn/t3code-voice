@@ -2,9 +2,9 @@
 
 Talk with the selected Codex agent while keeping the normal chat composer and
 coding workflow. Live voice is experimental on secure desktop browsers and the
-macOS desktop app. Coding and spoken-result accuracy, natural interruption,
-remote media, and macOS device behavior still need a bounded end-to-end alpha;
-this is not a production-ready or verified macOS download release.
+macOS desktop app. Spoken replies are model-generated; check the written coding
+result when accuracy matters. Browser audio checks do not establish physical
+microphone, speaker, or macOS Keychain behavior.
 
 ## Setup
 
@@ -63,7 +63,7 @@ voice context is not resent on each delegation.
 
 After a temporary disconnect, Voice tries up to four recoveries with 2, 5, 10,
 and 20 second cooldowns, within a three minute recovery budget. The composer
-shows reconnecting; mute stays muted. Stop or leaving the conversation cancels
+shows reconnecting; mute stays muted. Stop or quitting the app cancels
 recovery. Rejected credentials, permission errors and unsupported connections
 stop immediately so you can correct the setting; waiting cannot repair them.
 
@@ -104,7 +104,7 @@ current session’s choices and mute state. Native Live does not expose supporte
 speed or tone controls here.
 
 By default, task feedback announces completion, blocked work, and requests for
-attention. Turn on progress narration to also hear actual written coding-agent
+attention. Turn on **Read progress aloud** to also hear actual written coding-agent
 commentary. Private reasoning is never narrated. Task notifications wait while a
 native human turn is active, then resume after its final transcript. There is a
 short detection boundary before the native service reports that turn; this is
@@ -116,7 +116,7 @@ it played or was heard. Only recorded captions enter later coding-agent context.
 
 ## Fork and other surfaces
 
-The fork is based on upstream **v0.1.10**, commit `7d32075e`. Its desktop identity
+The fork is based on upstream **v0.1.11**, commit `59651c1761`. Its desktop identity
 and data directory are separate (`T3 Code Voice`, `t3code-voice`, `.t3code-voice`);
 older builds require manual replacement; persistent-publisher builds can use
 the published fork update feed. See [Voice installation and updates](./install-voice.md).
@@ -126,13 +126,11 @@ Use matching Voice clients and servers: orchestration protocol **3** with
 Google Play mobile apps are incompatible; they cannot connect to this server.
 No matching mobile client ships in this release; fork mobile/iOS work is deferred.
 
-The current migration head is **97**. Synthetic migration checks cover
-**67→97**, **81→97** and **88→97**; they do not prove arbitrary installed data
-or safe downgrades. Compare installed migration names and schema before upgrading.
+The current migration head is **103**, unchanged from Voice.1. Test a private
+copy of your stopped server's data before cutover; matching migration numbers
+do not prove compatibility with arbitrary installations or safe downgrades.
 Back up fork data before changing builds, and do not open it with older upstream
-software. Earlier private macOS artifacts passed signature checks, but are
-superseded by this source cleanup. They remain self-signed and unnotarized;
-Gatekeeper rejection is expected. Fresh matching artifacts, first install,
-microphone, playback and the complete live journey still need acceptance.
+software. macOS packages use a persistent self-signed publisher and are not
+Apple-notarized; first installation may require macOS approval.
 
 Mobile browsers do not expose the Live control.
