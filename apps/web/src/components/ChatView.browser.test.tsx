@@ -28,7 +28,7 @@ import "~/components/ChatView";
 import { DraftId, useComposerDraftStore } from "~/composerDraftStore";
 import { selectThreadDiffPanelSelection, useDiffPanelStore } from "~/diffPanelStore";
 import { __setClientSettingsForTests } from "~/hooks/useSettings";
-import stylesheet from "~/index.css?inline";
+import "~/index.css";
 import { environmentContextRecord } from "~/lib/composerContextRecords";
 import { startWorkspaceFocus } from "~/lib/workspaceFocus";
 import { usePromptStashStore } from "~/promptStashStore";
@@ -118,10 +118,6 @@ vi.mock(import("~/rpc/requestLatencyState"), async (original) => ({
 }));
 
 it("opens a linked Linear issue from an inactive thread's sidebar badge", async () => {
-  const style = document.createElement("style");
-  style.textContent = stylesheet;
-  document.head.append(style);
-  using _style = { [Symbol.dispose]: () => style.remove() };
   const first = threadWithHistory("issue-first", 1);
   const linked = threadWithHistory("issue-linked", 1);
   const issueRef = {
@@ -682,16 +678,16 @@ it("a mounted thread view lets go of the thread structures it has replaced", asy
     ...DEFAULT_CLIENT_SETTINGS,
     onboardingCompletedAt: "2026-01-01T00:00:00.000Z",
   });
-  const router = getRouter(createMemoryHistory({ initialEntries: ["/"] }));
+  const router = getRouter(
+    createMemoryHistory({ initialEntries: [`/${ENVIRONMENT_ID}/${other.id}`] }),
+  );
   await router.load();
   await using _app = await render(<AppRoot router={router} />, { router: false });
   const open = async (threadId: ThreadId, text: string) => {
-    await act(() =>
-      router.navigate({
-        to: "/$environmentId/$threadId",
-        params: { environmentId: ENVIRONMENT_ID, threadId },
-      }),
-    );
+    await router.navigate({
+      to: "/$environmentId/$threadId",
+      params: { environmentId: ENVIRONMENT_ID, threadId },
+    });
     await expect.element(page.getByText(text).first()).toBeVisible();
   };
   const structureAtom = environmentThreadDetails.quietThreadAtom(
@@ -711,7 +707,7 @@ it("a mounted thread view lets go of the thread structures it has replaced", asy
       `Update ${round}.`,
     );
     items.push(update);
-    await act(() => emitThreadEvent(updated.id, { type: "turn-item.updated", payload: update }));
+    await emitThreadEvent(updated.id, { type: "turn-item.updated", payload: update });
     await expect.element(page.getByText(`Update ${round}.`)).toBeVisible();
     shown.push(new WeakRef(appAtomRegistry.get(structureAtom)!.projection));
     await open(other.id, "Answer 2 for other.");
@@ -759,11 +755,9 @@ it("a shortcut conditioned on rightPanelOpen sees the thread's open right panel"
 
 it("selecting a side-chat tab focuses that side chat's composer", async () => {
   const parent = threadWithHistory("focus-parent", 1);
-  // The shell loaded by the file's first test stays; a family read serves side chats added later.
   const sideChat = (name: string) => ({
     ...threadWithHistory(name, 1),
     sideChatOf: parent.id,
-    olderSettled: true as const,
   });
   const side = sideChat("focus-side");
   const otherSide = sideChat("focus-other-side");
