@@ -51,6 +51,10 @@ can still finish transcription and receive its reply. The relay does not provide
 a shared audio/mute cutoff: a turn first reported after mute may be dropped,
 and provider-generated extra audio cannot be ruled out. Use Stop to end playback.
 
+Final spoken task requests steer an active coding turn through its normal delivery
+policy. With no active turn they start normally; queued voice requests can also
+use **Send now**. The original transcript stays unchanged.
+
 A draft is saved as a thread when native voice starts, before speech is admitted.
 Voice stays bound to that thread while you switch chats or put the app in the
 background. Other chats cannot start a second session. Typed messages, speech, coding progress
