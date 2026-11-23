@@ -1,3 +1,4 @@
+import { useLiveQuestionAnswer } from "../../voice/useLiveQuestionAnswer";
 import { msg } from "gt-react";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { m } from "~/i18n/messages";
@@ -649,6 +650,30 @@ export function usePendingThreadRequests(input: {
     setActivePendingUserInputQuestionIndex(activePendingProgress.questionIndex + 1);
   };
   const onAdvanceActivePendingUserInputStable = useStableCallback(onAdvanceActivePendingUserInput);
+
+  const voiceDraft = usePendingUserInputDraft(draftScope);
+  const voiceQuestion = voiceDraft.activePendingProgress?.activeQuestion;
+  useLiveQuestionAnswer({
+    environmentId,
+    threadId: activeThreadId,
+    requestId: activePendingUserInput?.requestId,
+    questionId: voiceQuestion?.id,
+    revision: JSON.stringify(voiceDraft.activePendingDraftAnswers),
+    enabled:
+      !activePendingIsResponding &&
+      voiceQuestion != null &&
+      voiceQuestion.allowCustomAnswer !== false,
+    answer: (questionId, revision, text) => {
+      const current = readPendingUserInputDraft(draftScope);
+      if (
+        current.activePendingProgress?.activeQuestion?.id !== questionId ||
+        JSON.stringify(current.activePendingDraftAnswers) !== revision
+      )
+        return;
+      onChangeActivePendingUserInputCustomAnswer(questionId, text);
+      onAdvanceActivePendingUserInput();
+    },
+  });
 
   const onPreviousActivePendingUserInputQuestion = () => {
     const { activePendingProgress } = readPendingUserInputDraft(draftScope);

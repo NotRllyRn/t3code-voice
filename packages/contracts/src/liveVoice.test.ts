@@ -17,6 +17,11 @@ describe("Live control boundary", () => {
     { type: "live.start", attemptId: "attempt-1", offerSdp },
     { type: "live.peer", attemptId: "attempt-1", state: "connected" },
     { type: "live.peer", attemptId: "attempt-1", state: "failed" },
+    { type: "live.question", target: null },
+    {
+      type: "live.question",
+      target: { requestId: "question", questionId: "color", nonce: "binding" },
+    },
     { type: "live.stop" },
     { type: "live.mute", muted: true },
     { type: "live.heartbeat" },
@@ -35,6 +40,10 @@ describe("Live control boundary", () => {
     { type: "live.peer", attemptId: "attempt-1", state: "connected", delegationId: "task-1" },
     { type: "delegation.created", item: {} },
     { type: "live.mute", muted: "true" },
+    {
+      type: "live.question",
+      target: { requestId: "question", questionId: "color", nonce: "binding", decision: "accept" },
+    },
     { type: "live.preferences" },
     { type: "live.preferences", notifications: "all" },
     { type: "live.preferences", notifications: "progress", voice: "cove" },

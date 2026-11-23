@@ -58,9 +58,12 @@ import {
   historicalMessage,
   latestNativeContextUsage,
 } from "@t3tools/provider-core/server/handoffBudget";
-import { deliverContextHandoffs, withInlineContext } from "./ContextHandoffDelivery.ts";
+import { withInlineContext } from "./ContextHandoffDelivery.ts";
 import { voiceHistoryHandoffFilter, voiceHistoryItemFilter } from "./VoiceHistory.ts";
-import { prepareVoiceHistoryHandoffs } from "./VoiceHistoryDelivery.ts";
+import {
+  prepareVoiceHistoryHandoffs,
+  deliverVoiceAwareContextHandoffs as deliverContextHandoffs,
+} from "./VoiceHistoryDelivery.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";

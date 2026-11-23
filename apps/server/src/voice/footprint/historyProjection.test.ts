@@ -290,7 +290,7 @@ it.effect(
 );
 
 it.effect(
-  "Live history keeps at most four newest messages and bounds encoded UTF-8 JSON, including escapes",
+  "Live history keeps at most four fitting recent messages and bounds encoded UTF-8 JSON, including escapes",
   () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("thread:bounded-live");
@@ -319,9 +319,53 @@ it.effect(
       expect(JSON.stringify(large).length).toBeLessThan(12000);
       expect(Buffer.byteLength(JSON.stringify(large), "utf8")).toBeGreaterThan(12000);
       const history = yield* readLiveHistory(threadId);
-      expect(history.messages).toEqual([large[1], large[2]]);
+      expect(history.messages).toEqual([
+        { role: "user", text: "small-5" },
+        { role: "user", text: "small-6" },
+        large[1],
+        large[2],
+      ]);
       expect(Buffer.byteLength(JSON.stringify(history.messages), "utf8")).toBeLessThanOrEqual(
         12000,
       );
+    }).pipe(Effect.provide(layer)),
+);
+
+it.effect(
+  "reconnect history keeps the last real request and coding result despite generated voice replies",
+  () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread:reconnect-grounding");
+      yield* create(threadId);
+      yield* putMessage({ threadId, id: "real-request", ordinal: 1, text: "Fix keyboard input" });
+      yield* putMessage({
+        threadId,
+        id: "coding-result",
+        ordinal: 2,
+        role: "assistant",
+        text: "Fix tested, no commit made",
+      });
+      for (let index = 3; index < 9; index++) {
+        yield* putMessage({
+          threadId,
+          id: `generated-${index}`,
+          ordinal: index,
+          role: "assistant",
+          text: `Generated reply ${index}`,
+          voice: {
+            ...voice,
+            itemId: `generated-${index}`,
+            textKind: "generated_voice_reply",
+            sequence: index,
+          },
+        });
+      }
+      const history = yield* readLiveHistory(threadId);
+      expect(history.messages.map(({ role, text }) => ({ role, text }))).toEqual([
+        { role: "user", text: "Fix keyboard input" },
+        { role: "assistant", text: "Fix tested, no commit made" },
+        { role: "assistant", text: "Generated reply 7" },
+        { role: "assistant", text: "Generated reply 8" },
+      ]);
     }).pipe(Effect.provide(layer)),
 );

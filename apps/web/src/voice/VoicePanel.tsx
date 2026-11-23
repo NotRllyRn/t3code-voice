@@ -1,3 +1,4 @@
+import { liveQuestionAnswers } from "./liveQuestionAnswers";
 import { T, useGT } from "gt-react";
 import { useAtomValue } from "@effect/atom-react";
 import {
@@ -135,6 +136,18 @@ export function LiveVoiceProvider({ children }: { children: ReactNode }) {
       }
     };
   }, []);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Forwards visible question bindings to the session owner across route changes.
+  useEffect(
+    () =>
+      liveQuestionAnswers.subscribe(() => {
+        const active = owner.current;
+        if (active)
+          active.controller.setQuestionTarget(
+            liveQuestionAnswers.get(active.target.environmentId, active.target.threadId),
+          );
+      }),
+    [],
+  );
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- The session owner forwards notification changes even when its composer is not mounted.
   useEffect(
     () =>
@@ -181,6 +194,8 @@ export function LiveVoiceProvider({ children }: { children: ReactNode }) {
           return url.toString();
         },
         event: (event) => {
+          if (event.type === "live.question.answer")
+            liveQuestionAnswers.answer(environmentId, target.threadId, event.target, event.text);
           if (event.type === "live.caption") liveCaptions.caption(token, event);
           if (event.type === "live.bound" && owner.current?.controller === controller) {
             target.threadId = event.threadId;
@@ -210,6 +225,7 @@ export function LiveVoiceProvider({ children }: { children: ReactNode }) {
     );
     owner.current = { target, controller, token };
     controller.setNotifications(settings.notifications);
+    controller.setQuestionTarget(liveQuestionAnswers.get(environmentId, target.threadId));
     void controller.start();
   };
   const dismiss = () => {

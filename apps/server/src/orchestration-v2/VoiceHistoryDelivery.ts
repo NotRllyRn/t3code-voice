@@ -6,6 +6,8 @@ import type {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
+import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import type { ProjectionStoreV2Shape } from "./ProjectionStore.ts";
 import { voiceHistoryBoundaryOrdinal, voiceHistoryHandoff } from "./VoiceHistory.ts";
 
@@ -54,3 +56,31 @@ export const prepareVoiceHistoryHandoffs = Effect.fn("VoiceHistoryDelivery.prepa
   if (saved === undefined) yield* input.persist(handoff);
   return [...input.effectiveHandoffs, saved ?? handoff];
 });
+
+/** Supplemental voice context must not block a reply or replace its healthy native session. */
+export const deliverVoiceAwareContextHandoffs = Effect.fn("VoiceHistoryDelivery.deliver")(
+  function* <InjectError = never, PersistError = never, BudgetError = never>(input: {
+    readonly handoffs: ReadonlyArray<OrchestrationV2ContextHandoff>;
+    readonly providerThread: OrchestrationV2ProviderThread;
+    readonly budget: number | Effect.Effect<number, BudgetError>;
+    readonly deferInline?: boolean;
+    readonly alreadyDeliveredItemIds: ReadonlySet<string>;
+    readonly inject?: (
+      history: ProviderAdapter.ProviderAdapterV2HistoricalContext,
+    ) => Effect.Effect<boolean, InjectError>;
+    readonly persist: (handoff: OrchestrationV2ContextHandoff) => Effect.Effect<void, PersistError>;
+  }) {
+    return yield* deliverContextHandoffs(input).pipe(
+      Effect.catchTags({
+        ContextHandoffBudgetError: (error) => {
+          const required = input.handoffs.filter(
+            (handoff) => !handoff.id.startsWith("context-handoff:voice:"),
+          );
+          return required.length === input.handoffs.length
+            ? Effect.fail(error)
+            : deliverContextHandoffs({ ...input, handoffs: required });
+        },
+      }),
+    );
+  },
+);

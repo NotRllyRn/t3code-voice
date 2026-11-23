@@ -23,7 +23,7 @@ export const FORK_RELEASE = {
     tag: "v0.1.11",
     sha: "59651c1761f6c63e9b6056839067066968e6a406",
   },
-  voiceRevision: 4,
+  voiceRevision: 5,
   githubPrerelease: true,
 } as const;
 

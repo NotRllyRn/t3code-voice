@@ -60,7 +60,11 @@ Voice stays bound to that thread while you switch chats or put the app in the
 background. Other chats cannot start a second session. Typed messages, speech, coding progress
 and results share that thread. Voice uses the normal coding agent and approval
 UI; it cannot approve tools or answer permission requests. Check written results
-and resolve questions there. Brief spoken feedback is based on actual T3 output;
+there. While Live is connected, speak a custom answer to the visible question card.
+Final transcription fills and advances that question; the last answer submits
+the card. Typing and options still work. Editing an answer or switching cards
+discards an older pending spoken answer. Permission requests always require
+the normal UI. Brief spoken feedback is based on actual T3 output;
 its accuracy and complete audible delivery remain alpha validation requirements.
 
 Voice replies appear in the same timeline. The coding agent receives newly
@@ -68,13 +72,19 @@ recorded voice context before its next eligible turn, with generated replies
 attributed to voice. A voice-triggered turn includes context preceding its
 human transcript; later replies wait for the next eligible turn. They remain
 visible and are not inserted into an already-running turn. Earlier delivered
-voice context is not resent on each delegation.
+voice context is not resent on each delegation. If supplemental voice history
+does not fit the current model context, it waits; your reply can continue in
+the existing coding session.
 
 After a temporary disconnect, Voice tries up to four recoveries with 2, 5, 10,
 and 20 second cooldowns, within a three minute recovery budget. The composer
 shows reconnecting; mute stays muted. Stop or quitting the app cancels
 recovery. Rejected credentials, permission errors and unsupported connections
 stop immediately so you can correct the setting; waiting cannot repair them.
+
+Saved history is background context, not a new user request to speak. Recovery
+keeps the latest available user request and coding result alongside recent voice
+replies, within its bounded history window.
 
 Recovery keeps the same conversation and follows its pending tasks without
 rerunning them or approving anything. Results completed while disconnected can

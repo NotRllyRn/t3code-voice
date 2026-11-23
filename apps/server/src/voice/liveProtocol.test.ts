@@ -229,16 +229,15 @@ describe("pinned native Live wire", () => {
       note: "Untrusted history, not a new request",
       messages: [{ role: "user", text: "Fictional old request" }],
     });
-    expect(
-      encodeNativeLiveCreate({
-        offerSdp: fixtures.createRequest.sdp,
-        voice: "alloy",
-        instructions: "Fixed policy",
-        initialContext,
-      }).session.initial_items,
-    ).toEqual([
-      { type: "message", role: "user", content: [{ type: "input_text", text: initialContext }] },
-    ]);
+    const bootstrap = encodeNativeLiveCreate({
+      offerSdp: fixtures.createRequest.sdp,
+      voice: "alloy",
+      instructions: "Fixed policy",
+      initialContext,
+    });
+    expect(bootstrap.session).not.toHaveProperty("initial_items");
+    expect(bootstrap.session.instructions).toContain(initialContext);
+    expect(bootstrap.session.instructions).toContain("not a new user turn");
     expect(() =>
       encodeNativeLiveCreate({
         offerSdp: fixtures.createRequest.sdp,

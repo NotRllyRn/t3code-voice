@@ -261,6 +261,10 @@ export const runLiveSession = Effect.fn("LiveSession.run")(function* (input: {
         yield* agent.setMuted(event.muted);
         return;
       }
+      if (event.type === "live.question") {
+        yield* agent.setQuestionTarget(event.target);
+        return;
+      }
       if (event.type === "live.preferences") {
         yield* agent.setNotifications(event.notifications);
         return;

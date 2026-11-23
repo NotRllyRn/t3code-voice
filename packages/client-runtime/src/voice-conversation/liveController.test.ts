@@ -842,3 +842,37 @@ test("keeps latest notification policy through authorization, active updates and
     vi.useRealTimers();
   }
 });
+
+test("question binding survives authorization/recovery and clearing disables late answer capture", async () => {
+  vi.useFakeTimers();
+  try {
+    using h = harness();
+    const target = {
+      requestId: "question" as import("@t3tools/contracts").RuntimeRequestId,
+      questionId: "color",
+      nonce: "binding",
+    };
+    h.controller.setQuestionTarget(target);
+    await h.controller.start();
+    expect(h.socket.sent).toEqual([]);
+    h.authorize();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.socket.sent).toContainEqual({ type: "live.question", target });
+    h.answer();
+    h.attempts[0]!.options.peer("connected");
+    h.connected();
+    await vi.advanceTimersByTimeAsync(0);
+    h.socket.close();
+    await vi.advanceTimersByTimeAsync(2000);
+    h.authorize();
+    expect(h.socket.sent).toContainEqual({ type: "live.question", target });
+    h.controller.setQuestionTarget(null);
+    expect(h.socket.sent.at(-1)).toEqual({ type: "live.question", target: null });
+    h.controller.stop();
+    const sent = h.socket.sent.length;
+    h.controller.setQuestionTarget(target);
+    expect(h.socket.sent).toHaveLength(sent);
+  } finally {
+    vi.useRealTimers();
+  }
+});

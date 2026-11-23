@@ -18,7 +18,10 @@ import {
   voiceHistoryHandoffFilter,
   voiceHistoryItemFilter,
 } from "./VoiceHistory.ts";
-import { prepareVoiceHistoryHandoffs } from "./VoiceHistoryDelivery.ts";
+import {
+  prepareVoiceHistoryHandoffs,
+  deliverVoiceAwareContextHandoffs,
+} from "./VoiceHistoryDelivery.ts";
 
 const fixture = Effect.fn("VoiceHistoryDelivery.test.fixture")(function* () {
   const threadId = ThreadId.make("thread:history-delivery");
@@ -218,4 +221,40 @@ it.effect("saved handoff eligibility uses run ordinals, independently of item cu
       }),
     ).toBe(true);
   }).pipe(Effect.provide(layer)),
+);
+
+it.effect(
+  "voice context defers at zero budget without delivery and survives for a later turn",
+  () =>
+    Effect.gen(function* () {
+      const input = yield* fixture();
+      const handoffs = yield* prepareVoiceHistoryHandoffs(input);
+      const persist = vi.fn(() => Effect.void);
+      const deferred = yield* deliverVoiceAwareContextHandoffs({
+        ...input,
+        handoffs,
+        budget: 0,
+        persist,
+      });
+      expect(deferred.context).toBe("");
+      yield* deferred.delivered;
+      expect(persist).not.toHaveBeenCalled();
+      const delivered = yield* deliverVoiceAwareContextHandoffs({
+        ...input,
+        handoffs,
+        budget: 16000,
+        persist,
+      });
+      expect(delivered.context).toContain("RECORDED_CONVERSATION");
+      yield* delivered.delivered;
+      expect(persist).toHaveBeenCalled();
+      const required = handoffs.map((handoff) => ({
+        ...handoff,
+        id: ContextHandoffId.make("required-handoff"),
+      }));
+      const failure = yield* Effect.flip(
+        deliverVoiceAwareContextHandoffs({ ...input, handoffs: required, budget: 0, persist }),
+      );
+      expect(failure._tag).toBe("ContextHandoffBudgetError");
+    }).pipe(Effect.provide(layer)),
 );
