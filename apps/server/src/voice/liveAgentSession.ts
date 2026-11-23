@@ -99,7 +99,7 @@ export const sendLiveDelegation = Effect.fn("LiveAgent.sendDelegation")(function
     messageId: voiceMessageId("user", { sessionId: input.sessionId, itemId: input.userTurnId }),
     text: input.userTranscript,
     attachments: [],
-    mode: "queue",
+    mode: "auto",
     ...(input.expectedUserMessageCount === undefined
       ? {}
       : { expectedUserMessageCount: input.expectedUserMessageCount }),

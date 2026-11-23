@@ -6429,6 +6429,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: selectionTransition.reason,
       });
     }
+    const recordedVoice = input.projection.messages.find(
+      (message) => message.id === input.messageId,
+    );
+    const recordedVoiceItem = input.projection.turnItems.find(
+      (item) =>
+        item.type === "user_message" &&
+        item.messageId === input.messageId &&
+        item.voice !== undefined,
+    );
     const appendSteeringMessage = Effect.fn("Orchestrator.appendSteeringMessage")(
       function* (messageInput: {
         readonly runId: OrchestrationV2Run["id"];
@@ -6463,6 +6472,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           streaming: false,
           createdAt: now,
           updatedAt: now,
+          ...voiceMessageFields(recordedVoice),
         };
         const turnItem: OrchestrationV2TurnItem = {
           createdBy: input.createdBy,
@@ -6489,6 +6499,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           updatedAt: now,
           type: "user_message",
           messageId: input.messageId,
+          ...voiceTurnItemFields(
+            recordedVoiceItem?.type === "user_message" ? recordedVoiceItem : undefined,
+          ),
           inputIntent:
             input.command.type === "queued-message.promote-to-steer"
               ? "promoted_queued_to_steer"
@@ -8155,23 +8168,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...voiceMessageFields(recordedVoice),
       };
       const emitEvent = emit(events, command);
-      if (recordedVoiceItem !== undefined) {
-        yield* emitEvent({
-          type: "turn-item.updated",
-          threadId: command.threadId,
-          runId,
-          nodeId: rootNodeId,
-          occurredAt: now,
-          payload: {
-            ...recordedVoiceItem,
-            runId,
-            nodeId: rootNodeId,
-            providerThreadId: queuedProviderThread.id,
-            inputIntent: "queued_turn",
-            updatedAt: now,
-          },
-        });
-      }
       if (targetProviderThread === undefined) {
         yield* emitEvent({
           type: "provider-thread.updated",
@@ -8268,6 +8264,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             startedAt: null,
             completedAt: null,
             updatedAt: now,
+            ...voiceTurnItemFields(recordedVoiceItem),
           },
         });
       }
@@ -11817,14 +11814,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         commandId: command.commandId,
         commandType: command.type,
         cause: "Automatic completion deliveries cannot be promoted to Steer.",
-      });
-    }
-
-    if (queuedMessage.voice !== undefined) {
-      return yield* new OrchestratorDispatchError({
-        commandId: command.commandId,
-        commandType: command.type,
-        cause: "Recorded voice inputs cannot be promoted to Steer.",
       });
     }
 

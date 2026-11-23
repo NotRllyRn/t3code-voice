@@ -141,14 +141,14 @@ export const makeVoiceCommandHandlers = <ProjectionError, DispatchError>({
         recordedVoiceItem === undefined ||
         command.attachments.length > 0 ||
         (command.dispatchMode.type !== "queue_after_active" &&
-          command.dispatchMode.type !== "start_immediately")
+          command.dispatchMode.type !== "start_immediately" &&
+          command.dispatchMode.type !== "steer_active")
       ) {
         return yield* Effect.fail(
           dispatchError({
             commandId: command.commandId,
             commandType: command.type,
-            cause:
-              "Only the recorded voice user input can be dispatched, without rewriting or steering.",
+            cause: "Only the recorded voice user input can be dispatched, without rewriting.",
           }),
         );
       }

@@ -135,17 +135,12 @@ it.effect(
       expect(editError).toMatchObject({
         cause: "Recorded voice inputs cannot be edited. Send a separate message instead.",
       });
-      const promoteError = yield* Effect.flip(
-        threads.dispatch({
-          type: "queued-message.promote-to-steer",
-          queuedRunId: queued.run.id,
-          targetRunId: run.run.id,
-          commandId: CommandId.make("promote-recorded-voice"),
-          threadId,
-        }),
-      );
-      expect(promoteError).toMatchObject({
-        cause: "Recorded voice inputs cannot be promoted to Steer.",
+      yield* threads.dispatch({
+        type: "queued-message.promote-to-steer",
+        queuedRunId: queued.run.id,
+        targetRunId: run.run.id,
+        commandId: CommandId.make("promote-recorded-voice"),
+        threadId,
       });
       const unchanged = yield* store.getThreadRecords(threadId, ["messages", "turnItems"]);
       expect(unchanged.messages.find((message) => message.id === second.messageId)?.text).toBe(
