@@ -495,7 +495,7 @@ it.effect.each([false, true])(
         yield* take(f.browserEvents, (event) => event.type === "live.answer");
         expect(f.offers).toHaveLength(2);
         expect(f.offers[0]).not.toBe(f.offers[1]);
-        expect(JSON.stringify(f.bootstraps.at(-1))).toContain("initial_items");
+        expect(f.bootstraps.at(-1)).not.toHaveProperty("initial_items");
         expect(JSON.stringify(f.bootstraps.at(-1))).toContain("T3_bound_history");
         expect(f.allocationCount()).toBe(1);
         expect(f.controller.state.phase).toBe("connecting");

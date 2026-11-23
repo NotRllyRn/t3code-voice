@@ -3932,3 +3932,103 @@ effectIt.effect("rejects citation expansion before opening a provider session", 
     expect(harness.projection().messages[0]?.text).toBe(text);
   }),
 );
+
+for (const retry of [false, true]) {
+  effectIt.effect(
+    `supplemental voice at full native context neither rejects replies nor replaces the session (retry=${retry})`,
+    () =>
+      Effect.gen(function* () {
+        const harness = makeLocalCommandHarness({
+          text: "Continue with blue",
+          voiceHistory: "inline",
+        });
+        const projection = harness.projection();
+        const run = projection.runs.at(-1)!;
+        const providerThread = projection.providerThreads[0]!;
+        const item: OrchestrationV2ThreadProjection["turnItems"][number] = {
+          id: TurnItemId.make("voice-budget-user"),
+          threadId: projection.thread.id,
+          runId: null,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 1,
+          status: "completed",
+          title: null,
+          startedAt: run.requestedAt,
+          completedAt: run.requestedAt,
+          updatedAt: run.requestedAt,
+          type: "user_message",
+          messageId: MessageId.make("voice-budget-user"),
+          text: "Earlier spoken context",
+          inputIntent: "conversation_only",
+          createdBy: "user",
+          creationSource: "web",
+          attachments: [],
+          voice: {
+            sessionId: "voice",
+            itemId: "budget",
+            sequence: 1,
+            textKind: "final_user_transcript",
+            delivery: "unknown",
+          },
+        };
+        harness.setProjection({
+          ...projection,
+          runs: projection.runs.map((source) => ({ ...source, voiceHistoryCutoffOrdinal: 1 })),
+          providerThreads: projection.providerThreads.map((source) => ({
+            ...source,
+            nativeThreadRef: {
+              driver: source.driver,
+              nativeId: "side-chat-native",
+              strength: "strong",
+            },
+            contextUsage: { usedTokens: 128000, maxTokens: 128000 },
+          })),
+          turnItems: [item],
+          contextHandoffs: retry
+            ? [
+                {
+                  id: ContextHandoffId.make(`context-handoff:voice:${run.id}`),
+                  threadId: run.threadId,
+                  targetRunId: run.id,
+                  fromProviderThreadIds: [],
+                  toProviderThreadId: providerThread.id,
+                  coveredRunOrdinals: { from: run.ordinal, to: run.ordinal },
+                  strategy: "manual_context",
+                  status: "ready",
+                  summaryMessageId: null,
+                  summaryText: "",
+                  createdByProviderInstanceId: null,
+                  createdAt: run.requestedAt,
+                  updatedAt: run.requestedAt,
+                  history: {
+                    messages: [],
+                    coverage: "Earlier voice is saved in the conversation",
+                    omittedItems: 0,
+                  },
+                },
+              ]
+            : [],
+        });
+        yield* harness.start;
+        expect(harness.startTurn).toHaveBeenCalledTimes(1);
+        expect(harness.startTurn.mock.calls[0]?.[0].message.text).toBe("Continue with blue");
+        expect(harness.projection().runs.at(-1)?.status).toBe("running");
+        expect(
+          harness
+            .projection()
+            .turnItems.some((item) => item.type === "error" || item.type === "handoff"),
+        ).toBe(false);
+        expect(harness.projection().contextTransfers).toHaveLength(0);
+        expect(harness.projection().providerThreads[0]?.nativeThreadRef?.nativeId).toBe(
+          "side-chat-native",
+        );
+        expect(
+          harness.projection().contextHandoffs.every((handoff) => handoff.delivery === undefined),
+        ).toBe(true);
+      }),
+  );
+}

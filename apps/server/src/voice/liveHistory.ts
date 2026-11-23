@@ -1,7 +1,6 @@
 import type { ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import * as Schema from "effect/Schema";
-const stringify = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+import { selectLiveHistory } from "./liveHistorySelection.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 
 /** Same local/fresh-context boundary as the legacy voice surface. No private prompt/tool dump. */
@@ -43,29 +42,27 @@ export const readLiveHistory = Effect.fn("LiveHistory.read")(function* (threadId
   });
   const byId = new Map(messages.map((message) => [message.id, message]));
   const seen = new Set<string>();
-  const selected = rows
-    .flatMap((row) => {
-      const message = byId.get(row.messageId);
-      if (
-        !message ||
-        message.threadId !== threadId ||
-        message.streaming ||
-        message.notification ||
-        (message.role !== "user" && message.role !== "assistant") ||
-        seen.has(message.id)
-      )
-        return [];
-      seen.add(message.id);
-      return [
-        {
-          role: message.role,
-          text: message.text,
-          ...(message.voice ? { voice: message.voice } : {}),
-        },
-      ];
-    })
-    .slice(-4);
-  while (Buffer.byteLength(stringify(selected), "utf8") > 12000) selected.shift();
+  const candidates = rows.flatMap((row) => {
+    const message = byId.get(row.messageId);
+    if (
+      !message ||
+      message.threadId !== threadId ||
+      message.streaming ||
+      message.notification ||
+      (message.role !== "user" && message.role !== "assistant") ||
+      seen.has(message.id)
+    )
+      return [];
+    seen.add(message.id);
+    return [
+      {
+        role: message.role,
+        text: message.text,
+        ...(message.voice ? { voice: message.voice } : {}),
+      },
+    ];
+  });
+  const selected = selectLiveHistory(candidates);
   return {
     messages: selected,
     runs: runs

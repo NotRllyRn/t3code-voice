@@ -14,6 +14,7 @@ import {
   type LiveVoiceClientEvent,
   type LiveVoicePhase,
   type LiveVoicePreferences,
+  type LiveVoiceQuestionTarget,
   type LiveVoiceReason,
   type LiveVoiceServerEvent,
   ThreadId,
@@ -128,6 +129,7 @@ export class LiveVoiceController {
     else release();
   }
   private wantedMuted = false;
+  private questionTarget: LiveVoiceQuestionTarget | null = null;
   private wantedNotifications: LiveVoicePreferences["notifications"] | undefined;
   private recoveryAttempt = 0;
   private recoveryDeadline = 0;
@@ -398,6 +400,12 @@ export class LiveVoiceController {
         ) {
           this.send(session, { type: "live.preferences", notifications: this.wantedNotifications });
         }
+        if (
+          this.questionTarget &&
+          (event.phase === "connecting" || event.phase === "refresh_wait")
+        ) {
+          this.send(session, { type: "live.question", target: this.questionTarget });
+        }
         if (event.phase === "connecting" && this.state.muted) {
           this.send(session, { type: "live.mute", muted: true });
         }
@@ -599,6 +607,17 @@ export class LiveVoiceController {
       }
     } catch {
       if (this.alive(session, attempt)) this.end("playback-blocked");
+    }
+  }
+  setQuestionTarget(target: LiveVoiceQuestionTarget | null) {
+    if (this.disposed || this.questionTarget?.nonce === target?.nonce) return;
+    this.questionTarget = target;
+    const session = this.session;
+    if (!session || !this.alive(session) || !session.sessionId) return;
+    try {
+      this.send(session, { type: "live.question", target });
+    } catch {
+      this.end("disconnected");
     }
   }
   setNotifications(notifications: LiveVoicePreferences["notifications"]) {

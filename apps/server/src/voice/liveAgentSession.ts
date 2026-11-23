@@ -3,6 +3,7 @@ import {
   latestProviderTurnForAttempt,
   type LiveVoiceBinding,
   type LiveVoicePreferences,
+  type LiveVoiceQuestionTarget,
   type LiveVoiceServerEvent,
   type ModelSelection,
   type RunId,
@@ -42,6 +43,7 @@ const PARENT_WAIT_MS = 30000;
 
 type Delegation = Extract<NativeLiveEvent, { type: "delegation" }>;
 type Segment = {
+  questionTarget?: LiveVoiceQuestionTarget;
   id: string;
   turnId?: string;
   text: string;
@@ -140,6 +142,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
   let count = 0;
   let stopped = false;
   let muted = false;
+  let questionTarget: LiveVoiceQuestionTarget | null = null;
   let notifications = input.preferences?.notifications ?? "terminal";
   const rejectedUserTurns = new Set<string>();
   const segments = new Map<"user" | "assistant", Segment>();
@@ -351,6 +354,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
   ) {
     if (++count > 1024) return yield* fail();
     const segment: Segment = {
+      ...(role === "user" && questionTarget ? { questionTarget } : {}),
       id: `segment_${count}`,
       text: "",
       revision: 0,
@@ -380,8 +384,40 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       text: segment.text,
       committed: false,
     });
+  const routeQuestionAnswer = Effect.fn("LiveAgent.routeQuestionAnswer")(function* (
+    human: Segment,
+  ) {
+    const target = human.questionTarget;
+    if (!target || stopped || !threadId || !human.nativeDone || !human.text.trim()) return;
+    human.claimed = true;
+    if (questionTarget?.nonce !== target.nonce || segments.get("user") !== human) return;
+    yield* input.validateOwner ?? Effect.void;
+    const state = yield* threads.getThreadRecords(threadId, ["runtimeRequests", "turnItems"], {
+      runtimeRequestStatuses: ["pending"],
+      turnItemTypes: ["user_input_request"],
+    });
+    const request = state.runtimeRequests.find((request) => request.id === target.requestId);
+    const item = state.turnItems.find(
+      (item) => item.type === "user_input_request" && item.requestId === target.requestId,
+    );
+    if (
+      request?.kind !== "user_input" ||
+      request.responseCapability.type === "not_resumable" ||
+      item?.type !== "user_input_request"
+    )
+      return;
+    const question = item.questions.find((question) => question.id === target.questionId);
+    if (!question || question.allowCustomAnswer === false || stopped) return;
+    yield* input.send({
+      type: "live.question.answer",
+      sessionId: input.sessionId,
+      target,
+      text: human.text,
+    });
+  });
   const admit = Effect.fn("LiveAgent.admit")(function* (event: Delegation, human: Segment) {
     if (stopped) return;
+    if (human.questionTarget) return yield* reject(event, "question_answer_routed");
     const userTurnId = human.turnId;
     if (!userTurnId || event.userTurnId !== userTurnId || !human.nativeDone || !human.text.trim())
       return yield* reject(event, "unfinalized_parent");
@@ -534,6 +570,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       yield* caption("user", segment);
       if (segment.nativeDone) {
         yield* freeze("user", segment);
+        yield* routeQuestionAnswer(segment);
         const work = pending.get(turnId);
         // Remove before awaiting admission; finalization/replay can never release it twice.
         pending.delete(turnId);
@@ -563,6 +600,7 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
         !segment.nativeDone
       ) {
         segment.nativeDone = true;
+        if (event.role === "user") yield* routeQuestionAnswer(segment);
         return;
       }
       if (event.role === "user" && event.type === "turn_done" && segment?.nativeDone && !nativeId)
@@ -578,7 +616,10 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
       segment.at = now;
       segment.nativeDone = event.type === "turn_done";
       yield* caption(event.role, segment);
-      if (event.type === "turn_done") yield* freeze(event.role, segment);
+      if (event.type === "turn_done") {
+        yield* freeze(event.role, segment);
+        if (event.role === "user") yield* routeQuestionAnswer(segment);
+      }
       return;
     }
     if (event.type !== "delegation") return;
@@ -1140,6 +1181,10 @@ export const makeLiveAgentSession = Effect.fn("LiveAgent.make")(function* (input
     ),
   );
   return {
+    setQuestionTarget: (target: LiveVoiceQuestionTarget | null) =>
+      Effect.sync(() => {
+        if (!stopped) questionTarget = target;
+      }),
     // The owner runs these effects in the same serialized queue as receive.
     setMuted: (next: boolean) =>
       Effect.sync(() => {

@@ -5,6 +5,7 @@ import {
   NonNegativeInt,
   ProjectId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
@@ -134,6 +135,13 @@ export const LiveVoiceCapability = Schema.Struct({
 });
 export type LiveVoiceCapability = typeof LiveVoiceCapability.Type;
 
+export const LiveVoiceQuestionTarget = Schema.Struct({
+  requestId: RuntimeRequestId,
+  questionId: LiveVoiceId,
+  nonce: LiveVoiceId,
+});
+export type LiveVoiceQuestionTarget = typeof LiveVoiceQuestionTarget.Type;
+
 export const LiveVoiceClientEvent = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("live.start"),
@@ -144,6 +152,10 @@ export const LiveVoiceClientEvent = Schema.Union([
     type: Schema.Literal("live.peer"),
     attemptId: LiveVoiceId,
     state: Schema.Literals(["connected", "failed"]),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("live.question"),
+    target: Schema.NullOr(LiveVoiceQuestionTarget),
   }),
   Schema.Struct({ type: Schema.Literal("live.stop") }),
   Schema.Struct({ type: Schema.Literal("live.mute"), muted: Schema.Boolean }),
@@ -156,6 +168,12 @@ export const LiveVoiceClientEvent = Schema.Union([
 export type LiveVoiceClientEvent = typeof LiveVoiceClientEvent.Type;
 
 export const LiveVoiceServerEvent = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("live.question.answer"),
+    sessionId: LiveVoiceId,
+    target: LiveVoiceQuestionTarget,
+    text: boundedText(LIVE_VOICE_MAX_CAPTION_BYTES),
+  }),
   Schema.Struct({
     type: Schema.Literal("live.cleanup"),
     sessionId: LiveVoiceId,
