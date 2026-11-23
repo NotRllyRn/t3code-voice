@@ -3,7 +3,7 @@ import type { LiveVoiceQuestionTarget } from "@t3tools/contracts";
 const key = (environmentId: string, threadId: string) => JSON.stringify([environmentId, threadId]);
 type Entry = { target: LiveVoiceQuestionTarget; answer: (text: string) => void };
 
-export class LiveQuestionAnswers {
+class LiveQuestionAnswers {
   private entries = new Map<string, Entry>();
   private listeners = new Set<() => void>();
   subscribe = (listener: () => void) => {
