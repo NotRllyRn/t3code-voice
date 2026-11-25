@@ -18,7 +18,7 @@
       "vitest": { "entry": [".github/**/*.test.cjs"] },
     },
     "evals": {
-      "entry": ["mcp-tool-use/voice-upstream-cases.ts"],
+      "entry": ["mcp-tool-use/voice-upstream-cases.ts", "workflow-authoring/fixtures/*.ts"],
     },
     "scripts": {
       // Knip loads its preprocessor through a CLI option; native verification and
@@ -59,6 +59,7 @@
       "entry": [
         "src/bin.ts!",
         "src/claude-history-worker.ts!",
+        "src/process-launcher.ts!",
         "scripts/cli.ts",
         "scripts/fetch-expo-schema.ts",
         "scripts/probe-claude-fork-local-rollback-replay.ts",
@@ -86,6 +87,7 @@
       // Electron loads these bundles by filename rather than importing them.
       "entry": [
         "gnome-extension/extension.js!",
+        "src/backend/DesktopBackendRecoveryWorker.ts!",
         "src/electron/WindowsForegroundFocusWorker.ts!",
         "src/snapShot/GlobalShiftShortcutWorker.ts!",
         "src/snapShot/RegionSnapShotWorker.ts!",

@@ -12,10 +12,16 @@ const history = Effect.gen(function* () {
   return rows.map((row) => [row.migration_id, row.name] as const);
 });
 
-it.effect.each([67, 81, 88, 97])("preserves saved conversation data at migration %s", (id) =>
+it.effect.each([67, 81, 88, 97, 103])("preserves saved conversation data at migration %s", (id) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     yield* runMigrations({ toMigrationInclusive: id });
+    if (id === 103) {
+      yield* sql`
+        INSERT INTO issue_tracker_bindings (project_id, tracker, scope, updated_at)
+        VALUES ('saved-project', 'linear', 'saved-team', '2026-01-01')
+      `;
+    }
     const payload = JSON.stringify({
       text: "Saved voice conversation",
       voice: { sessionId: "voice-session", segmentId: "voice-segment", playback: "interrupted" },
@@ -59,6 +65,21 @@ it.effect.each([67, 81, 88, 97])("preserves saved conversation data at migration
       SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'issue_tracker_bindings'
     `;
     assert.deepStrictEqual(issueTables, [{ name: "issue_tracker_bindings" }]);
+    if (id === 103) {
+      assert.deepStrictEqual(
+        yield* sql`SELECT project_id, tracker, scope, updated_at, additional_scopes, account_id FROM issue_tracker_bindings`,
+        [
+          {
+            project_id: "saved-project",
+            tracker: "linear",
+            scope: "saved-team",
+            updated_at: "2026-01-01",
+            additional_scopes: "[]",
+            account_id: null,
+          },
+        ],
+      );
+    }
     const generationColumns = yield* sql<{ name: string }>`
       SELECT name FROM pragma_table_info('scheduled_tasks') WHERE name = 'task_generation'
     `;

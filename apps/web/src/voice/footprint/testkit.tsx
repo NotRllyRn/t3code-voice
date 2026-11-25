@@ -34,7 +34,6 @@ export function timelineProps(key: string): TimelineProps {
     turnDiffSummaries: [],
     runs: [],
     routeThreadKey: `${environmentId}:${key}`,
-    onOpenTurnDiff: () => {},
     onOpenThread: () => {},
     onForkFromRun: async () => {},
     supportsConversationRollback: false,
