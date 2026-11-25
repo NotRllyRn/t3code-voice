@@ -229,12 +229,7 @@ function startWithMissingWorktree(
           },
           getRuntimeRecoveryProjection: () => {
             projectionReadCount += 1;
-            return Effect.fail(
-              new ProjectionStore.ProjectionStoreReadError({
-                threadId,
-                cause: "simulated inherited-background projection failure",
-              }),
-            );
+            return Effect.succeed({ ...projection, hasConversation: true });
           },
         }),
         Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
@@ -242,7 +237,16 @@ function startWithMissingWorktree(
           tryHandlePromptCommand: () => Effect.succeed(false),
         }),
         Layer.mock(RunExecutionService.RunExecutionServiceV2)({ startRootRun }),
-        Layer.mock(RuntimePolicy.RuntimePolicyV2)({}),
+        Layer.mock(RuntimePolicy.RuntimePolicyV2)({
+          resolve: () =>
+            Effect.fail(
+              new RuntimePolicy.RuntimePolicyResolveError({
+                projectId: projection.thread.projectId,
+                providerInstanceId: ProviderInstanceId.make("codex"),
+                cause: "stop after workspace restoration",
+              }),
+            ),
+        }),
       ),
     ),
   );
