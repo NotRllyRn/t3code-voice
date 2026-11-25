@@ -8524,11 +8524,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             providerThreadId: queuedProviderThread.id,
             providerTurnId: null,
             inputIntent: "queued_turn",
+            ...voiceTurnItemFields(recordedVoiceItem),
             status: "pending",
             startedAt: null,
             completedAt: null,
             updatedAt: now,
-            ...voiceTurnItemFields(recordedVoiceItem),
           },
         });
       }
