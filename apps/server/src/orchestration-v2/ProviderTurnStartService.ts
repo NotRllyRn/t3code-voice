@@ -859,6 +859,32 @@ export const layer: Layer.Layer<
           return;
         }
       }
+      const recoveryResult = yield* Effect.result(
+        projectionStore.getRuntimeRecoveryProjection(projection.thread.id),
+      );
+      if (recoveryResult._tag === "Failure") {
+        if (input.willRetry === true) return yield* recoveryResult.failure;
+        yield* settleStartFailure({
+          signal: "runtime-recovery-read-failure",
+          title: "Couldn't read thread state",
+          error: recoveryResult.failure,
+        });
+        return;
+      }
+      if (
+        recoveryResult.success.retiredCleanAutomation === true ||
+        recoveryResult.success.runs.some(
+          (saved) => saved.workspacePreparation?.cleanProviderConstraint !== undefined,
+        )
+      ) {
+        yield* settleStartFailure({
+          signal: "retired-clean-provider-automation",
+          title: "Automation thread retired",
+          error: new Error("Clean-provider automation is retired."),
+          message: "Clean-provider automation is retired. Start a new ordinary thread explicitly.",
+        });
+        return;
+      }
       const recreateResult = yield* Effect.result(restoreMissingWorktree(projection.thread));
       if (recreateResult._tag === "Failure") {
         if (input.willRetry === true) return yield* recreateResult.failure;
@@ -890,6 +916,7 @@ export const layer: Layer.Layer<
                   worktreePath,
                   project,
                   observeCompletion: {},
+                  enforceNoSetupScripts: run.workspacePreparation?.enforceNoSetupScripts === true,
                 });
                 if (setup.status !== "started" || !setup.completion) return;
                 if (setup.async) {
@@ -924,32 +951,6 @@ export const layer: Layer.Layer<
           runs: current.runs,
           turnItems: current.turnItems,
         });
-      const recoveryResult = yield* Effect.result(
-        projectionStore.getRuntimeRecoveryProjection(projection.thread.id),
-      );
-      if (recoveryResult._tag === "Failure") {
-        if (input.willRetry === true) return yield* recoveryResult.failure;
-        yield* settleStartFailure({
-          signal: "runtime-recovery-read-failure",
-          title: "Couldn't read thread state",
-          error: recoveryResult.failure,
-        });
-        return;
-      }
-      if (
-        recoveryResult.success.retiredCleanAutomation === true ||
-        recoveryResult.success.runs.some(
-          (saved) => saved.workspacePreparation?.cleanProviderConstraint !== undefined,
-        )
-      ) {
-        yield* settleStartFailure({
-          signal: "retired-clean-provider-automation",
-          title: "Automation thread retired",
-          error: new Error("Clean-provider automation is retired."),
-          message: "Clean-provider automation is retired. Start a new ordinary thread explicitly.",
-        });
-        return;
-      }
       const inheritedBackgroundTurnItems = selectInheritedBackgroundItems(recoveryResult.success);
       const providerSessionId = providerThread.providerSessionId;
       const runControls = makeRunControls({

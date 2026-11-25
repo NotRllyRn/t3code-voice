@@ -2223,28 +2223,40 @@ effectIt.effect.each([
   }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
-effectIt.effect("runs setup for a worktree a send recreated before dispatch", () =>
-  Effect.gen(function* () {
-    const fileSystem = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const worktreesDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-sent-setup-" });
-    const worktreePath = path.join(worktreesDir, "project", "restore");
-    yield* fileSystem.makeDirectory(path.join(worktreePath, ".git"), { recursive: true });
-    const runSetup = vi.fn(() => Effect.succeed({ status: "no-script" as const }));
-    const harness = makeLocalCommandHarness({
-      text: "Continue",
-      worktreesDir,
-      worktreePath,
-      fileSystem,
-      failReadsAfterRunning: true,
-      recreatedBeforeDispatch: true,
-      runSetup,
-    });
-    yield* harness.start;
-    expect(harness.createWorktree).not.toHaveBeenCalled();
-    expect(runSetup).toHaveBeenCalledWith(expect.objectContaining({ worktreePath }));
-    expect(harness.open).toHaveBeenCalledTimes(1);
-  }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+effectIt.effect.each([false, true])(
+  "restored setup retains launch script guard=%s",
+  (enforceNoSetupScripts) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const worktreesDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-sent-setup-" });
+      const worktreePath = path.join(worktreesDir, "project", "restore");
+      yield* fileSystem.makeDirectory(path.join(worktreePath, ".git"), { recursive: true });
+      const runSetup = vi.fn(() => Effect.succeed({ status: "no-script" as const }));
+      const harness = makeLocalCommandHarness({
+        text: "Continue",
+        worktreesDir,
+        worktreePath,
+        fileSystem,
+        failReadsAfterRunning: true,
+        recreatedBeforeDispatch: true,
+        runSetup,
+      });
+      const projection = harness.projection();
+      harness.setProjection({
+        ...projection,
+        runs: projection.runs.map((run) => ({
+          ...run,
+          workspacePreparation: { type: "root", enforceNoSetupScripts },
+        })),
+      });
+      yield* harness.start;
+      expect(harness.createWorktree).not.toHaveBeenCalled();
+      expect(runSetup).toHaveBeenCalledWith(
+        expect.objectContaining({ worktreePath, enforceNoSetupScripts }),
+      );
+      expect(harness.open).toHaveBeenCalledTimes(1);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
 effectIt.effect(
@@ -3317,8 +3329,12 @@ effectIt.effect.each(["current", "historical", "claim"] as const)(
   "retires clean work before provider startup (%s)",
   (source) =>
     Effect.gen(function* () {
+      const runSetup = vi.fn(() => Effect.succeed({ status: "no-script" as const }));
       const harness = makeLocalCommandHarness({
         text: "Continue",
+        worktreePath: "/tmp/retired-worktree",
+        recreatedBeforeDispatch: true,
+        runSetup,
         openFailure: new Error("provider session rejected"),
       });
       const constraint = {
@@ -3353,6 +3369,8 @@ effectIt.effect.each(["current", "historical", "claim"] as const)(
         );
       }
       yield* harness.startWithRetry;
+      expect(runSetup).not.toHaveBeenCalled();
+      expect(harness.createWorktree).not.toHaveBeenCalled();
       expect(harness.open).not.toHaveBeenCalled();
       expect(harness.startRootRun).not.toHaveBeenCalled();
       expect(harness.projection().runs.at(-1)?.status).toBe("failed");
