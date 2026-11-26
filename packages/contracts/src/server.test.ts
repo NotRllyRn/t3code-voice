@@ -56,7 +56,13 @@ describe("provider status deltas", () => {
     const previous = [codex];
     const next = [
       claude,
-      { ...codex, checkedAt: "2026-04-10T00:05:00.000Z", skills: [], message: "Checked" },
+      {
+        ...codex,
+        checkedAt: "2026-04-10T00:05:00.000Z",
+        skills: [],
+        message: "Checked",
+        liveVoiceAvailable: true,
+      },
     ];
 
     const deltas = serverProviderDeltas(previous, next);
@@ -64,7 +70,7 @@ describe("provider status deltas", () => {
     expect(deltas[0]).toEqual(claude);
     expect(deltas[1]).not.toHaveProperty("models");
     expect(deltas[1]).not.toHaveProperty("slashCommands");
-    expect(deltas[1]).toMatchObject({ skills: [], message: "Checked" });
+    expect(deltas[1]).toMatchObject({ skills: [], message: "Checked", liveVoiceAvailable: true });
 
     const codec = Schema.toCodecJson(ServerConfigProviderStatusDeltasPayload);
     const wire = JSON.parse(JSON.stringify(Schema.encodeSync(codec)({ providers: deltas })));

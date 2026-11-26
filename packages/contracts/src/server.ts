@@ -294,6 +294,7 @@ export const ServerProvider = Schema.Struct({
    */
   workspaceRescannedAt: Schema.optionalKey(IsoDateTime),
   usageLimits: Schema.optional(ServerProviderUsageLimits),
+  liveVoiceAvailable: Schema.optionalKey(Schema.Boolean),
   versionAdvisory: Schema.optionalKey(ServerProviderVersionAdvisory),
   compatibilityAdvisory: Schema.optionalKey(ServerProviderCompatibilityAdvisory),
   updateState: Schema.optionalKey(ServerProviderUpdateState),

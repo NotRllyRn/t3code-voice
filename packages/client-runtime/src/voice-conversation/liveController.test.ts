@@ -354,7 +354,17 @@ test.each([
   expect(h.controller.state.error).toBe("");
 });
 
-test.each(["playback-blocked", "invalid-offer", "media-denied", "forbidden"] as const)(
+const terminalVoiceFailureReasons = [
+  "playback-blocked",
+  "invalid-offer",
+  "media-denied",
+  "forbidden",
+  "auth-required",
+  "unsupported-provider",
+  "unsupported-endpoint",
+  "unsupported-model",
+] as const;
+test.each(terminalVoiceFailureReasons)(
   "sanitizes %s and closes without a client retry",
   async (reason) => {
     using h = harness();

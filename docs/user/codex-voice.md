@@ -1,6 +1,6 @@
 # Live Codex voice (experimental)
 
-Talk with the selected Codex agent while keeping the normal chat composer and
+Talk with any selected coding agent while keeping the normal chat composer and
 coding workflow. Live voice is experimental on secure desktop browsers and the
 macOS desktop app. Spoken replies are model-generated; check the written coding
 result when accuracy matters. Browser audio checks do not establish physical
@@ -8,26 +8,31 @@ microphone, speaker, or macOS Keychain behavior.
 
 ## Setup
 
-Use a configured, unmanaged **Codex** provider in the selected T3 environment.
+Enable a configured, unmanaged **Codex** provider for voice in the selected T3 environment.
 That instance's Codex user configuration must select a custom provider backed by
 a compatible CPA native Live relay, with its existing server-side credential.
 The relay must support native Live calls and media relay; an OpenAI-compatible
 text endpoint or public Realtime endpoint alone is insufficient. Direct Codex
-subscription login, managed providers, profiles, and other coding providers are
-currently unsupported. Supported server-owner Codex provider overrides use the
+subscription login, managed providers, and profiles are unsupported for voice.
+The coding agent can use any enabled provider, including Claude, Antigravity,
+Cursor, OpenCode, and Pi. Supported server-owner Codex provider overrides use the
 same effective configuration and existing credential as coding; project-level
 connection overrides are rejected.
-Use the selected provider’s HTTPS `/v1` base URL. Live uses its native `/v1/live`
+Use the voice provider’s HTTPS `/v1` base URL. Live uses its native `/v1/live`
 endpoint, not a public Realtime WebSocket.
 
-Live reads the selected instance's trusted Codex configuration and credential
+Live reads the voice instance's trusted Codex configuration and credential
 in that environment. It does not require a separate voice key. If the configured credential uses an environment variable,
 that existing variable must be available to the environment's server process;
 a browser or Finder launch does not inherit a different shell's variables.
-Missing credentials require fixing the selected provider setup. A successful
+Missing credentials require fixing the Codex voice provider setup. A successful
 text chat does not establish Live availability or entitlement.
 
-For remote use, select the environment that owns the project and provider.
+When the coding provider is Codex, Live tries that instance first. Otherwise,
+or if it cannot resolve a voice connection, Live tries other enabled Codex
+instances in instance ID order. Coding keeps the selected provider and model.
+
+For remote use, select the environment that owns the project and providers.
 Provider credentials stay on that server. Microphone and playback stay on the
 client device, which also needs network access to the relay's advertised media
 addresses. Use HTTPS (or localhost) and allow microphone and audio playback.
@@ -36,7 +41,7 @@ required; credentials and upstream destinations are never supplied by the browse
 
 ## Use voice
 
-1. Select a supported Codex instance in an existing thread or an empty chat draft.
+1. Select any enabled coding provider in an existing thread or an empty chat draft.
    Use **Start without a project** for Scratch.
 2. Start voice and wait for it to connect before speaking. The microphone is off
    while connecting or waiting for a provider refresh. Stop remains available.

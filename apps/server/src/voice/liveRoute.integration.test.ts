@@ -47,7 +47,26 @@ import { VoiceWebSocket } from "./transport.ts";
 import { connection, sdp } from "./liveTestkit.ts";
 import createFixture from "./fixtures/live-create-http.json" with { type: "json" };
 
+const routingResponses = [
+  { routing: "claude-draft" },
+  { routing: "claude-thread" },
+  { routing: "preferred" },
+  { routing: "fallback" },
+  { routing: "no-codex", startupReason: "unsupported-provider" },
+  { routing: "disabled-voice", startupReason: "unsupported-provider" },
+  { routing: "missing-live", startupReason: "unsupported-provider" },
+  { routing: "disabled-coding", startupReason: "unsupported-provider" },
+  { routing: "missing-coding", startupReason: "unsupported-provider" },
+  { routing: "all-failed", startupReason: "auth-required" },
+  { routing: "voice-revision" },
+  { routing: "voice-replaced" },
+  { routing: "voice-disabled" },
+  { routing: "coding-replaced" },
+  { routing: "coding-disabled" },
+  { routing: "selection-changed" },
+] as const;
 const responses = [
+  ...routingResponses.map((variant) => ({ ...variant, name: variant.routing, phase: null })),
   ...(
     [
       "auth-required",
@@ -198,12 +217,28 @@ it.live.each([...responses, ...plainResponses])(
         const threads = Context.get(voice, ThreadManagement.ThreadManagementService);
         const threadId = ThreadId.make("fixture-live-route-thread");
         let launches = 0;
+        const routing = "routing" in variant ? variant.routing : undefined;
+        const ownerChange =
+          routing !== undefined &&
+          [
+            "voice-revision",
+            "voice-replaced",
+            "voice-disabled",
+            "coding-replaced",
+            "coding-disabled",
+            "selection-changed",
+          ].includes(routing);
+        const resolutions: string[] = [];
+        let revision = connection.revision;
         const selected = { ...connection, createUrl: `${up.origin}/prefix/v1/live` };
-        const provider: ProviderInstance = {
-          instanceId: ProviderInstanceId.make("selected-instance"),
+        const makeProvider = (overrides: Partial<ProviderInstance> = {}): ProviderInstance => ({
+          instanceId: ProviderInstanceId.make(
+            routing === "selection-changed" ? "codex" : "selected-instance",
+          ),
           enabled: true,
           driverKind: ProviderDriverKind.make(
-            "startupReason" in variant && variant.startupReason === "unsupported-provider"
+            (routing !== undefined && routing !== "preferred") ||
+              ("startupReason" in variant && variant.startupReason === "unsupported-provider")
               ? "claudeCode"
               : "codex",
           ),
@@ -214,9 +249,12 @@ it.live.each([...responses, ...plainResponses])(
           },
           liveConnection: {
             resolveLiveConnection: () =>
-              "startupReason" in variant
-                ? Effect.fail(new LiveConnectionError({ reason: variant.startupReason }))
-                : Effect.succeed(selected),
+              Effect.suspend(() => {
+                resolutions.push("selected-instance");
+                return !routing && "startupReason" in variant
+                  ? Effect.fail(new LiveConnectionError({ reason: variant.startupReason }))
+                  : Effect.succeed(selected);
+              }),
           },
           get snapshot(): never {
             throw new Error("Live route must not inspect the public snapshot");
@@ -227,7 +265,73 @@ it.live.each([...responses, ...plainResponses])(
           get textGeneration(): never {
             throw new Error("Live route must not generate provider text");
           },
+          ...overrides,
+        });
+        const provider = makeProvider();
+        let codingProvider =
+          routing === "disabled-coding" ? makeProvider({ enabled: false }) : provider;
+        const voiceProvider = makeProvider({
+          instanceId: ProviderInstanceId.make("a-voice"),
+          driverKind: ProviderDriverKind.make("codex"),
+          enabled: routing !== "disabled-voice",
+          liveConnection:
+            routing === "missing-live"
+              ? undefined
+              : {
+                  resolveLiveConnection: () =>
+                    Effect.suspend(() => {
+                      resolutions.push("a-voice");
+                      return routing === "fallback"
+                        ? Effect.fail(new LiveConnectionError({ reason: "auth-required" }))
+                        : routing === "all-failed"
+                          ? Effect.fail(new LiveConnectionError({ reason: "unsupported-provider" }))
+                          : Effect.succeed({ ...selected, revision });
+                    }),
+                },
+        });
+        const secondVoice = makeProvider({
+          driverKind: ProviderDriverKind.make("codex"),
+          instanceId: ProviderInstanceId.make("b-voice"),
+          liveConnection: {
+            resolveLiveConnection: () =>
+              Effect.suspend(() => {
+                resolutions.push("b-voice");
+                return routing === "all-failed"
+                  ? Effect.fail(new LiveConnectionError({ reason: "auth-required" }))
+                  : Effect.succeed(selected);
+              }),
+          },
+        });
+        let currentVoice = voiceProvider;
+        const instances =
+          !routing || routing === "no-codex"
+            ? [provider]
+            : ["preferred", "fallback", "all-failed"].includes(routing)
+              ? [secondVoice, provider, voiceProvider]
+              : [provider, voiceProvider];
+        const orchestrator = Context.get(voice, Orchestrator.OrchestratorV2);
+        const modelSelection = {
+          instanceId: provider.instanceId,
+          model: routing && routing !== "preferred" ? "claude-model" : "gpt-5",
         };
+        if (routing === "claude-thread") {
+          yield* orchestrator
+            .dispatch({
+              type: "thread.create",
+              commandId: CommandId.make("existing-thread"),
+              threadId,
+              projectId: VoiceFixture.projectId,
+              title: "Existing",
+              modelSelection,
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: null,
+              createdBy: "user",
+              creationSource: "web",
+            })
+            .pipe(Effect.orDie);
+        }
         const services = yield* Layer.build(
           HttpRouter.serve(
             liveVoiceRouteLayer.pipe(
@@ -269,7 +373,17 @@ it.live.each([...responses, ...plainResponses])(
               ),
               Layer.provide(
                 Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
-                  getInstance: () => Effect.succeed(provider),
+                  getInstance: (id) =>
+                    Effect.sync(() =>
+                      id === provider.instanceId
+                        ? routing === "missing-coding"
+                          ? undefined
+                          : codingProvider
+                        : id === voiceProvider.instanceId
+                          ? currentVoice
+                          : secondVoice,
+                    ),
+                  listInstances: Effect.sync(() => instances),
                 }),
               ),
               Layer.provide(Layer.succeed(VoiceOwners, owners)),
@@ -318,22 +432,75 @@ it.live.each([...responses, ...plainResponses])(
         }
         expect(up.requests).toHaveLength(0);
         const draft = {
-          modelSelection: { instanceId: "selected-instance", model: "gpt-5" },
+          modelSelection,
           runtimeMode: "approval-required",
           interactionMode: "default",
         };
+        const bindingQuery =
+          routing === "claude-thread"
+            ? `threadId=${threadId}`
+            : `draft=${encodeURIComponent(JSON.stringify(draft))}`;
         const browser = yield* Effect.acquireRelease(
           Effect.sync(
             () =>
-              new NodeWS.WebSocket(
-                `${origin}${LIVE_VOICE_PATH}?draft=${encodeURIComponent(JSON.stringify(draft))}`,
-                { headers: { Authorization: `Bearer ${session.token}` } },
-              ),
+              new NodeWS.WebSocket(`${origin}${LIVE_VOICE_PATH}?${bindingQuery}`, {
+                headers: { Authorization: `Bearer ${session.token}` },
+              }),
           ),
           (socket) => Effect.sync(() => socket.terminate()),
         );
         const seen: LiveVoiceServerEvent[] = [];
         const ownersAtCleanup: number[] = [];
+        const connected = Promise.withResolvers<void>();
+        if (ownerChange)
+          yield* Effect.gen(function* () {
+            yield* Effect.promise(() => connected.promise);
+            if (routing === "voice-revision") revision = "changed-revision";
+            if (routing === "voice-replaced")
+              currentVoice = makeProvider({
+                instanceId: voiceProvider.instanceId,
+                liveConnection: voiceProvider.liveConnection,
+              });
+            if (routing === "voice-disabled")
+              currentVoice = makeProvider({ instanceId: voiceProvider.instanceId, enabled: false });
+            if (routing === "coding-replaced") codingProvider = makeProvider();
+            if (routing === "coding-disabled") codingProvider = makeProvider({ enabled: false });
+            yield* routing === "selection-changed"
+              ? orchestrator
+                  .dispatch({
+                    type: "thread.model-selection.set",
+                    commandId: CommandId.make("change-model"),
+                    threadId,
+                    modelSelection: { ...modelSelection, model: "changed-model" },
+                  })
+                  .pipe(Effect.orDie)
+              : Effect.void;
+            for (const socket of up.ws.clients) {
+              socket.send(
+                JSON.stringify({
+                  type: "turn.done",
+                  turn: {
+                    id: "owner-turn",
+                    role: "user",
+                    transcript: "Inspect the fixture.",
+                  },
+                }),
+              );
+              socket.send(
+                JSON.stringify({
+                  type: "delegation.created",
+                  item: {
+                    id: "owner-delegation",
+                    type: "delegation",
+                    target: "client",
+                    user_bidi_turn_id: "owner-turn",
+                    handoff_id: "owner-delegation",
+                    content: [{ type: "input_text", text: "Inspect the fixture." }],
+                  },
+                }),
+              );
+            }
+          }).pipe(Effect.forkChild);
         yield* Effect.promise(
           () =>
             new Promise<void>((resolve, reject) => {
@@ -369,8 +536,10 @@ it.live.each([...responses, ...plainResponses])(
                       state: "connected",
                     }),
                   );
-                if (event.type === "live.status" && event.phase === "connected")
-                  browser.send('{"type":"live.stop"}');
+                if (event.type === "live.status" && event.phase === "connected") {
+                  if (ownerChange) connected.resolve();
+                  else browser.send('{"type":"live.stop"}');
+                }
               });
               browser.on("close", () => resolve());
             }),
@@ -413,13 +582,46 @@ it.live.each([...responses, ...plainResponses])(
           ]);
           expect(
             seen.some((event) => event.type === "live.status" && event.phase === "error"),
-          ).toBe(false);
-          expect(JSON.stringify(logs)).not.toContain("failurePhase");
+          ).toBe(ownerChange);
+          if (ownerChange)
+            expect(seen).toContainEqual(
+              expect.objectContaining({
+                type: "live.status",
+                phase: "error",
+                reason: "connection-changed",
+              }),
+            );
+          else expect(JSON.stringify(logs)).not.toContain("failurePhase");
+          const capabilityId =
+            routing && routing !== "preferred"
+              ? routing === "fallback"
+                ? "b-voice"
+                : "a-voice"
+              : "selected-instance";
+          expect(seen).toContainEqual(
+            expect.objectContaining({
+              type: "live.status",
+              phase: "connected",
+              capability: expect.objectContaining({ providerInstanceId: capabilityId }),
+            }),
+          );
+          if (!ownerChange)
+            expect((yield* threads.getThreadShell(threadId))?.modelSelection).toEqual(
+              modelSelection,
+            );
+          expect(resolutions[0]).toBe(
+            routing && routing !== "preferred" ? "a-voice" : "selected-instance",
+          );
+          if (routing === "fallback")
+            expect(resolutions.slice(0, 2)).toEqual(["a-voice", "b-voice"]);
+          if (routing === "preferred") expect(resolutions).not.toContain("a-voice");
           yield* Effect.promise(() => up.sidebandClosed);
         }
         expect(ownersAtCleanup).toEqual([0]);
-        expect(launches).toBe(rejected ? 0 : 1);
-        expect(seen.filter((event) => event.type === "live.bound")).toHaveLength(rejected ? 0 : 1);
+        expect(launches).toBe(rejected || routing === "claude-thread" ? 0 : 1);
+        expect(seen.filter((event) => event.type === "live.bound")).toHaveLength(
+          rejected || routing === "claude-thread" ? 0 : 1,
+        );
         expect(seen.filter((event) => event.type === "live.cleanup")).toEqual([
           expect.objectContaining({
             result: "unknownCall" in variant ? "unknown" : "acknowledged",
