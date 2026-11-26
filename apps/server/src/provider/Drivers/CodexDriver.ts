@@ -280,7 +280,7 @@ export const CodexDriver: ProviderDriver<
     const checkLiveVoice = effectiveConfig.enabled
       ? liveConnection.resolveLiveConnection().pipe(
           Effect.as(true),
-          Effect.catch(() => Effect.succeed(false)),
+          Effect.orElseSucceed(() => false),
         )
       : Effect.succeed(false);
 
