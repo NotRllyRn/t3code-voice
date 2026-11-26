@@ -207,7 +207,7 @@ const authLayer = EnvironmentAuth.layer.pipe(
 
 it.live.each([...responses, ...plainResponses])(
   "real route + source-backed HTTP response $name + owned cleanup; no private response material",
-  (variant) =>
+  (variant: CreateResponse) =>
     Effect.scoped(
       Effect.gen(function* () {
         const up = yield* fixture(variant);
@@ -231,7 +231,10 @@ it.live.each([...responses, ...plainResponses])(
         const resolutions: string[] = [];
         let revision = connection.revision;
         const selected = { ...connection, createUrl: `${up.origin}/prefix/v1/live` };
-        const makeProvider = (overrides: Partial<ProviderInstance> = {}): ProviderInstance => ({
+        const makeProvider = (
+          overrides: Partial<ProviderInstance> = {},
+          hasLiveConnection = true,
+        ): ProviderInstance => ({
           instanceId: ProviderInstanceId.make(
             routing === "selection-changed" ? "codex" : "selected-instance",
           ),
@@ -247,15 +250,19 @@ it.live.each([...responses, ...plainResponses])(
             driverKind: ProviderDriverKind.make("codex"),
             continuationKey: "fixture-selected",
           },
-          liveConnection: {
-            resolveLiveConnection: () =>
-              Effect.suspend(() => {
-                resolutions.push("selected-instance");
-                return !routing && "startupReason" in variant
-                  ? Effect.fail(new LiveConnectionError({ reason: variant.startupReason }))
-                  : Effect.succeed(selected);
-              }),
-          },
+          ...(hasLiveConnection
+            ? {
+                liveConnection: {
+                  resolveLiveConnection: () =>
+                    Effect.suspend(() => {
+                      resolutions.push("selected-instance");
+                      return !routing && "startupReason" in variant
+                        ? Effect.fail(new LiveConnectionError({ reason: variant.startupReason }))
+                        : Effect.succeed(selected);
+                    }),
+                },
+              }
+            : {}),
           get snapshot(): never {
             throw new Error("Live route must not inspect the public snapshot");
           },
@@ -270,25 +277,31 @@ it.live.each([...responses, ...plainResponses])(
         const provider = makeProvider();
         let codingProvider =
           routing === "disabled-coding" ? makeProvider({ enabled: false }) : provider;
-        const voiceProvider = makeProvider({
-          instanceId: ProviderInstanceId.make("a-voice"),
-          driverKind: ProviderDriverKind.make("codex"),
-          enabled: routing !== "disabled-voice",
-          liveConnection:
-            routing === "missing-live"
-              ? undefined
+        const voiceProvider = makeProvider(
+          {
+            instanceId: ProviderInstanceId.make("a-voice"),
+            driverKind: ProviderDriverKind.make("codex"),
+            enabled: routing !== "disabled-voice",
+            ...(routing === "missing-live"
+              ? {}
               : {
-                  resolveLiveConnection: () =>
-                    Effect.suspend(() => {
-                      resolutions.push("a-voice");
-                      return routing === "fallback"
-                        ? Effect.fail(new LiveConnectionError({ reason: "auth-required" }))
-                        : routing === "all-failed"
-                          ? Effect.fail(new LiveConnectionError({ reason: "unsupported-provider" }))
-                          : Effect.succeed({ ...selected, revision });
-                    }),
-                },
-        });
+                  liveConnection: {
+                    resolveLiveConnection: () =>
+                      Effect.suspend(() => {
+                        resolutions.push("a-voice");
+                        return routing === "fallback"
+                          ? Effect.fail(new LiveConnectionError({ reason: "auth-required" }))
+                          : routing === "all-failed"
+                            ? Effect.fail(
+                                new LiveConnectionError({ reason: "unsupported-provider" }),
+                              )
+                            : Effect.succeed({ ...selected, revision });
+                      }),
+                  },
+                }),
+          },
+          routing !== "missing-live",
+        );
         const secondVoice = makeProvider({
           driverKind: ProviderDriverKind.make("codex"),
           instanceId: ProviderInstanceId.make("b-voice"),
@@ -383,7 +396,7 @@ it.live.each([...responses, ...plainResponses])(
                           ? currentVoice
                           : secondVoice,
                     ),
-                  listInstances: Effect.sync(() => instances),
+                  listInstances: Effect.succeed(instances),
                 }),
               ),
               Layer.provide(Layer.succeed(VoiceOwners, owners)),
@@ -459,7 +472,9 @@ it.live.each([...responses, ...plainResponses])(
             if (routing === "voice-replaced")
               currentVoice = makeProvider({
                 instanceId: voiceProvider.instanceId,
-                liveConnection: voiceProvider.liveConnection,
+                ...(voiceProvider.liveConnection
+                  ? { liveConnection: voiceProvider.liveConnection }
+                  : {}),
               });
             if (routing === "voice-disabled")
               currentVoice = makeProvider({ instanceId: voiceProvider.instanceId, enabled: false });

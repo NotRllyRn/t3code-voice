@@ -20,10 +20,10 @@ export const FORK_RELEASE = {
   baseBranch: "main",
   upstream: {
     repository: "pingdotgg/t3code",
-    tag: "v0.1.12",
-    sha: "ca81b7b97a1c4b91e5ac25768d0f6629f37732fd",
+    tag: "v0.1.13",
+    sha: "bc0f04da94f64b5e487c598761a43b4cf06b2ac9",
   },
-  voiceRevision: 2,
+  voiceRevision: 1,
   githubPrerelease: true,
 } as const;
 

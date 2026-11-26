@@ -41,6 +41,7 @@ import { ThemeEditorHost } from "../components/settings/ThemeEditorHost";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { Button } from "../components/ui/button";
 import { StandalonePage, StandalonePageHeader } from "../components/ui/standalone-page";
+import { SharedTooltipProvider } from "../components/ui/shared-tooltip";
 import { AnchoredToastProvider, ToastProvider } from "../components/ui/toast";
 import { isElectron } from "../env";
 import { useClientSettings } from "../hooks/useSettings";
@@ -144,9 +145,11 @@ function RootRouteView() {
   return (
     <ToastProvider>
       <AnchoredToastProvider>
-        <LiveVoiceProvider>
-          <RootRouteBranch />
-        </LiveVoiceProvider>
+        <SharedTooltipProvider>
+          <LiveVoiceProvider>
+            <RootRouteBranch />
+          </LiveVoiceProvider>
+        </SharedTooltipProvider>
       </AnchoredToastProvider>
     </ToastProvider>
   );

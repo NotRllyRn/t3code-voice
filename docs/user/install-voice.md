@@ -112,8 +112,8 @@ keep backups containing secrets private.
 
 Keep the previous release untouched. Migrate a copy of the stopped backup into
 a separate private state directory using the new release; never share a state
-directory between two running servers. Migration head is **118**. Synthetic
-**67→118**, **81→118**, **88→118**, **97→118** and **103→118** checks preserve saved conversation payloads;
+directory between two running servers. Migration head is **120**. Synthetic
+**67→120**, **81→120**, **88→120**, **97→120**, **103→120** and **118→120** checks preserve saved conversation payloads;
 these do not prove every production data shape or safe downgrades. Compare the
 installed migration IDs/names and schema with the source at its recorded head
 before cutover; the head number alone does not prove compatibility. Voice.8
