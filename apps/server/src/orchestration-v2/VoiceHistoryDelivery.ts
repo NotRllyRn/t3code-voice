@@ -6,6 +6,8 @@ import type {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import { ContextHandoffBudgetError } from "@t3tools/provider-core/server/failure";
 import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import type { ProjectionStoreV2Shape } from "./ProjectionStore.ts";
@@ -71,15 +73,13 @@ export const deliverVoiceAwareContextHandoffs = Effect.fn("VoiceHistoryDelivery.
     readonly persist: (handoff: OrchestrationV2ContextHandoff) => Effect.Effect<void, PersistError>;
   }) {
     return yield* deliverContextHandoffs(input).pipe(
-      Effect.catchTags({
-        ContextHandoffBudgetError: (error) => {
-          const required = input.handoffs.filter(
-            (handoff) => !handoff.id.startsWith("context-handoff:voice:"),
-          );
-          return required.length === input.handoffs.length
-            ? Effect.fail(error)
-            : deliverContextHandoffs({ ...input, handoffs: required });
-        },
+      Effect.catchIf(Schema.is(ContextHandoffBudgetError), (error) => {
+        const required = input.handoffs.filter(
+          (handoff) => !handoff.id.startsWith("context-handoff:voice:"),
+        );
+        return required.length === input.handoffs.length
+          ? Effect.fail(error)
+          : deliverContextHandoffs({ ...input, handoffs: required });
       }),
     );
   },

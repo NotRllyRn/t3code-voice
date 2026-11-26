@@ -37,10 +37,10 @@ describe("Voice release contract", () => {
       baseBranch: "main",
       upstream: {
         repository: "pingdotgg/t3code",
-        tag: "v0.1.11",
-        sha: "59651c1761f6c63e9b6056839067066968e6a406",
+        tag: "v0.1.12",
+        sha: "ca81b7b97a1c4b91e5ac25768d0f6629f37732fd",
       },
-      voiceRevision: 2,
+      voiceRevision: 1,
       githubPrerelease: true,
     });
   });
