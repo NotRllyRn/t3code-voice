@@ -12,7 +12,7 @@ const history = Effect.gen(function* () {
   return rows.map((row) => [row.migration_id, row.name] as const);
 });
 
-it.effect.each([67, 81, 88, 97, 103])("preserves saved conversation data at migration %s", (id) =>
+it.effect.each([67, 81, 88, 97, 103, 118])("preserves saved conversation data at migration %s", (id) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     yield* runMigrations({ toMigrationInclusive: id });

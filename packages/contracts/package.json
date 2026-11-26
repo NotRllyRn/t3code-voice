@@ -1,6 +1,6 @@
 {
   "name": "@t3tools/contracts",
-  "version": "0.1.12-voice.2",
+  "version": "0.1.13-voice.1",
   "private": true,
   "files": [
     "dist"
