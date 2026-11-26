@@ -2026,7 +2026,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   });
   const { blocksSubmission: voiceInputActive, submitAfterDictation } = speechInput;
   const liveVoiceAvailable =
-    selectedProviderEntry?.driverKind === "codex" && multipleModelSelections === null;
+    selectedProviderEntry?.snapshot.enabled === true &&
+    multipleModelSelections === null &&
+    providerStatuses.some((provider) => provider.enabled && provider.liveVoiceAvailable === true);
   const liveVoice = useComposerLiveVoice({
     environmentId,
     modelSelection: selectedModelSelection,

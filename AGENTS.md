@@ -155,3 +155,8 @@ Read the matching doc before changing code in that area; code review enforces th
 - No continuously repainting animations; they peg the GPU on high-refresh displays.
 - Security matters, but do not over-index on dev-mode or maintainer-only features. Read [SECURITY.md](SECURITY.md) before auditing or triaging reports.
 - If a rule here fights the task in front of you, say so loudly and get a human sign-off before breaking it.
+
+## Voice fork overrides
+
+- **Minimal upstream footprint.** Prioritize the smallest possible diff in upstream-owned files (fewest files and lines touched) so upstream merges stay clean. Put fork-only logic in separate modules where practical.
+- **Verification & CI.** Skip upstream T3 Code–specific Blacksmith or CI-only workflows/checks for fork work, as long as local checks (`vp run check:changed` and focused tests), code/council review, and real end-to-end verification on the `maya` test account laptop pass.

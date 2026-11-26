@@ -904,14 +904,13 @@ it.layer(layerTest)("CodexDriver", (it) => {
     { skip: windowsHost },
   );
 
-  it.effect("probes again when auth.json in the Codex home changes", () =>
+  it.effect("probes again when Codex credentials or configuration change", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const codexHome = yield* fs.makeTempDirectoryScoped({ prefix: "t3-codex-auth-watch-" });
       const watchedPath = yield* Deferred.make<string>();
       const homeEvents = yield* Queue.unbounded<FileSystem.WatchEvent>();
-      const probes = yield* Queue.unbounded<void>();
-      yield* CodexDriver.create({
+      const instance = yield* CodexDriver.create({
         instanceId: ProviderInstanceId.make("codex-auth-watch"),
         displayName: "Codex auth watch",
         enabled: true,
@@ -928,29 +927,100 @@ it.layer(layerTest)("CodexDriver", (it) => {
         }),
         Effect.provideService(
           ChildProcessSpawner.ChildProcessSpawner,
-          ChildProcessSpawner.make((command) =>
-            (ChildProcess.isStandardCommand(command) && command.args.includes("app-server")
-              ? Queue.offer(probes, undefined)
-              : Effect.void
-            ).pipe(
-              Effect.andThen(
-                PlatformError.badArgument({
-                  module: "ChildProcessSpawner",
-                  method: "spawn",
-                  description: "The fixture has no Codex executable",
-                }),
-              ),
-            ),
+          ChildProcessSpawner.make(() =>
+            PlatformError.badArgument({
+              module: "ChildProcessSpawner",
+              method: "spawn",
+              description: "The fixture has no Codex executable",
+            }),
           ),
         ),
       );
       expect(yield* Deferred.await(watchedPath)).toBe(codexHome);
-      yield* Queue.take(probes);
+      let previous = Option.getOrThrow(
+        yield* instance.snapshot.streamChanges.pipe(
+          Stream.filter((snapshot) => snapshot.liveVoiceAvailable === false),
+          Stream.runHead,
+        ),
+      );
+      for (const file of ["auth.json", "config.toml"]) {
+        const refreshed = yield* instance.snapshot.streamChanges.pipe(
+          Stream.filter((snapshot) => snapshot.checkedAt !== previous.checkedAt),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        yield* Effect.yieldNow;
+        yield* Queue.offer(homeEvents, { _tag: "Update", path: file });
+        yield* TestClock.adjust("250 millis");
 
-      yield* Queue.offer(homeEvents, { _tag: "Update", path: "auth.json" });
+        previous = Option.getOrThrow(yield* Fiber.join(refreshed));
+        expect(previous.liveVoiceAvailable).toBe(false);
+      }
+    }),
+  );
+
+  it.effect("watches sharedHomePath config.toml when using shadowHomePath", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-codex-shadow-watch-" });
+      const sharedHome = NodePath.join(tempDir, "shared");
+      const shadowHome = NodePath.join(tempDir, "shadow");
+      yield* fs.makeDirectory(sharedHome, { recursive: true });
+      const queues = new Map<string, Queue.Queue<FileSystem.WatchEvent>>();
+      const watched = yield* Deferred.make<void>();
+      const instance = yield* CodexDriver.create({
+        instanceId: ProviderInstanceId.make("codex-shadow-watch"),
+        displayName: "Codex shadow watch",
+        enabled: true,
+        environment: [],
+        config: {
+          ...CodexDriver.defaultConfig(),
+          homePath: sharedHome,
+          shadowHomePath: shadowHome,
+        },
+      }).pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          watch: (path) =>
+            Stream.unwrap(
+              Effect.gen(function* () {
+                const queue = yield* Queue.unbounded<FileSystem.WatchEvent>();
+                queues.set(path, queue);
+                if (queues.has(shadowHome) && queues.has(sharedHome)) {
+                  yield* Deferred.succeed(watched, undefined);
+                }
+                return Stream.fromQueue(queue);
+              }),
+            ),
+        }),
+        Effect.provideService(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make(() =>
+            PlatformError.badArgument({
+              module: "ChildProcessSpawner",
+              method: "spawn",
+              description: "The fixture has no Codex executable",
+            }),
+          ),
+        ),
+      );
+      yield* Deferred.await(watched);
+      const previous = Option.getOrThrow(
+        yield* instance.snapshot.streamChanges.pipe(
+          Stream.filter((snapshot) => snapshot.liveVoiceAvailable === false),
+          Stream.runHead,
+        ),
+      );
+      const refreshed = yield* instance.snapshot.streamChanges.pipe(
+        Stream.filter((snapshot) => snapshot.checkedAt !== previous.checkedAt),
+        Stream.runHead,
+        Effect.forkChild,
+      );
+      yield* Effect.yieldNow;
+      yield* Queue.offer(queues.get(sharedHome)!, { _tag: "Update", path: "config.toml" });
       yield* TestClock.adjust("250 millis");
-
-      yield* Queue.take(probes);
+      const next = Option.getOrThrow(yield* Fiber.join(refreshed));
+      expect(next.liveVoiceAvailable).toBe(false);
     }),
   );
 });

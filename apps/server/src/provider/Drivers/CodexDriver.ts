@@ -269,15 +269,35 @@ export const CodexDriver: ProviderDriver<
       ),
     );
 
+    const liveConnection = yield* makePrivateCodexLiveConnection({
+      binaryPath: effectiveConfig.binaryPath,
+      homePath: effectiveConfig.homePath || homeLayout.sharedHomePath,
+      launchArgs: effectiveConfig.launchArgs,
+      environment: processEnv,
+    });
+    const checkLiveVoice = effectiveConfig.enabled
+      ? liveConnection.resolveLiveConnection().pipe(
+          Effect.as(true),
+          Effect.catch(() => Effect.succeed(false)),
+        )
+      : Effect.succeed(false);
+
     // Kick the TTL-gated manifest refresh in the background and classify with the in-memory
     // manifest, so a slow or hung fetch never delays the provider check.
     const checkProvider = modelCatalog.refreshInBackground.pipe(
       Effect.andThen(
-        Effect.zipWith(
-          checkCodexProviderStatus(effectiveConfig, undefined, processEnv),
-          currentCatalog,
-          (draft, catalog) => stampIdentity(applyCodexModelCatalog(draft, catalog)),
-          { concurrent: true },
+        Effect.all(
+          [
+            checkCodexProviderStatus(effectiveConfig, undefined, processEnv),
+            currentCatalog,
+            checkLiveVoice,
+          ],
+          { concurrency: "unbounded" },
+        ).pipe(
+          Effect.map(([draft, catalog, liveVoiceAvailable]) => ({
+            ...stampIdentity(applyCodexModelCatalog(draft, catalog)),
+            liveVoiceAvailable,
+          })),
         ),
       ),
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -319,12 +339,6 @@ export const CodexDriver: ProviderDriver<
           }),
       ),
     );
-    const liveConnection = yield* makePrivateCodexLiveConnection({
-      binaryPath: effectiveConfig.binaryPath,
-      homePath: effectiveConfig.homePath || homeLayout.sharedHomePath,
-      launchArgs: effectiveConfig.launchArgs,
-      environment: processEnv,
-    });
     const textGeneration = yield* makeCodexTextGeneration(
       effectiveConfig,
       processEnv,
@@ -410,16 +424,21 @@ export const CodexDriver: ProviderDriver<
           ),
         );
 
-    // `codex login` and `codex logout` rewrite auth.json outside T3.
+    // Codex credentials and user configuration can change outside T3.
     if (effectiveConfig.enabled) {
-      yield* fileSystem.watch(accountKey).pipe(
-        Stream.filter((event) => pathService.basename(event.path) === "auth.json"),
-        Stream.debounce(Duration.millis(250)),
-        Stream.runForEach(() => snapshot.refresh.pipe(Effect.ignoreCause({ log: true }))),
-        Effect.catchReason("PlatformError", "NotFound", () => Effect.void),
-        Effect.ignoreCause({ log: true }),
-        Effect.forkScoped,
-      );
+      const watchRefresh = (dir: string, files: ReadonlyArray<string>) =>
+        fileSystem.watch(dir).pipe(
+          Stream.filter((event) => files.includes(pathService.basename(event.path))),
+          Stream.debounce(Duration.millis(250)),
+          Stream.runForEach(() => snapshot.refresh.pipe(Effect.ignoreCause({ log: true }))),
+          Effect.catchReason("PlatformError", "NotFound", () => Effect.void),
+          Effect.ignoreCause({ log: true }),
+          Effect.forkScoped,
+        );
+      yield* watchRefresh(accountKey, ["auth.json", "config.toml"]);
+      if (homeLayout.sharedHomePath !== accountKey) {
+        yield* watchRefresh(homeLayout.sharedHomePath, ["config.toml"]);
+      }
     }
     return {
       instanceId,

@@ -136,15 +136,46 @@ export const liveVoiceRouteLayer = Layer.unwrap(
         const selection =
           thread?.modelSelection ?? ("draft" in binding ? binding.draft.modelSelection : undefined);
         if (!selection) return yield* startupFailure(request, "connection-changed");
-        const provider = yield* providers.getInstance(selection.instanceId);
-        if (!provider?.enabled || provider.driverKind !== "codex" || !provider.liveConnection)
-          return yield* startupFailure(request, "unsupported-provider");
+        const codingProvider = yield* providers.getInstance(selection.instanceId);
+        if (!codingProvider?.enabled) return yield* startupFailure(request, "unsupported-provider");
         if (active.has(session.sessionId))
           return yield* startupFailure(request, "temporarily-unavailable");
-        const resolved = yield* provider.liveConnection.resolveLiveConnection().pipe(Effect.result);
+        const candidates = [
+          codingProvider,
+          ...(yield* providers.listInstances)
+            .filter((provider) => provider.instanceId !== codingProvider.instanceId)
+            .sort((a, b) =>
+              a.instanceId < b.instanceId ? -1 : a.instanceId > b.instanceId ? 1 : 0,
+            ),
+        ].filter(
+          (provider) =>
+            provider.enabled && provider.driverKind === "codex" && provider.liveConnection,
+        );
+        const errorRank = (reason: LiveVoiceReason) =>
+          reason === "auth-required"
+            ? 3
+            : reason === "unsupported-endpoint"
+              ? 2
+              : reason === "unsupported-provider"
+                ? 0
+                : 1;
+        const resolved = yield* Effect.gen(function* () {
+          let bestError: LiveConnectionError | undefined;
+          for (const voiceProvider of candidates) {
+            if (!voiceProvider.liveConnection) continue;
+            const result = yield* voiceProvider.liveConnection
+              .resolveLiveConnection()
+              .pipe(Effect.result);
+            if (result._tag === "Success") return { voiceProvider, connection: result.success };
+            if (!bestError || errorRank(result.failure.reason) > errorRank(bestError.reason)) {
+              bestError = result.failure;
+            }
+          }
+          return yield* bestError ?? new LiveConnectionError({ reason: "unsupported-provider" });
+        }).pipe(Effect.result);
         if (resolved._tag === "Failure")
           return yield* startupFailure(request, resolved.failure.reason);
-        const connection = resolved.success;
+        const { voiceProvider, connection } = resolved.success;
         const selectionIdentity = encodeSelection(selection);
         const validateOwner = Effect.gen(function* () {
           // Upgrade tickets are one-shot; re-check their bound session, never consume the ticket again.
@@ -168,9 +199,15 @@ export const liveVoiceRouteLayer = Layer.unwrap(
           )
             return yield* changed();
           const instance = yield* providers.getInstance(selection.instanceId);
-          if (!instance?.enabled || instance !== provider || !instance.liveConnection)
+          if (!instance?.enabled || instance !== codingProvider) return yield* changed();
+          const voiceInstance = yield* providers.getInstance(voiceProvider.instanceId);
+          if (
+            !voiceInstance?.enabled ||
+            voiceInstance !== voiceProvider ||
+            !voiceInstance.liveConnection
+          )
             return yield* changed();
-          const next = yield* instance.liveConnection.resolveLiveConnection();
+          const next = yield* voiceInstance.liveConnection.resolveLiveConnection();
           if (next.revision !== connection.revision) return yield* changed();
         }).pipe(Effect.mapError(changed));
         return yield* Effect.gen(function* () {
@@ -220,7 +257,7 @@ export const liveVoiceRouteLayer = Layer.unwrap(
             validateOwner,
             capability: {
               environmentId,
-              providerInstanceId: selection.instanceId,
+              providerInstanceId: voiceProvider.instanceId,
               protocol: LIVE_VOICE_PROTOCOL,
               requestedModel: LIVE_VOICE_REQUESTED_MODEL,
               effectiveModel: null,
