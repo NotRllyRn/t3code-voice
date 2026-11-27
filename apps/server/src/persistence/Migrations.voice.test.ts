@@ -95,3 +95,12 @@ it.effect.each([67, 81, 88, 97, 103, 118])(
       );
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
+
+it("registers unique contiguous numeric migration IDs", () => {
+  const ids = migrationManifest.map(([id]) => id);
+  assert.equal(new Set(ids).size, ids.length);
+  assert.deepStrictEqual(
+    ids,
+    Array.from({ length: ids.length }, (_, index) => index + 1),
+  );
+});

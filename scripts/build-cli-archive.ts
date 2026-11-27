@@ -28,9 +28,11 @@ import {
   STAGE_INSTALL_ARGS,
 } from "./build-desktop-artifact.ts";
 import { assertLinuxArm64PageCompatibility } from "./lib/linux-arm64-sea.ts";
-import { linuxLibatomicHeader } from "./lib/voice-build-libatomic.ts";
-import { copyVerifiedRuntimeExternals } from "./lib/voice-build-runtime-externals.ts";
-export { linuxLibatomicHeader } from "./lib/voice-build-libatomic.ts";
+import {
+  resolveVoiceLibatomicHeader,
+  tryStageVoiceRuntimeExternals,
+} from "./lib/voice-build-cli.ts";
+export { linuxLibatomicHeader } from "./lib/voice-build-cli.ts";
 import { selectCliRuntimeExternalDependencies } from "./lib/cli-external-packages.ts";
 import { signWithJsign } from "./lib/windows-jsign.ts";
 import { windowsSystemTar } from "./lib/windows-tar.ts";
@@ -197,19 +199,14 @@ const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (inpu
     yield* fs.copy(path.join(input.repoRoot, "patches"), path.join(input.stageDir, "patches"));
   }
 
-  if (Option.isSome(input.runtimeExternalsDir)) {
-    const missing = yield* copyVerifiedRuntimeExternals(
-      input.runtimeExternalsDir.value,
+  if (
+    !(yield* tryStageVoiceRuntimeExternals(
+      input.runtimeExternalsDir,
       input.stageDir,
-      Object.keys(dependencies),
-    );
-    if (missing !== undefined) {
-      return yield* new CliArchiveInputMissingError({
-        inputPath: missing,
-        hint: "Supply a verified runtime node_modules directory with all target dependencies.",
-      });
-    }
-  } else {
+      dependencies,
+      (inputPath, hint) => new CliArchiveInputMissingError({ inputPath, hint }),
+    ))
+  ) {
     const install = yield* resolveSpawnCommand("vp", [...STAGE_INSTALL_ARGS]);
     yield* runCommand(
       ChildProcess.make(install.command, install.args, {
@@ -321,18 +318,10 @@ const bundleLinuxLibatomic = Effect.fn("bundleLinuxLibatomic")(function* (input:
       hint: "The archive requires libatomic's installed Debian or Ubuntu package metadata.",
     });
   }
-  const header = linuxLibatomicHeader(yield* fs.readFileString("/etc/os-release"), {
-    pkg,
-    version,
-    sourcePackage,
-    sourceVersion,
-  });
-  if (header === undefined) {
-    return yield* new CliArchiveInputMissingError({
-      inputPath: "/etc/os-release#ID",
-      hint: "Build Linux archives on Debian or Ubuntu to identify libatomic's source package.",
-    });
-  }
+  const header = yield* resolveVoiceLibatomicHeader(
+    { pkg, version, sourcePackage, sourceVersion },
+    (inputPath, hint) => new CliArchiveInputMissingError({ inputPath, hint }),
+  );
   // Vendored because CI runner images strip /usr/share/doc.
   const license = yield* fs.readFileString(
     path.join(input.repoRoot, "scripts/licenses/libatomic.LICENSE"),

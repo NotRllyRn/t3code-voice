@@ -182,6 +182,12 @@ import {
   voiceTurnItemFields,
 } from "./VoiceCommandHandlers.ts";
 import {
+  assertExpectedDispatchState,
+  findRecordedVoice,
+  type VoiceDispatchExpectations,
+  voiceTurnOrdinal,
+} from "./VoiceOrchestrationHelpers.ts";
+import {
   DispatchModeLimit,
   exceededDispatchModeLimit,
   narrowToCeiling,
@@ -448,10 +454,7 @@ export interface OrchestratorV2Shape {
   readonly awaitRestartContinuation: (run: OrchestrationV2Run) => Effect.Effect<void>;
   readonly dispatch: (
     command: OrchestrationV2ServerCommand,
-    options?: {
-      readonly expectedUserMessageCount?: number;
-      readonly expectedModelSelection?: ModelSelection;
-    },
+    options?: VoiceDispatchExpectations,
   ) => Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error>;
   readonly autoArmLimitRecovery: (input: {
     readonly commandId: CommandId;
@@ -3177,10 +3180,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           providerTurnId: null,
           nativeItemRef: null,
           parentItemId: null,
-          ordinal:
-            queuedRun.voiceHistoryCutoffOrdinal === undefined
-              ? ordinal * 100
-              : Math.max(ordinal * 100, yield* nextTurnItemOrdinal(projection)),
+          ordinal: yield* voiceTurnOrdinal(queuedRun.voiceHistoryCutoffOrdinal, ordinal, () =>
+            nextTurnItemOrdinal(projection),
+          ),
           status: "completed",
           title: null,
           type: "user_message",
@@ -6647,14 +6649,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: selectionTransition.reason,
       });
     }
-    const recordedVoice = input.projection.messages.find(
-      (message) => message.id === input.messageId,
-    );
-    const recordedVoiceItem = input.projection.turnItems.find(
-      (item) =>
-        item.type === "user_message" &&
-        item.messageId === input.messageId &&
-        item.voice !== undefined,
+    const { recordedVoice, recordedVoiceItem } = findRecordedVoice(
+      input.projection,
+      input.messageId,
     );
     const appendSteeringMessage = Effect.fn("Orchestrator.appendSteeringMessage")(
       function* (messageInput: {
@@ -6717,9 +6714,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           updatedAt: now,
           type: "user_message",
           messageId: input.messageId,
-          ...voiceTurnItemFields(
-            recordedVoiceItem?.type === "user_message" ? recordedVoiceItem : undefined,
-          ),
+          ...voiceTurnItemFields(recordedVoiceItem),
           inputIntent:
             input.command.type === "queued-message.promote-to-steer"
               ? "promoted_queued_to_steer"
@@ -9711,10 +9706,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       providerTurnId: null,
       nativeItemRef: null,
       parentItemId: null,
-      ordinal:
-        voiceHistoryCutoffOrdinal === undefined
-          ? ordinal * 100
-          : Math.max(ordinal * 100, yield* nextTurnItemOrdinal(projection)),
+      ordinal: yield* voiceTurnOrdinal(voiceHistoryCutoffOrdinal, ordinal, () =>
+        nextTurnItemOrdinal(projection),
+      ),
       status: "completed",
       title: null,
       startedAt: now,
@@ -16673,29 +16667,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       return yield* replayCommandReceipt(command, existingReceipt.value);
     }
 
-    if (command.type === "message.dispatch" && options?.expectedModelSelection !== undefined) {
-      const shell = yield* projectionStore
-        .getThreadShell(command.threadId)
-        .pipe(
-          Effect.mapError(
-            (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
-          ),
-        );
-      if (!shell || !modelSelectionsEqual(shell.modelSelection, options.expectedModelSelection))
-        return yield* new OrchestratorInputChangedError({ threadId: command.threadId });
-    }
-
-    if (command.type === "message.dispatch" && options?.expectedUserMessageCount !== undefined) {
-      const { messages } = yield* projectionStore
-        .getThreadRecords(command.threadId, ["messages"], { messageRoles: ["user"] })
-        .pipe(
-          Effect.mapError(
-            (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
-          ),
-        );
-      if (messages.filter((message) => !message.voice).length !== options.expectedUserMessageCount)
-        return yield* new OrchestratorInputChangedError({ threadId: command.threadId });
-    }
+    yield* assertExpectedDispatchState({
+      command,
+      options,
+      projectionStore,
+      projectionError: (input) => new OrchestratorProjectionError(input),
+      inputChangedError: (input) => new OrchestratorInputChangedError(input),
+    });
 
     // Recheck under the lock; the user may have raised modes since sender preflight.
     const limit = yield* DispatchModeLimit;

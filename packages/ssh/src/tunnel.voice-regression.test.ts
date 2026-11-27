@@ -5,9 +5,10 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
+import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
 import { expect, it } from "vite-plus/test";
 
-import { buildRemoteT3RunnerScript } from "./tunnel.ts";
+import { buildRemoteLaunchScript, buildRemoteT3RunnerScript } from "./tunnel.ts";
 
 const version = "0.1.10-voice.10";
 const mirror = "https://mirror.invalid/releases?signature=synthetic%2Btoken&expires=123";
@@ -182,3 +183,95 @@ it("recovers a dead installer lock and replaces an incomplete runtime before exe
   expect(NodeFS.readdirSync(NodePath.dirname(f.runtime))).toEqual([version]);
   expect(NodeFS.readdirSync(f.home)).toEqual([]);
 });
+
+it("runner script targets the fork home env var and never defaults to $HOME/.t3/runtime", () => {
+  const script = buildRemoteT3RunnerScript({
+    archiveVersion: version,
+    releaseBaseUrl: null,
+  });
+  expect(script).toContain(
+    `T3_HOME="\${${FORK_DESKTOP.homeEnvironmentVariable}:-$HOME/${FORK_DESKTOP.homeDirectoryName}}"`,
+  );
+  expect(script).toContain('T3_RUNTIME_DIR="$T3_HOME/runtime/versions/$T3_ARCHIVE_VERSION"');
+  expect(script).not.toContain("$HOME/.t3/runtime");
+});
+
+it.each([
+  { label: "default fork host", releaseBaseUrl: null },
+  { label: "signed mirror", releaseBaseUrl: "https://mirror.test/releases?sig=abc" },
+])("reports download failure context for $label on Linux x86_64", ({ releaseBaseUrl }) => {
+  const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "voice-ssh-mirror-fail-"));
+  try {
+    const bin = NodePath.join(root, "bin");
+    NodeFS.mkdirSync(bin, { recursive: true });
+    NodeFS.writeFileSync(
+      NodePath.join(bin, "uname"),
+      `#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; esac\n`,
+      { mode: 0o755 },
+    );
+    NodeFS.writeFileSync(
+      NodePath.join(bin, "curl"),
+      '#!/bin/sh\nprintf "download attempt: %s\\n" "$6" >&2\ncase "$6" in *SHA256SUMS*) : > "$8" ;; *) exit 22 ;; esac\n',
+      { mode: 0o755 },
+    );
+    const runner = NodePath.join(root, "run-t3.sh");
+    NodeFS.writeFileSync(
+      runner,
+      buildRemoteT3RunnerScript({
+        archiveVersion: version,
+        releaseBaseUrl,
+      }),
+    );
+    const result = NodeChildProcess.spawnSync("sh", [runner, "--version"], {
+      encoding: "utf8",
+      env: { HOME: NodePath.join(root, "home"), PATH: `${bin}:${process.env.PATH ?? ""}` },
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("download attempt");
+    expect(result.stderr).toContain("Could not download t3");
+    expect(result.stderr).toContain(version);
+    expect(result.stderr).toContain(
+      releaseBaseUrl
+        ? `https://mirror.test/releases/v${version}/SHA256SUMS?sig=abc`
+        : "https://github.com/NotRllyRn/t3code-voice/releases/download",
+    );
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it.each(["absolute", "relative"] as const)(
+  "creates a missing fork home through a %s dangling symlink and preserves its target",
+  (kind) => {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "voice-ssh-dangling-link-"));
+    try {
+      const home = NodePath.join(root, "home");
+      const target = NodePath.join(root, "shared", "t3");
+      NodeFS.mkdirSync(home, { recursive: true });
+      const link = NodePath.join(home, FORK_DESKTOP.homeDirectoryName);
+      const linkTarget = kind === "absolute" ? target : "../shared/t3";
+      NodeFS.symlinkSync(linkTarget, link);
+      const launch = NodePath.join(root, "launch.sh");
+      NodeFS.writeFileSync(
+        launch,
+        buildRemoteLaunchScript({
+          archiveVersion: version,
+          releaseBaseUrl: "http://127.0.0.1:9",
+        }),
+      );
+      const result = NodeChildProcess.spawnSync("sh", [launch, "test-state"], {
+        encoding: "utf8",
+        timeout: 10_000,
+        env: { HOME: home, PATH: process.env.PATH ?? "/usr/bin:/bin" },
+      });
+      expect(result.stderr).not.toContain("File exists");
+      expect(NodeFS.readlinkSync(link)).toBe(linkTarget);
+      expect(
+        NodeFS.existsSync(NodePath.join(target, "ssh-launch", "test-state")),
+        result.stderr,
+      ).toBe(true);
+    } finally {
+      NodeFS.rmSync(root, { recursive: true, force: true });
+    }
+  },
+);

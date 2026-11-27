@@ -17,13 +17,15 @@ import {
 
 import { fromYaml } from "@t3tools/shared/schemaYaml";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { FORK_DESKTOP } from "@t3tools/shared/forkIdentity";
-import { resolveVoiceMacUpdate, VoiceMacSigningError } from "./lib/voice-mac-signing.ts";
-import { encodeVoiceMacVersion } from "../apps/desktop/src/updates/voiceMacVersion.ts";
 import {
-  parseVoiceUpdateConfig,
+  applyVoiceDesktopBuildConfig,
+  FORK_DESKTOP,
+  resolveVoiceDesktopBuildCommit,
+  resolveVoiceMacUpdate,
+  VOICE_DESKTOP_PROTOCOLS,
   type VoiceUpdateConfig,
-} from "../apps/desktop/src/updates/voiceUpdateConfig.ts";
+} from "./lib/voice-build-desktop.ts";
+export { DesktopBuildCommitError, resolveDesktopBuildCommit } from "./lib/voice-build-desktop.ts";
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import rootPackageJson from "../package.json" with { type: "json" };
@@ -43,8 +45,6 @@ import {
   type WebAssetBrand,
 } from "./lib/brand-assets.ts";
 import { getDefaultBuildArch } from "./lib/build-target-arch.ts";
-import { DesktopBuildCommitError, resolveDesktopBuildCommit } from "./lib/voice-build-commit.ts";
-export { DesktopBuildCommitError, resolveDesktopBuildCommit } from "./lib/voice-build-commit.ts";
 import {
   findInlinedExternalPackages,
   selectCliRuntimeExternalDependencies,
@@ -2780,31 +2780,10 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   arch?: typeof BuildArch.Type,
   voiceUpdate?: VoiceUpdateConfig,
 ) {
-  if (
-    voiceUpdate &&
-    (platform !== "mac" ||
-      !signed ||
-      !["dmg", "zip"].includes(target) ||
-      !parseVoiceUpdateConfig(voiceUpdate, version))
-  ) {
-    return yield* new VoiceMacSigningError({
-      message: "Invalid Voice self-update build configuration",
-    });
-  }
-  const nativeVoiceVersion = voiceUpdate
-    ? yield* Effect.try({
-        try: () => encodeVoiceMacVersion(version),
-        catch: () =>
-          new VoiceMacSigningError({ message: "Unsupported Voice native macOS version" }),
-      })
-    : undefined;
   const buildConfig: Record<string, unknown> = {
     afterPack: (yield* Path.Path).join(yield* RepoRoot, "scripts/prepare-server-compile-cache.cjs"),
     appId: DESKTOP_APP_ID,
-    productName:
-      voiceUpdate?.track === "voice-candidate"
-        ? "T3 Code Voice Candidate — Not Production"
-        : resolveDesktopProductName(version),
+    productName: resolveDesktopProductName(version),
     artifactName: "T3-Code-Voice-${version}-${arch}.${ext}",
     electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
     // runAsNode stays on: the app starts its server, helpers and the `t3` shim by running this
@@ -2839,26 +2818,16 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     ],
   };
   const updateChannel = resolveDesktopUpdateChannel(version);
-  // Never infer an upstream feed from repository metadata, CI variables, or mock flags.
-  buildConfig.publish = voiceUpdate
-    ? { provider: "generic", url: voiceUpdate.feedUrl, channel: "latest" }
-    : null;
-  if (voiceUpdate) {
-    buildConfig.extraMetadata = { t3VoiceUpdate: voiceUpdate };
-    buildConfig.generateUpdatesFilesForAllChannels = false;
-  }
+  buildConfig.publish = null;
 
   if (platform === "mac") {
     const path = yield* Path.Path;
     const repoRoot = yield* RepoRoot;
-    buildConfig.afterPack = path.join(repoRoot, "scripts/mac-after-pack.ts");
     buildConfig.mac = {
       target: target === "dmg" ? [target, "zip"] : [target],
       icon: "icon.icns",
       category: "public.app-category.developer-tools",
-      ...(voiceUpdate ? { bundleShortVersion: nativeVoiceVersion } : {}),
       extendInfo: {
-        ...(voiceUpdate ? { ElectronSquirrelPreventDowngrades: true } : {}),
         // macOS 26 offers Messages/Mail codes in every text field unless opted out.
         NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac: true,
         NSLocalNetworkUsageDescription:
@@ -2880,22 +2849,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
         NSSpeechRecognitionUsageDescription:
           "T3 Code transcribes your dictation on this Mac when you choose Apple Speech.",
       },
-      protocols: [
-        {
-          name: FORK_DESKTOP.productName,
-          schemes: [FORK_DESKTOP.scheme, FORK_DESKTOP.developmentScheme],
-        },
-      ],
-      ...(signed
-        ? {
-            sign: path.join(
-              repoRoot,
-              voiceUpdate ? "scripts/sign-voice-macos.ts" : "scripts/sign-macos.ts",
-            ),
-          }
-        : {}),
-      // Builder needs a non-null identity to dispatch a custom signer without a keychain.
-      ...(voiceUpdate ? { identity: "-", notarize: false, hardenedRuntime: true } : {}),
+      protocols: [...VOICE_DESKTOP_PROTOCOLS],
+      ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
       ...(macPasskeySigning
         ? {
             entitlements: macPasskeySigning.entitlementsPath,
@@ -2937,12 +2892,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       category: "Development",
       synopsis: "Desktop GUI for coding agents",
       maintainer: "T3 Tools <hello@t3.codes>",
-      protocols: [
-        {
-          name: FORK_DESKTOP.productName,
-          schemes: [FORK_DESKTOP.scheme, FORK_DESKTOP.developmentScheme],
-        },
-      ],
+      protocols: [...VOICE_DESKTOP_PROTOCOLS],
       desktop: {
         entry: {
           // Match Electron's WM_CLASS from setDesktopName so docks use this launcher.
@@ -3007,6 +2957,15 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     }
     buildConfig.win = winConfig;
   }
+
+  yield* applyVoiceDesktopBuildConfig(buildConfig, {
+    platform,
+    target,
+    version,
+    signed,
+    repoRoot: yield* RepoRoot,
+    voiceUpdate,
+  });
 
   return buildConfig;
 });
@@ -3713,13 +3672,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   const appVersion =
     options.version ?? resolveTaggedSourceVersion(repoRoot, serverPackageJson.version);
   const iconAssets = resolveDesktopBuildIconAssets(appVersion);
-  if (options.skipBuild) {
-    return yield* new DesktopBuildCommitError({
-      reason:
-        "T3 Code Voice artifacts require a fresh build from the verified source snapshot; --skip-build is not supported.",
-    });
-  }
-  const commitHash = yield* resolveDesktopBuildCommit(repoRoot);
+  const commitHash = yield* resolveVoiceDesktopBuildCommit(repoRoot, options.skipBuild);
   const mkdir = options.keepStage ? fs.makeTempDirectory : fs.makeTempDirectoryScoped;
   const stageRoot = yield* mkdir({
     prefix: `t3code-desktop-${options.platform}-stage-`,

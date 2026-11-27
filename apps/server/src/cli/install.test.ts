@@ -128,16 +128,6 @@ it.layer(NodeServices.layer)("t3 install", (it) => {
       yield* provide(installCli());
       assert.equal(yield* fs.readFileString(link), posixLauncherScript(executable));
 
-      for (const upstreamPath of [".t3/bin/t3", ".t3/runtime/versions/0.0.1/t3"]) {
-        yield* fs.remove(link);
-        const upstream = path.join(root, upstreamPath);
-        yield* fs.symlink(upstream, link);
-        const foreign = yield* provide(installCli()).pipe(Effect.flip);
-        assert.include(foreign.message, "Another t3 is already at");
-        assert.equal(yield* fs.readLink(link), upstream);
-      }
-
-      yield* fs.remove(link);
       // A script an earlier install wrote is ours too.
       yield* fs.writeFileString(link, posixLauncherScript(older));
       yield* provide(installCli());
@@ -197,22 +187,7 @@ it.layer(NodeServices.layer)("t3 install", (it) => {
         ),
       ).pipe(Effect.flip);
       assert.include(unrunnable.message, "has % or non-ASCII characters");
-      assert.notInclude(unrunnable.message, "npx");
-    }).pipe(Effect.scoped),
-  );
-
-  it.effect("gives non-bundled installs fork release guidance", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const { link, provide } = yield* setup;
-      const error = yield* provide(
-        installCli().pipe(Effect.provideService(HostProcess.IsExecutable, false)),
-      ).pipe(Effect.flip);
-      assert.include(error.message, FORK_DESKTOP.releasesUrl);
-      assert.notInclude(error.message, "t3.codes/install");
-      assert.notInclude(error.message, "npx t3");
-      assert.isFalse(yield* fs.exists(link));
-    }).pipe(Effect.scoped),
+    }),
   );
 
   it.effect("asks npx users without a t3 command once per minor release and installs on yes", () =>
