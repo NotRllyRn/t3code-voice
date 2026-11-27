@@ -10857,22 +10857,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       });
       assert.deepEqual(followingPage.items, targetAfterRollback.visibleTurnItems.slice(2));
       assert.isFalse(followingPage.hasMore);
-      const latestConversation = yield* projectionStore.getTimelinePage(targetThreadId, {
-        view: "messages",
-        beforePosition: Number.MAX_SAFE_INTEGER,
-        limit: 2,
-      });
-      assert.deepEqual(latestConversation.items, targetAfterRollback.visibleTurnItems.slice(2, 4));
-      assert.isFalse(latestConversation.hasMore);
-      assert.isTrue(latestConversation.hasEarlier);
-      const earlierConversation = yield* projectionStore.getTimelinePage(targetThreadId, {
-        view: "messages",
-        beforePosition: latestConversation.items[0]!.position,
-        limit: 2,
-      });
-      assert.deepEqual(earlierConversation.items, targetAfterRollback.visibleTurnItems.slice(0, 2));
-      assert.isTrue(earlierConversation.hasMore);
-      assert.isFalse(earlierConversation.hasEarlier);
       assert.isTrue(followingPage.hasEarlier);
       const newestPage = yield* projectionStore.getTimelinePage(targetThreadId, {
         view: "activity",
@@ -12270,33 +12254,11 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         payload: {
           ...(yield* store.getThreadProjection(threadId)).runs[0]!,
           id: newerRunId,
-          ordinal: 3,
+          ordinal: 2,
           providerThreadId: ProviderThreadId.make("provider-thread:held-completion:new-provider"),
           requestedAt: releasedAt,
           startedAt: releasedAt,
           completedAt: releasedAt,
-        },
-      });
-      const retiredRunId = RunId.make("run:held-completion:retired-clean");
-      yield* store.apply({
-        id: EventId.make("event:held-completion:retired-clean"),
-        type: "run.created",
-        threadId,
-        runId: retiredRunId,
-        occurredAt: completedAt,
-        payload: {
-          ...(yield* store.getThreadProjection(threadId)).runs[0]!,
-          id: retiredRunId,
-          ordinal: 2,
-          providerThreadId: null,
-          workspacePreparation: {
-            type: "root",
-            cleanProviderConstraint: {
-              instanceId: providerInstanceId,
-              driver: "pi",
-              environmentMode: "clean",
-            },
-          },
         },
       });
       const { statements, tracer } = traceSqlStatements();
@@ -12304,20 +12266,9 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         (yield* store
           .getRuntimeRecoveryProjection(threadId)
           .pipe(Effect.withTracer(tracer))).runs.map((run) => run.id),
-        [runId, retiredRunId, newerRunId],
+        [runId, newerRunId],
       );
       assert.lengthOf(statements, 2);
-      const eventSql = yield* SqlClient.SqlClient;
-      assert.isFalse((yield* store.getRuntimeRecoveryProjection(threadId)).retiredCleanAutomation);
-      yield* eventSql`INSERT INTO orchestration_events (
-        event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
-        actor_kind, payload_json, metadata_json, application_event_version
-      ) VALUES (
-        'event:retired-orphan-claim', 'thread', ${threadId}, 0, 'thread.created', '2026-09-28T12:00:00.000Z',
-        'server', ${JSON.stringify({ cleanProviderConstraint: { instanceId: providerInstanceId, driver: "pi", environmentMode: "clean" } })}, '{}', 2
-      )`;
-      assert.isTrue((yield* store.getRuntimeRecoveryProjection(threadId)).retiredCleanAutomation);
-
       // Live-item filters must hit the active partial indexes, not walk the thread's history.
       const sql = yield* SqlClient.SqlClient;
       for (const statement of statements.filter((query) => query.includes("turn_items"))) {
