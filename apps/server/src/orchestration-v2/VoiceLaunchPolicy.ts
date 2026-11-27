@@ -165,5 +165,101 @@ export function makeVoiceLaunchPolicy({
     };
   });
 
-  return { assertNoScripts, checkApprovedBase, checkPinnedBase, normalizeRequest };
+  const prepareLaunchRequest = Effect.fn("VoiceLaunchPolicy.prepareLaunchRequest")(function* (
+    request: ThreadLaunchInput,
+  ) {
+    const input: ThreadLaunchInput = yield* normalizeRequest(request);
+    if (input.workspaceStrategy.cleanProviderConstraint !== undefined) {
+      return yield* mapError(
+        input,
+        "resolve-project",
+      )("Clean-provider automation is retired. Start a new ordinary thread explicitly.");
+    }
+    yield* assertNoScripts(input);
+    return input;
+  });
+
+  const checkExistingWorktreeApprovedBase = Effect.fn(
+    "VoiceLaunchPolicy.checkExistingWorktreeApprovedBase",
+  )(function* (input: PolicyInput, branch: string | null, threadId: ThreadId) {
+    if (
+      input.workspaceStrategy.type !== "existing_worktree" ||
+      input.workspaceStrategy.approvedBase === undefined
+    )
+      return;
+    const pin = input.workspaceStrategy.approvedBase;
+    yield* checkPinnedBase(input, "provision-worktree", threadId);
+    const current = yield* resolveApprovedWorktreeBase({
+      cwd: input.workspaceStrategy.worktreePath,
+      branch: branch!,
+      acceptedCommit: pin.commit,
+    }).pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)));
+    if (current !== pin.commit)
+      return yield* mapError(
+        input,
+        "provision-worktree",
+        threadId,
+      )("Prepared worktree no longer matches the approved commit.");
+  });
+
+  const checkWorktreeStrategyApprovedBase = Effect.fn(
+    "VoiceLaunchPolicy.checkWorktreeStrategyApprovedBase",
+  )(function* (input: PolicyInput, operation: ThreadLaunchError["operation"], threadId: ThreadId) {
+    const strategy = input.workspaceStrategy;
+    if (strategy.type !== "worktree" || strategy.approvedBase === undefined) return;
+    yield* Effect.gen(function* () {
+      const [isScratch, projectOption] = yield* Effect.all(
+        [
+          isScratchProject(input.projectId),
+          getProject(input.projectId).pipe(Effect.orElseSucceed(() => Option.none())),
+        ],
+        { concurrency: "unbounded" },
+      );
+      yield* checkApprovedBase({
+        projectId: input.projectId,
+        strategy,
+        isScratch,
+        project: Option.getOrUndefined(projectOption),
+      });
+    }).pipe(Effect.mapError(mapError(input, operation, threadId)));
+  });
+
+  const assertApprovedBaseResolved = Effect.fnUntraced(function* (
+    input: PolicyInput,
+    resolved: boolean,
+    threadId: ThreadId,
+  ) {
+    if (
+      !resolved &&
+      input.workspaceStrategy.type !== "root" &&
+      input.workspaceStrategy.approvedBase !== undefined
+    ) {
+      return yield* mapError(
+        input,
+        "provision-worktree",
+        threadId,
+      )("Approved base commit is unavailable.");
+    }
+  });
+
+  return {
+    assertNoScripts,
+    assertApprovedBaseResolved,
+    checkApprovedBase,
+    checkExistingWorktreeApprovedBase,
+    checkPinnedBase,
+    checkWorktreeStrategyApprovedBase,
+    normalizeRequest,
+    prepareLaunchRequest,
+  };
 }
+
+export const voiceNoScriptsFlag = (strategy: ThreadLaunchWorkspaceStrategy) =>
+  strategy.enforceNoSetupScripts === true ? { enforceNoSetupScripts: true as const } : {};
+
+export const voiceExistingWorktreeFlags = (
+  strategy: Extract<ThreadLaunchWorkspaceStrategy, { type: "worktree" }>,
+) => ({
+  ...(strategy.approvedBase === undefined ? {} : { approvedBase: strategy.approvedBase }),
+  ...voiceNoScriptsFlag(strategy),
+});

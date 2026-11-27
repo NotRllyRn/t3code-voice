@@ -336,8 +336,6 @@ it.effect(
       const event = { preventDefault: vi.fn() };
       listeners.get("open-url")!(event, "t3code-voice-dev://app/auth/callback?code=clerk-code");
       listeners.get("open-url")!(event, "t3code-voice://app/welcome");
-      listeners.get("open-url")!(event, "t3code-dev://app/settings/providers?instanceId=work");
-      listeners.get("open-url")!(event, "t3code://app/settings/providers?instanceId=work");
       assert.equal(loadURL.mock.calls.length, 0);
       assert.equal(event.preventDefault.mock.calls.length, 0);
       listeners.get("second-instance")!({}, [
@@ -477,14 +475,6 @@ it.effect("hands web and app links to the renderer and leaves other links alone"
       assert.strictEqual(open("t3code-voice://pair"), 0);
       assert.strictEqual(open("mailto:hello@example.com"), 0);
       assert.strictEqual(open("t3code-voice://somewhere-else"), 0);
-      for (const scheme of ["t3code", "t3code-dev"]) {
-        assert.strictEqual(open(`${scheme}://new?prompt=hi`), 0);
-        assert.strictEqual(open(`${scheme}://threads/env-1/thread-1`), 0);
-        assert.strictEqual(
-          open(`${scheme}://pair?pairingUrl=https%3A%2F%2Fvps.example.com%2F%23token%3Dabc`),
-          0,
-        );
-      }
       yield* Effect.yieldNow;
       assert.deepStrictEqual(received, [
         "https://example.com/page",

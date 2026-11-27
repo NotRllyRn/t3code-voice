@@ -25,7 +25,6 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { expect, vi } from "vite-plus/test";
@@ -63,7 +62,7 @@ const layerWorktreeLocation = (worktreesDir = managedWorktreesDir) =>
 function makeVoiceTurnStartHarness(input: {
   readonly text: string;
   readonly voiceHistory?: "native" | "unsupported" | "inline";
-  readonly resumeFailure?: ProviderAdapter.ProviderAdapterError;
+  readonly resumeFailure?: ProviderAdapter.ProviderAdapterV2Error;
   readonly openFailure?: unknown;
   readonly worktreesDir?: string;
   readonly worktreePath?: string;
@@ -414,7 +413,7 @@ function makeVoiceTurnStartHarness(input: {
         }),
         Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
           open,
-          get: () => Effect.succeed(Option.none()),
+          get: () => Effect.succeedNone,
         }),
         Layer.mock(ProviderAuthService.ProviderAuthService)({
           tryHandlePromptCommand: () => Effect.succeed(false),

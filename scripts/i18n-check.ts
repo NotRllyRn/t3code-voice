@@ -99,7 +99,7 @@ for (const [app, [command, ...args]] of Object.entries(GENERATE)) {
 if (problems.length > 0) {
   console.error(problems.join("\n"));
   console.error(
-    "\nRun `vp run i18n:generate` in the app, then translate any new keys in every locale catalog.",
+    "\nRun `vp run i18n:generate` in the app, then translate any new keys in every locale catalog (place fork keys in `voice-translations/`).",
   );
   process.exitCode = 1;
 } else {

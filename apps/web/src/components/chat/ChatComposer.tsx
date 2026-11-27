@@ -1,6 +1,6 @@
 import { copySnapshot } from "./copySnapshot";
 import { VoiceInputSetup } from "./VoiceInputSetup";
-import { DEFAULT_INTERACTION_MODE } from "../../types";
+import { useChatComposerLiveVoice } from "./useChatComposerLiveVoice";
 import { useComposerTypingGuard } from "./useComposerTypingGuard";
 import { insertAttachmentReferencesForDraft } from "./composerAttachmentReferences";
 import type { ComposerAttachmentInsertion } from "../composerAttachmentInsertion";
@@ -152,11 +152,6 @@ import { attachmentUploadBlockReason } from "../../lib/attachmentUploadState";
 import { useDictationShortcut } from "../../speech/useDictationShortcut";
 import { useDictationSubmissionShortcut } from "../../speech/useDictationSubmissionShortcut";
 import { useEnvironmentSpeechInput } from "../../speech/useEnvironmentSpeechInput";
-import {
-  ComposerLiveVoiceFeedback,
-  ComposerLiveVoiceControls,
-  useComposerLiveVoice,
-} from "../../voice/VoicePanel";
 import { ComposerSpeechButton, ComposerSpeechRecordingPill } from "./ComposerSpeechButton";
 import type { AssistantCitationSourceAnchor } from "~/lib/assistantTextSelection";
 import { shortcutLabelForCommand, type ShortcutMatchContext } from "../../keybindings";
@@ -2039,38 +2034,25 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     },
   });
   const { blocksSubmission: voiceInputActive, submitAfterDictation } = speechInput;
-  const liveVoiceAvailable =
-    selectedProviderEntry?.snapshot.enabled === true &&
-    multipleModelSelections === null &&
-    providerStatuses.some((provider) => provider.enabled && provider.liveVoiceAvailable === true);
-  const liveVoice = useComposerLiveVoice({
+  const liveVoice = useChatComposerLiveVoice({
     environmentId,
-    modelSelection: selectedModelSelection,
-    draftId: draftId ?? undefined,
-    threadId: routeKind === "server" ? (activeThreadId ?? undefined) : undefined,
-    draft:
-      routeKind === "draft"
-        ? {
-            ...(activeProjectId ? { projectId: activeProjectId } : {}),
-            ...(activeThreadId ? { threadId: activeThreadId } : {}),
-            modelSelection: selectedModelSelection,
-            runtimeMode: compatibleRuntimeMode,
-            interactionMode: DEFAULT_INTERACTION_MODE,
-          }
-        : undefined,
-    disabled:
-      !liveVoiceAvailable ||
-      voiceInputActive ||
-      !canOperateThread ||
-      environmentUnavailable !== null ||
-      projectSelectionRequired ||
-      (routeKind === "server" &&
-        (activeThreadModelSelection?.instanceId !== selectedInstanceId ||
-          activeThreadModelSelection?.model !== selectedModel)),
+    routeKind,
+    activeProjectId,
+    activeThreadId,
+    draftId,
+    selectedModelSelection,
+    selectedProviderEntry,
+    multipleModelSelections,
+    providerStatuses,
+    compatibleRuntimeMode,
+    voiceInputActive,
+    canOperateThread,
+    environmentUnavailable,
+    projectSelectionRequired,
+    activeThreadModelSelection,
+    selectedInstanceId,
+    selectedModel,
   });
-  const liveVoiceActive = liveVoice.voice.phase !== "idle" && liveVoice.voice.phase !== "error";
-  const liveVoiceFeedbackVisible =
-    !!liveVoice.voice.error || (!activeThreadId && !!liveVoice.voice.threadId);
   // A compact footer gives the dictation capsule the whole row beside the send button.
   const dictationTakesFooter = isComposerFooterCompact && speechInput.state.phase !== "idle";
   const submissionTarget = activePendingProgress ? "pending-user-input" : "provider-turn";
@@ -2088,10 +2070,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     submissionBlocked,
   );
   // The pending Submit button follows the answer's own blockers, matching submitComposer.
-  const primaryActionSendDisabledReason = liveVoice.draftSubmissionBlocked
-    ? gt("Connecting voice…")
-    : ((activePendingProgress ? attachmentBlockReason : sendDisabledReason) ??
-      (speechInput.preparing ? gt("Preparing voice input") : null));
+  const primaryActionSendDisabledReason =
+    liveVoice.sendDisabledReason ??
+    (activePendingProgress ? attachmentBlockReason : sendDisabledReason) ??
+    (speechInput.preparing ? gt("Preparing voice input") : null);
   const primaryActionEnvironmentUnavailable =
     environmentUnavailable !== null ||
     (!activePendingProgress && (noProviderAvailable || projectSelectionRequired));
@@ -4105,8 +4087,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
             {isComposerCollapsedMobile &&
             speechInput.state.phase === "idle" &&
-            !liveVoiceActive &&
-            !liveVoiceFeedbackVisible ? null : (
+            !liveVoice.keepsFooterVisible ? null : (
               <div
                 data-chat-composer-footer="true"
                 className={cn(
@@ -4114,8 +4095,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   pendingUserInputs.length > 0 && "pt-2",
                   showMobilePendingAnswerActions &&
                     speechInput.state.phase === "idle" &&
-                    !liveVoiceActive &&
-                    !liveVoiceFeedbackVisible &&
+                    !liveVoice.keepsFooterVisible &&
                     "hidden sm:flex",
                 )}
               >
@@ -4141,7 +4121,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   >
                     {composerControls}
                   </div>
-                  <ComposerLiveVoiceFeedback live={liveVoice} />
+                  {liveVoice.feedback}
                   <ComposerFooterPrimaryActions
                     // Stop state belongs to one thread; the composer stays mounted across threads.
                     key={`${environmentId}:${activeThreadId ?? "new"}`}
@@ -4169,14 +4149,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       },
                     )}
                     voiceInputActive={voiceInputActive}
-                    liveVoice={
-                      liveVoiceAvailable || liveVoiceActive
-                        ? {
-                            active: liveVoiceActive,
-                            controls: <ComposerLiveVoiceControls live={liveVoice} />,
-                          }
-                        : undefined
-                    }
+                    liveVoice={liveVoice.primaryActions}
                     isSendBusy={isSendBusy}
                     isSendHeld={composerSendHeld}
                     sendDisabledReason={primaryActionSendDisabledReason}

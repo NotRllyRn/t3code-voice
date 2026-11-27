@@ -29,9 +29,11 @@ import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretReso
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import {
+  applySecretReloadDecision,
   hasStoredEnvironmentSecret,
-  readStoredEnvironmentSecrets,
-} from "./VoiceStoredEnvironmentSecrets.ts";
+  mergeStoredInstanceSecrets,
+  resolveProviderBlockedReason,
+} from "./VoiceProviderInstanceHelpers.ts";
 import { buildUnavailableProviderSnapshot } from "./unavailableProviderSnapshot.ts";
 import * as ProviderInstanceRegistryMutator from "./ProviderInstanceRegistryMutator.ts";
 import type { AnyProviderDriver, ProviderInstance } from "@t3tools/provider-core/server/driver";
@@ -204,16 +206,7 @@ const readInstanceSecrets = Effect.fn("ProviderInstanceRegistry.readInstanceSecr
     unreadable.push(field);
     return [];
   });
-  const stored = yield* readStoredEnvironmentSecrets(instanceId, entry, environment);
-  const secrets: InstanceSecrets = {
-    environment: stored.environment,
-    config,
-  };
-  return {
-    secrets,
-    unreadable: [...unreadable, ...stored.unreadable],
-    storedUnreadable: stored.unreadable.length > 0,
-  };
+  return yield* mergeStoredInstanceSecrets(instanceId, entry, environment, config, unreadable);
 });
 
 // Replaces only the checked reference's value in the secrets a live instance already holds, so
@@ -238,18 +231,16 @@ const carryCheckedSecret = Effect.fn("ProviderInstanceRegistry.carryCheckedSecre
       ? { ...variable, value }
       : variable;
   });
-  const stored = yield* readStoredEnvironmentSecrets(instanceId, entry, environment);
-  return {
-    secrets: {
-      environment: stored.environment,
-      config: current.config.map((slot) =>
-        replacedSlots.some(({ field, key }) => field === slot.field && key === slot.key)
-          ? { ...slot, value }
-          : slot,
-      ),
-    },
-    unreadable: stored.unreadable,
-  };
+  return yield* mergeStoredInstanceSecrets(
+    instanceId,
+    entry,
+    environment,
+    current.config.map((slot) =>
+      replacedSlots.some(({ field, key }) => field === slot.field && key === slot.key)
+        ? { ...slot, value }
+        : slot,
+    ),
+  );
 });
 
 /** Conflicting saved flags must preserve any explicit disable. */
@@ -303,15 +294,7 @@ const buildEntry = Effect.fn("ProviderInstanceRegistry.buildEntry")(function* <R
     deferSecrets,
     carriedSecrets,
   } = input;
-  const retiredCleanPi =
-    entry.driver === "pi" &&
-    typeof entry.config === "object" &&
-    entry.config !== null &&
-    "environmentMode" in entry.config &&
-    entry.config.environmentMode === "clean";
-  const blocked = retiredCleanPi
-    ? "Clean Pi automation is retired. Configure a new ordinary provider instance explicitly."
-    : input.blockedReason(entry.driver);
+  const blocked = resolveProviderBlockedReason(entry, input.blockedReason);
   if (blocked !== undefined) {
     return {
       kind: "unavailable" as const,
@@ -711,10 +694,15 @@ export const makeProviderInstanceRegistry = Effect.fn(
             current.secrets,
             checked,
           );
-          if (unreadable.length > 0 || !Equal.equals(secrets, current.secrets)) {
-            rebuild.add(current.instance.instanceId);
-            if (unreadable.length === 0) carried.set(current.instance.instanceId, secrets);
-          }
+          applySecretReloadDecision(
+            current.instance.instanceId,
+            current.secrets,
+            secrets,
+            unreadable,
+            unreadable.length > 0,
+            rebuild,
+            carried,
+          );
           continue;
         }
         const { secrets, unreadable, storedUnreadable } = yield* readInstanceSecrets(
@@ -722,14 +710,15 @@ export const makeProviderInstanceRegistry = Effect.fn(
           entry,
           instanceId,
         );
-        // External vault failures keep a working instance; a failed server-store read revokes it.
-        if (
-          storedUnreadable ||
-          (unreadable.length === 0 && !Equal.equals(secrets, current.secrets))
-        ) {
-          rebuild.add(current.instance.instanceId);
-          if (unreadable.length === 0) carried.set(current.instance.instanceId, secrets);
-        }
+        applySecretReloadDecision(
+          current.instance.instanceId,
+          current.secrets,
+          secrets,
+          unreadable,
+          storedUnreadable,
+          rebuild,
+          carried,
+        );
       }
       yield* reconcileWithR(configMap, rebuild, false, carried);
       return targets.map(([rawInstanceId]) => ProviderInstanceId.make(rawInstanceId));

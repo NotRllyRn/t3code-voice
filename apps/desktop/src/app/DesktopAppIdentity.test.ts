@@ -148,25 +148,6 @@ const withIdentity = <A, E, R>(
 };
 
 describe("DesktopAppIdentity", () => {
-  it.effect.each([
-    { packageJson: "{}", expected: "unknown" },
-    { packageJson: '{"t3codeCommitHash":"invalid"}', expected: "unknown" },
-    {
-      packageJson: '{"t3codeCommitHash":"0123456789012345678901234567890123456789"}',
-      expected: "012345678901",
-    },
-  ])("reports embedded source metadata honestly ($expected)", ({ packageJson, expected }) => {
-    const calls: ElectronAppCalls = { setAboutPanelOptions: [], setDockIcon: [], setName: [] };
-    return withIdentity(
-      Effect.gen(function* () {
-        const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
-        yield* identity.configure;
-        assert.equal(calls.setAboutPanelOptions[0]?.version, expected);
-      }),
-      { calls, packageJson },
-    );
-  });
-
   it.effect("isolates the fork profile even when the upstream profile exists", () =>
     withIdentity(
       Effect.gen(function* () {

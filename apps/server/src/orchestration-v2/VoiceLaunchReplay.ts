@@ -10,7 +10,9 @@ import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
 import type { OrchestratorV2DispatchResult, OrchestratorV2Shape } from "./Orchestrator.ts";
-import type { ThreadLaunchError } from "./ThreadLaunchService.ts";
+import type { ThreadLaunchError, ThreadLaunchInput } from "./ThreadLaunchService.ts";
+
+type PolicyInput = Pick<ThreadLaunchInput, "commandId" | "projectId" | "workspaceStrategy">;
 
 type Refuse = (cause: unknown) => ThreadLaunchError;
 type ClaimReplay = {
@@ -25,7 +27,7 @@ type ClaimReplay = {
 const missingGuard = "The previous launch did not durably acknowledge the no-setup-scripts guard.";
 
 // These checks share the enclosing launch span, including its existing read/error boundaries.
-export const assertOrdinaryConstraint = Effect.fnUntraced(function* (
+const assertOrdinaryConstraint = Effect.fnUntraced(function* (
   constraint: ProviderCleanStartConstraint | undefined,
   refuse: Refuse,
 ) {
@@ -36,7 +38,7 @@ export const assertOrdinaryConstraint = Effect.fnUntraced(function* (
   }
 });
 
-export const assertOrdinaryClaim = Effect.fnUntraced(function* ({
+const assertOrdinaryClaim = Effect.fnUntraced(function* ({
   claimed,
   reuseExistingThread,
   hasLaunchReceipt,
@@ -66,7 +68,7 @@ export const assertOrdinaryClaim = Effect.fnUntraced(function* ({
   );
 });
 
-export const assertPriorGuard = Effect.fnUntraced(function* ({
+const assertPriorGuard = Effect.fnUntraced(function* ({
   enforceNoSetupScripts,
   hasLaunchReceipt,
   claimed,
@@ -106,7 +108,7 @@ export const assertPriorGuard = Effect.fnUntraced(function* ({
   }
 });
 
-export const assertPreparationGuard = Effect.fnUntraced(function* (
+const assertPreparationGuard = Effect.fnUntraced(function* (
   guardRequired: boolean,
   runs: OrchestrationV2ThreadProjection["runs"],
   runId: RunId | null,
@@ -121,3 +123,78 @@ export const assertPreparationGuard = Effect.fnUntraced(function* (
     return yield* refuse(missingGuard);
   }
 });
+
+export function makeVoiceLaunchReplay({
+  threads,
+  mapError,
+}: {
+  readonly threads: Pick<OrchestratorV2Shape, "streamStoredEventsFrom" | "getThreadRecords">;
+  readonly mapError: (
+    input: PolicyInput,
+    operation: ThreadLaunchError["operation"],
+    threadId?: ThreadId,
+  ) => (cause: unknown) => ThreadLaunchError;
+}) {
+  const assertClaim = Effect.fnUntraced(function* (
+    input: ThreadLaunchInput,
+    threadId: ThreadId,
+    claimed: OrchestratorV2DispatchResult,
+    hasLaunchReceipt: boolean,
+  ) {
+    yield* assertOrdinaryClaim({
+      claimed,
+      reuseExistingThread: input.reuseExistingThread === true,
+      hasLaunchReceipt,
+      threadId,
+      streamStoredEventsFrom: threads.streamStoredEventsFrom,
+      readError: mapError(input, "read-receipt", threadId),
+      refuse: mapError(input, "resolve-project", threadId),
+    });
+  });
+
+  const assertInitialMessageGuard = Effect.fnUntraced(function* (
+    input: PolicyInput,
+    threadId: ThreadId,
+    claimed: OrchestratorV2DispatchResult,
+    hasLaunchReceipt: boolean,
+    hasMessageReceipt: boolean,
+    messageCommandId: CommandId,
+  ) {
+    yield* assertPriorGuard({
+      enforceNoSetupScripts: input.workspaceStrategy.enforceNoSetupScripts === true,
+      hasLaunchReceipt,
+      claimed,
+      hasMessageReceipt,
+      messageCommandId,
+      threadId,
+      streamStoredEventsFrom: threads.streamStoredEventsFrom,
+      readError: mapError(input, "read-receipt", threadId),
+      refuse: mapError(input, "resolve-project", threadId),
+    });
+  });
+
+  const assertPreparation = Effect.fnUntraced(function* (
+    input: PolicyInput,
+    threadId: ThreadId,
+    runId: RunId | null,
+    replayed: boolean,
+  ) {
+    const records = yield* threads
+      .getThreadRecords(threadId, ["runs"], { runIds: runId === null ? [] : [runId] })
+      .pipe(Effect.mapError(mapError(input, "create-thread", threadId)));
+    const refuse = mapError(input, "resolve-project", threadId);
+    yield* assertPreparationGuard(
+      input.workspaceStrategy.enforceNoSetupScripts === true && replayed,
+      records.runs,
+      runId,
+      refuse,
+    );
+    const preparationRun = records.runs.find((run) => run.id === runId);
+    yield* assertOrdinaryConstraint(
+      preparationRun?.workspacePreparation?.cleanProviderConstraint,
+      refuse,
+    );
+  });
+
+  return { assertClaim, assertInitialMessageGuard, assertPreparation };
+}

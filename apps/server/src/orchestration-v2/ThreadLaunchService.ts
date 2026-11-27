@@ -69,8 +69,12 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as Orchestrator from "./Orchestrator.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
-import { makeVoiceLaunchPolicy } from "./VoiceLaunchPolicy.ts";
-import * as VoiceLaunchReplay from "./VoiceLaunchReplay.ts";
+import {
+  makeVoiceLaunchPolicy,
+  voiceExistingWorktreeFlags,
+  voiceNoScriptsFlag,
+} from "./VoiceLaunchPolicy.ts";
+import { makeVoiceLaunchReplay } from "./VoiceLaunchReplay.ts";
 import { DispatchModeLimit } from "./DispatchModeLimit.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import { isWithinRoot } from "../workspace/KnownWorkspaces.ts";
@@ -326,6 +330,7 @@ const make = Effect.gen(function* () {
     mapError,
     baseRefError: (fields) => new ThreadLaunchBaseRefError(fields),
   });
+  const voiceReplay = makeVoiceLaunchReplay({ threads, mapError });
 
   // The administrator's limit, fixed for the server's life as it is where turns start.
   const maxRuntimeMode = serverSettings.managedPolicy?.limits?.maxRuntimeMode;
@@ -734,26 +739,7 @@ const make = Effect.gen(function* () {
       } else {
         branch = yield* launchBranch(input.workspaceStrategy, project.workspaceRoot);
       }
-      if (
-        input.workspaceStrategy.type === "existing_worktree" &&
-        input.workspaceStrategy.approvedBase !== undefined
-      ) {
-        const pin = input.workspaceStrategy.approvedBase;
-        yield* voicePolicy.checkPinnedBase(input, "provision-worktree", threadId);
-        const current = yield* git
-          .resolveApprovedWorktreeBase({
-            cwd: input.workspaceStrategy.worktreePath,
-            branch: branch!,
-            acceptedCommit: pin.commit,
-          })
-          .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)));
-        if (current !== pin.commit)
-          return yield* mapError(
-            input,
-            "provision-worktree",
-            threadId,
-          )("Prepared worktree no longer matches the approved commit.");
-      }
+      yield* voicePolicy.checkExistingWorktreeApprovedBase(input, branch, threadId);
       let worktreePath =
         input.workspaceStrategy.type === "existing_worktree"
           ? input.workspaceStrategy.worktreePath
@@ -788,11 +774,7 @@ const make = Effect.gen(function* () {
             })
             .pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
         }
-        if (input.workspaceStrategy.approvedBase !== undefined) {
-          yield* checkWorktreeBase(input).pipe(
-            Effect.mapError(mapError(input, "provision-worktree", threadId)),
-          );
-        }
+        yield* voicePolicy.checkWorktreeStrategyApprovedBase(input, "provision-worktree", threadId);
         const requestedBaseRef = input.workspaceStrategy.baseRef;
         let startRef = requestedBaseRef;
         let baseRefName = input.workspaceStrategy.approvedBase?.branch ?? requestedBaseRef;
@@ -836,13 +818,7 @@ const make = Effect.gen(function* () {
               refName: startRef === "-" ? "@{-1}" : startRef,
             })
             .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId))));
-        if (!recordedBaseResolves && input.workspaceStrategy.approvedBase !== undefined) {
-          return yield* mapError(
-            input,
-            "provision-worktree",
-            threadId,
-          )("Approved base commit is unavailable.");
-        }
+        yield* voicePolicy.assertApprovedBaseResolved(input, recordedBaseResolves, threadId);
         if (!recordedBaseResolves) {
           const remoteName =
             remote?.remoteName ??
@@ -1157,9 +1133,7 @@ const make = Effect.gen(function* () {
                 projectId: input.projectId,
                 projectCwd: project.workspaceRoot,
                 worktreePath,
-                ...(input.workspaceStrategy.enforceNoSetupScripts === true
-                  ? { enforceNoSetupScripts: true }
-                  : {}),
+                ...voiceNoScriptsFlag(input.workspaceStrategy),
                 ...(tracked
                   ? {
                       observeCompletion: {
@@ -1496,15 +1470,7 @@ const make = Effect.gen(function* () {
     function* (request) {
       // Scratch has no Git repository. Normalize before folder allocation so
       // durable preparation and retries use the thread's own Scratch folder.
-      const input: ThreadLaunchInput = yield* voicePolicy.normalizeRequest(request);
-      const constraint = input.workspaceStrategy.cleanProviderConstraint;
-      if (constraint !== undefined) {
-        return yield* mapError(
-          input,
-          "resolve-project",
-        )("Clean-provider automation is retired. Start a new ordinary thread explicitly.");
-      }
-      yield* voicePolicy.assertNoScripts(input);
+      const input: ThreadLaunchInput = yield* voicePolicy.prepareLaunchRequest(request);
       yield* ProjectCloneTracker.rejectCommandsDuringClone(cloneTracker, {
         type: "thread.create",
         projectId: input.projectId,
@@ -1582,9 +1548,7 @@ const make = Effect.gen(function* () {
                   onSome: (worktreePath) => ({
                     type: "existing_worktree",
                     worktreePath,
-                    ...(input.workspaceStrategy.enforceNoSetupScripts === true
-                      ? { enforceNoSetupScripts: true }
-                      : {}),
+                    ...voiceNoScriptsFlag(input.workspaceStrategy),
                   }),
                 },
               )
@@ -1663,17 +1627,7 @@ const make = Effect.gen(function* () {
         const threadId =
           claimed.storedEvents.find((stored) => stored.event.type.startsWith("thread."))?.event
             .threadId ?? candidateThreadId;
-        const readReplayError = mapError(input, "read-receipt", threadId);
-        const refuseReplay = mapError(input, "resolve-project", threadId);
-        yield* VoiceLaunchReplay.assertOrdinaryClaim({
-          claimed,
-          reuseExistingThread: input.reuseExistingThread === true,
-          hasLaunchReceipt: Option.isSome(launchReceipt),
-          threadId,
-          streamStoredEventsFrom: threads.streamStoredEventsFrom,
-          readError: readReplayError,
-          refuse: refuseReplay,
-        });
+        yield* voiceReplay.assertClaim(input, threadId, claimed, Option.isSome(launchReceipt));
         const committedThread = yield* threads
           .getThreadShell(threadId)
           .pipe(Effect.mapError(mapError(input, "resolve-project", threadId)));
@@ -1687,17 +1641,14 @@ const make = Effect.gen(function* () {
           const messageCommandId = CommandId.make(`${input.commandId}:initial-message`);
           const messageReceipt = yield* readReceipt(input, messageCommandId);
           messageWasAlreadyAccepted = Option.isSome(messageReceipt);
-          yield* VoiceLaunchReplay.assertPriorGuard({
-            enforceNoSetupScripts: input.workspaceStrategy.enforceNoSetupScripts === true,
-            hasLaunchReceipt: Option.isSome(launchReceipt),
-            claimed,
-            hasMessageReceipt: messageWasAlreadyAccepted,
-            messageCommandId,
+          yield* voiceReplay.assertInitialMessageGuard(
+            input,
             threadId,
-            streamStoredEventsFrom: threads.streamStoredEventsFrom,
-            readError: readReplayError,
-            refuse: refuseReplay,
-          });
+            claimed,
+            Option.isSome(launchReceipt),
+            messageWasAlreadyAccepted,
+            messageCommandId,
+          );
 
           // A new thread's claim carries its first message. A reused thread, or a replayed
           // claim that carried none, takes it in a command of its own.
@@ -1744,22 +1695,11 @@ const make = Effect.gen(function* () {
           }
         }
 
-        const preparationRecords = yield* threads
-          .getThreadRecords(threadId, ["runs"], { runIds: runId === null ? [] : [runId] })
-          .pipe(Effect.mapError(mapError(input, "create-thread", threadId)));
-        yield* VoiceLaunchReplay.assertPreparationGuard(
-          input.workspaceStrategy.enforceNoSetupScripts === true &&
-            (Option.isSome(launchReceipt) ||
-              claimed.replayed === true ||
-              messageWasAlreadyAccepted),
-          preparationRecords.runs,
+        yield* voiceReplay.assertPreparation(
+          input,
+          threadId,
           runId,
-          refuseReplay,
-        );
-        const preparationRun = preparationRecords.runs.find((run) => run.id === runId);
-        yield* VoiceLaunchReplay.assertOrdinaryConstraint(
-          preparationRun?.workspacePreparation?.cleanProviderConstraint,
-          refuseReplay,
+          Option.isSome(launchReceipt) || claimed.replayed === true || messageWasAlreadyAccepted,
         );
         // Fork preparation before the full projection read; it is only part of the reply.
         const shouldSchedule = runId === null ? Option.isNone(launchReceipt) : true;
@@ -1801,9 +1741,7 @@ const make = Effect.gen(function* () {
                       type: "existing_worktree",
                       worktreePath: boundWorktreePath,
                       branch: workspaceStrategy.branch,
-                      ...(workspaceStrategy.enforceNoSetupScripts === true
-                        ? { enforceNoSetupScripts: true }
-                        : {}),
+                      ...voiceNoScriptsFlag(workspaceStrategy),
                     }
                   : workspaceStrategy;
             // The thread's link decides, as it does when preparation is retried: a request
@@ -1850,9 +1788,7 @@ const make = Effect.gen(function* () {
         return {
           threadId,
           projection,
-          ...(input.workspaceStrategy.enforceNoSetupScripts === true
-            ? { enforceNoSetupScripts: true as const }
-            : {}),
+          ...voiceNoScriptsFlag(input.workspaceStrategy),
           // An attempt that failed after claiming the thread recorded nothing, so
           // only a repeat of the final write counts as resumed.
           resumed:
@@ -1913,27 +1849,15 @@ const make = Effect.gen(function* () {
     run: OrchestrationV2ThreadProjection["runs"][number],
     workspacePreparation: ThreadLaunchWorkspaceStrategy,
   ) {
-    if (
-      workspacePreparation.type === "worktree" &&
-      workspacePreparation.approvedBase !== undefined
-    ) {
-      yield* checkWorktreeBase({
+    yield* voicePolicy.checkWorktreeStrategyApprovedBase(
+      {
+        commandId: input.commandId,
         projectId: thread.projectId,
         workspaceStrategy: workspacePreparation,
-      }).pipe(
-        Effect.mapError(
-          mapError(
-            {
-              commandId: input.commandId,
-              projectId: thread.projectId,
-              workspaceStrategy: workspacePreparation,
-            },
-            "provision-worktree",
-            input.threadId,
-          ),
-        ),
-      );
-    }
+      },
+      "provision-worktree",
+      input.threadId,
+    );
     const { messages } = yield* threads.getThreadRecords(input.threadId, ["messages"], {
       messageIds: [run.userMessageId],
     });
@@ -1947,12 +1871,7 @@ const make = Effect.gen(function* () {
               type: "existing_worktree" as const,
               worktreePath: thread.worktreePath,
               branch: thread.branch,
-              ...(workspacePreparation.approvedBase === undefined
-                ? {}
-                : { approvedBase: workspacePreparation.approvedBase }),
-              ...(workspacePreparation.enforceNoSetupScripts === true
-                ? { enforceNoSetupScripts: true }
-                : {}),
+              ...voiceExistingWorktreeFlags(workspacePreparation),
             },
             reusedWorktree: { baseRef: workspacePreparation.baseRef },
           }
