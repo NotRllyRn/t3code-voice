@@ -4,16 +4,28 @@ import {
   EnvironmentId,
   VOICE_HISTORY_CAPABILITY,
   type OrchestrationV2ShellSnapshot,
+  OrchestrationV2ThreadBoundedSnapshot,
+  OrchestrationV2ThreadDetailSnapshot,
+  type OrchestrationV2ThreadHistoryPage,
+  OrchestrationV2ThreadTranscript,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
 import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
 import { RelayConnectionTarget, type PreparedConnection } from "../connection/model.ts";
 import * as ManagedRelay from "../relay/managedRelay.ts";
 import * as RpcHttp from "../rpc/http.ts";
 import { getEnvironmentLiveVoiceUrl } from "../voice-conversation/environmentUrl.ts";
+import { fetchEnvironmentBoundedThreadSnapshot } from "./boundedThreadSnapshotHttp.ts";
+import { v2Projection } from "./orchestrationV2TestFixtures.ts";
 import { fetchEnvironmentShellSnapshot } from "./shellSnapshotHttp.ts";
+import { fetchEnvironmentThreadHistoryPage } from "./threadHistoryHttp.ts";
+import { fetchEnvironmentThreadTranscript } from "./threadTranscriptHttp.ts";
+
+const encodeBoundedSnapshot = Schema.encodeSync(OrchestrationV2ThreadBoundedSnapshot);
+const encodeThreadTranscript = Schema.encodeSync(OrchestrationV2ThreadTranscript);
 
 const TARGET = new RelayConnectionTarget({
   environmentId: EnvironmentId.make("environment-1"),
@@ -36,6 +48,28 @@ const SHELL = {
   threads: [],
   archivedThreads: [],
 } satisfies OrchestrationV2ShellSnapshot;
+const THREAD = {
+  snapshotSequence: 2,
+  projection: v2Projection,
+} satisfies OrchestrationV2ThreadDetailSnapshot;
+const TRANSCRIPT = {
+  threadId: v2Projection.thread.id,
+  title: v2Projection.thread.title,
+  updatedAt: v2Projection.updatedAt,
+  items: v2Projection.visibleTurnItems,
+} satisfies OrchestrationV2ThreadTranscript;
+const BOUNDED_THREAD = {
+  ...THREAD,
+  historyCursor: "older-page",
+  hasMoreHistory: true,
+  latestLocalTurnOrdinal: 3,
+} satisfies OrchestrationV2ThreadBoundedSnapshot;
+const THREAD_HISTORY = {
+  snapshotSequence: 2,
+  items: [],
+  nextCursor: null,
+  hasMoreHistory: false,
+} satisfies OrchestrationV2ThreadHistoryPage;
 
 function credentialRejectedResponse(reason = "invalid_credential") {
   return Response.json(
@@ -99,16 +133,53 @@ function makeHarness(reply: (requestNumber: number) => Response | Promise<Respon
   };
 }
 
+type HttpInput = ReturnType<typeof makeHarness>["input"];
+
+const ORCHESTRATION_LOADERS: ReadonlyArray<{
+  readonly name: string;
+  readonly response: unknown;
+  readonly load: (input: HttpInput) => Effect.Effect<unknown, unknown, unknown>;
+}> = [
+  {
+    name: "shell snapshot",
+    response: SHELL,
+    load: (input) => fetchEnvironmentShellSnapshot(input),
+  },
+  {
+    name: "thread transcript",
+    response: encodeThreadTranscript(TRANSCRIPT),
+    load: (input) => fetchEnvironmentThreadTranscript({ ...input, threadId: TRANSCRIPT.threadId }),
+  },
+  {
+    name: "bounded thread snapshot",
+    response: encodeBoundedSnapshot(BOUNDED_THREAD),
+    load: (input) =>
+      fetchEnvironmentBoundedThreadSnapshot({ ...input, threadId: THREAD.projection.thread.id }),
+  },
+  {
+    name: "older thread history",
+    response: THREAD_HISTORY,
+    load: (input) =>
+      fetchEnvironmentThreadHistoryPage({
+        ...input,
+        threadId: THREAD.projection.thread.id,
+        cursor: "older-page",
+      }),
+  },
+];
+
 describe("Voice environment HTTP auth", () => {
-  it.effect("sends the voice history capability header on authenticated HTTP requests", () =>
-    Effect.gen(function* () {
-      const harness = makeHarness(() => Response.json(SHELL));
-      yield* fetchEnvironmentShellSnapshot(harness.input).pipe(Effect.provide(harness.httpLayer));
-      expect(harness.calls).toHaveLength(1);
-      expect(new Headers(harness.calls[0]?.init.headers).get(CLIENT_CAPABILITIES_HEADER)).toBe(
-        VOICE_HISTORY_CAPABILITY,
-      );
-    }),
+  it.effect.each(ORCHESTRATION_LOADERS)(
+    "sends the voice history capability header on authenticated $name requests",
+    (loader) =>
+      Effect.gen(function* () {
+        const harness = makeHarness(() => Response.json(loader.response));
+        yield* loader.load(harness.input).pipe(Effect.provide(harness.httpLayer));
+        expect(harness.calls).toHaveLength(1);
+        expect(new Headers(harness.calls[0]?.init.headers).get(CLIENT_CAPABILITIES_HEADER)).toBe(
+          VOICE_HISTORY_CAPABILITY,
+        );
+      }),
   );
 
   it.effect.each([
