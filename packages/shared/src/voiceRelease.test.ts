@@ -40,7 +40,7 @@ describe("Voice release contract", () => {
         tag: "v0.1.13",
         sha: "bc0f04da94f64b5e487c598761a43b4cf06b2ac9",
       },
-      voiceRevision: 1,
+      voiceRevision: 2,
       githubPrerelease: true,
     });
   });
