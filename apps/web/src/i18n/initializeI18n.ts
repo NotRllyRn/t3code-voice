@@ -3,10 +3,16 @@ import { initializeGTSPA } from "gt-react";
 import { DEFAULT_LOCALE, SUPPORTED_LOCALES } from "./locales";
 
 // English is the source text, so it never loads a chunk.
-async function loadTranslations(locale: string): Promise<unknown> {
+export async function loadTranslations(locale: string): Promise<unknown> {
   if (locale === DEFAULT_LOCALE) return {};
-  const module: { default: unknown } = await import(`./translations/${locale}.json`);
-  return module.default;
+  const [base, voice]: [
+    { default: Record<string, unknown> },
+    { default: Record<string, unknown> },
+  ] = await Promise.all([
+    import(`./translations/${locale}.json`),
+    import(`./voice-translations/${locale}.json`),
+  ]);
+  return { ...base.default, ...voice.default };
 }
 
 /** Sets up GT's singletons. `onLocaleRequest` receives GT's own locale changes. */

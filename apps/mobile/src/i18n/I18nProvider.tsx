@@ -8,6 +8,7 @@ import { Platform, TurboModuleRegistry, View, type TurboModule } from "react-nat
 import { mobilePreferencesAtom } from "../state/preferences";
 import { DEFAULT_LOCALE, SUPPORTED_LOCALES } from "./locales";
 import { setActiveLocale } from "./messages";
+import { mergeVoiceCatalog } from "./voiceCatalogs";
 
 const FormattingLocaleContext = createContext(DEFAULT_LOCALE);
 
@@ -33,7 +34,7 @@ const CATALOGS: Readonly<Record<string, () => unknown>> = {
 initializeGT({
   defaultLocale: DEFAULT_LOCALE,
   locales: [...SUPPORTED_LOCALES],
-  loadTranslations: async (locale: string) => CATALOGS[locale]?.() ?? {},
+  loadTranslations: async (locale: string) => mergeVoiceCatalog(locale, CATALOGS[locale]?.() ?? {}),
   // Loaded catalogs never go stale; GT's default 60 s expiry would only reload the same file.
   cacheExpiryTime: null,
 });

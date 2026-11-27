@@ -29,7 +29,13 @@ for (const [app, [command, ...args]] of Object.entries(GENERATE)) {
   const appDir = NodePath.join(root, app);
   const config = readJson(NodePath.join(appDir, "gt.config.json"));
   const catalogDir = NodePath.join(appDir, NodePath.dirname(config.files.gt.output));
+  const voiceDir = NodePath.join(NodePath.dirname(catalogDir), "voice-translations");
+  const hasVoice = NodeFS.existsSync(voiceDir);
   const source: Catalog = readJson(NodePath.join(catalogDir, `${config.defaultLocale}.json`));
+  const voiceSource: Catalog = hasVoice
+    ? readJson(NodePath.join(voiceDir, `${config.defaultLocale}.json`))
+    : {};
+  const mergedSource: Catalog = { ...source, ...voiceSource };
 
   // Same scan as `vp run i18n:generate`, but it writes only the source catalog, to a temp dir.
   const tmp = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "i18n-check-"));
@@ -49,16 +55,18 @@ for (const [app, [command, ...args]] of Object.entries(GENERATE)) {
     }
     const generated: Catalog = readJson(NodePath.join(tmp, `${config.defaultLocale}.json`));
     for (const [key, text] of Object.entries(generated)) {
-      if (!Object.hasOwn(source, key)) {
+      if (!Object.hasOwn(mergedSource, key)) {
         problems.push(`${app}: ${key} ${JSON.stringify(text)} is missing from en.json`);
-      } else if (JSON.stringify(source[key]) !== JSON.stringify(text)) {
+      } else if (JSON.stringify(mergedSource[key]) !== JSON.stringify(text)) {
         problems.push(
-          `${app}: en.json has ${key} ${JSON.stringify(source[key])}, source says ${JSON.stringify(text)}`,
+          `${app}: en.json has ${key} ${JSON.stringify(mergedSource[key])}, source says ${JSON.stringify(text)}`,
         );
       }
     }
-    for (const key of missingFrom(source, generated)) {
-      problems.push(`${app}: ${key} ${JSON.stringify(source[key])} in en.json is stale`);
+    for (const key of missingFrom(voiceSource, generated)) {
+      problems.push(
+        `${app}: ${key} ${JSON.stringify(voiceSource[key])} in voice-translations/en.json is stale`,
+      );
     }
   } finally {
     NodeFS.rmSync(tmp, { recursive: true, force: true });
@@ -71,6 +79,19 @@ for (const [app, [command, ...args]] of Object.entries(GENERATE)) {
     }
     for (const key of missingFrom(catalog, source)) {
       problems.push(`${app}: ${locale}.json has ${key}, which en.json lacks`);
+    }
+    if (hasVoice) {
+      const voiceCatalog: Catalog = readJson(NodePath.join(voiceDir, `${locale}.json`));
+      for (const key of missingFrom(voiceSource, voiceCatalog)) {
+        problems.push(
+          `${app}: voice-translations/${locale}.json is missing ${key} ${JSON.stringify(voiceSource[key])}`,
+        );
+      }
+      for (const key of missingFrom(voiceCatalog, voiceSource)) {
+        problems.push(
+          `${app}: voice-translations/${locale}.json has ${key}, which voice-translations/en.json lacks`,
+        );
+      }
     }
   }
 }
