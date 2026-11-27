@@ -8,11 +8,12 @@ import * as IssueTrackerBindings from "../IssueTrackerBindings.ts";
 import { runMigrations } from "../Migrations.ts";
 
 it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
-  "104_IssueTrackerAdditionalScopes",
+  "103_IssueTrackerAdditionalScopes",
   (it) => {
     it.effect("keeps a one-team binding and saves and replaces extra teams", () =>
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
+        // IssueTrackerBindings is registered at 103 in Voice to keep ScheduledTaskGeneration at 97.
         yield* runMigrations({ toMigrationInclusive: 103 });
         yield* sql`INSERT INTO issue_tracker_bindings VALUES ('web', 'linear', 'ENG', '2026-11-21')`;
         yield* runMigrations();

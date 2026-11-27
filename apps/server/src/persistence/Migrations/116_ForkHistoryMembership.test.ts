@@ -5,7 +5,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
 
-it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))("117_ForkHistoryMembership", (it) => {
+it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))("116_ForkHistoryMembership", (it) => {
   it.effect("preserves historical boundary runs when earlier lifecycle evidence was pruned", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;

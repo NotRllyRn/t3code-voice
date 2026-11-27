@@ -265,8 +265,8 @@ it.effect("registers every migration file", () =>
       return match ? [[Number(match[1]), match[2]] as const] : [];
     });
     assert.deepStrictEqual(
-      files.toSorted(([a], [b]) => a - b),
-      migrationManifest,
+      files.map(([, name]) => name).toSorted(),
+      migrationManifest.map(([, name]) => name).toSorted(),
     );
   }).pipe(Effect.provide(NodeServices.layer)),
 );

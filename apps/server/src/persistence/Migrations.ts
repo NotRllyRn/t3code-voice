@@ -113,24 +113,25 @@ import Migration0099 from "./Migrations/099_BackgroundRecoveryIndexes.ts";
 import Migration0100 from "./Migrations/100_TurnStartReadIndexes.ts";
 import Migration0101 from "./Migrations/101_DelegatedTaskReadIndexes.ts";
 import Migration0102 from "./Migrations/102_ThreadItemCounts.ts";
-import Migration0103 from "./Migrations/103_IssueTrackerBindings.ts";
-import Migration0104 from "./Migrations/104_IssueTrackerAdditionalScopes.ts";
-import Migration0105 from "./Migrations/105_ProjectionProjectsTrackedFolders.ts";
-import Migration0106 from "./Migrations/106_TaskFolders.ts";
-import Migration0107 from "./Migrations/107_WorktreePathKeyIndex.ts";
-import Migration0108 from "./Migrations/108_DeferredSlashCommandIndex.ts";
-import Migration0109 from "./Migrations/109_AgentFeedback.ts";
-import Migration0110 from "./Migrations/110_IssueTrackerAccounts.ts";
-import Migration0111 from "./Migrations/111_Workflows.ts";
-import Migration0112 from "./Migrations/112_SupersededRunAttemptIndex.ts";
-import Migration0113 from "./Migrations/113_LayoutCommandApprovals.ts";
-import Migration0114 from "./Migrations/114_WorkflowSkippedRuns.ts";
-import Migration0115 from "./Migrations/115_WorkflowRunIndexes.ts";
-import Migration0116 from "./Migrations/116_WorkflowRunTags.ts";
-import Migration0117 from "./Migrations/117_ForkHistoryMembership.ts";
-import Migration0118 from "./Migrations/118_WorkflowMailSender.ts";
-import Migration0119 from "./Migrations/119_WorkflowPools.ts";
-import Migration0120 from "./Migrations/120_WorkflowRunSubject.ts";
+// Upstream filenames stay unmodified; registered IDs below are shifted +1 (and IssueTrackerBindings at 103) to preserve shipped Voice DB history.
+import Migration0103 from "./Migrations/097_IssueTrackerBindings.ts";
+import Migration0104 from "./Migrations/103_IssueTrackerAdditionalScopes.ts";
+import Migration0105 from "./Migrations/104_ProjectionProjectsTrackedFolders.ts";
+import Migration0106 from "./Migrations/105_TaskFolders.ts";
+import Migration0107 from "./Migrations/106_WorktreePathKeyIndex.ts";
+import Migration0108 from "./Migrations/107_DeferredSlashCommandIndex.ts";
+import Migration0109 from "./Migrations/108_AgentFeedback.ts";
+import Migration0110 from "./Migrations/109_IssueTrackerAccounts.ts";
+import Migration0111 from "./Migrations/110_Workflows.ts";
+import Migration0112 from "./Migrations/111_SupersededRunAttemptIndex.ts";
+import Migration0113 from "./Migrations/112_LayoutCommandApprovals.ts";
+import Migration0114 from "./Migrations/113_WorkflowSkippedRuns.ts";
+import Migration0115 from "./Migrations/114_WorkflowRunIndexes.ts";
+import Migration0116 from "./Migrations/115_WorkflowRunTags.ts";
+import Migration0117 from "./Migrations/116_ForkHistoryMembership.ts";
+import Migration0118 from "./Migrations/117_WorkflowMailSender.ts";
+import Migration0119 from "./Migrations/118_WorkflowPools.ts";
+import Migration0120 from "./Migrations/119_WorkflowRunSubject.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
