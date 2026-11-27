@@ -35,6 +35,13 @@ for (const [app, [command, ...args]] of Object.entries(GENERATE)) {
   const voiceSource: Catalog = hasVoice
     ? readJson(NodePath.join(voiceDir, `${config.defaultLocale}.json`))
     : {};
+  for (const key of Object.keys(voiceSource)) {
+    if (Object.hasOwn(source, key)) {
+      problems.push(
+        `${app}: ${key} in voice-translations/en.json collides with translations/en.json`,
+      );
+    }
+  }
   const mergedSource: Catalog = { ...source, ...voiceSource };
 
   // Same scan as `vp run i18n:generate`, but it writes only the source catalog, to a temp dir.
