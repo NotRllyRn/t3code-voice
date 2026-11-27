@@ -10,6 +10,7 @@ import {
   OrchestrationV2ThreadTranscript,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import type { HttpClient } from "effect/http";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
@@ -138,7 +139,9 @@ type HttpInput = ReturnType<typeof makeHarness>["input"];
 const ORCHESTRATION_LOADERS: ReadonlyArray<{
   readonly name: string;
   readonly response: unknown;
-  readonly load: (input: HttpInput) => Effect.Effect<unknown, unknown, unknown>;
+  readonly load: (
+    input: HttpInput,
+  ) => Effect.Effect<unknown, RpcHttp.RemoteEnvironmentRequestError, HttpClient.HttpClient>;
 }> = [
   {
     name: "shell snapshot",
